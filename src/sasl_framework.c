@@ -763,11 +763,11 @@ int sasl_plain_verify(const sasl_store_t *store,
         }
     }
     /* And a miss still pays one comparison, so an authcid that is not in the
-     * store is not distinguishable from one whose password is wrong. */
-    if (saw_match == 0u) {
-        dummy_used =
-            (unsigned)secret_const_time_eq(dummy, want, SASL_HASH_LEN);
-    }
+     * store is not distinguishable from one whose password is wrong. The
+     * compare runs UNCONDITIONALLY -- a hit must cost the same as a miss, so
+     * the guard that skipped it on a hit is gone and the result stays ignored. */
+    dummy_used =
+        (unsigned)secret_const_time_eq(dummy, want, SASL_HASH_LEN);
     (void)dummy_used;
     sasl_wipe(want, sizeof want);
     sasl_wipe(dummy, sizeof dummy);
