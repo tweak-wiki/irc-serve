@@ -1847,14 +1847,25 @@ int server_reap(server_t *s)
              * (conn_pump). The 2 s wq_close_at deadline below still bounds the
              * deferral, but the guarantee is not timing-only: a non-blocking
              * trylock proves no writer is inside the pump right now, and a held
-             * lock skips this tick WITHOUT touching the deadline (a draining
-             * writer is progress, not stalling). Pending is read under that
+            * lock skips this tick, arming (not resetting) the 2 s deadline
+            * (a draining writer is progress, not stalling, but the bound
+            * still runs from the first deferral). Pending is read under that
              * same hold, so check and decision cannot race the queue. The
              * trylock never blocks, so reg_mu -> wq_lock order cannot invert. */
             if (s->writer_threads > 0) {
                 size_t pending = 0;
 
                 if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+                    /* #291: arm the deadline on the first trylock skip so a
+                     * conn deferred tick after tick stops getting a fresh
+                     * 2 s bound each time its lock frees. Only the first
+                     * skip writes; expiry forces close via the normal
+                     * fall-through below once the lock is free (never
+                     * closed under a held lock: see #242 above). */
+                    if (fd >= 0 && fd < SERVER_FD_TABLE &&
+                        s->wq_close_at[fd] == 0) {
+                        s->wq_close_at[fd] = server_now_ms() + 2000u;
+                    }
                     server_writers_kick(s);
                     i++;
                     continue;
