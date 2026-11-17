@@ -148,10 +148,22 @@ int main(void)
 
     /* Advance the idle 60 s into the monotonic past. This is the whole of the
      * "advance tick 60 s" case: the formatter subtracts stamps on the same
-     * clock, so it must read exactly 60 whatever the wall clock says. */
-    target.c->last_active_ms = server_now_ms() - 60000u;
-    whois_idle(&asker, "bob", &idle, &signon);
-    TF_CHECK_MSG(idle == 60ull, "60 s of monotonic idle reports %llu, not 60", idle);
+     * clock, so it must read exactly 60 whatever the wall clock says.
+     * Unsigned backdate: on a machine booted <60 s ago server_now_ms() is
+     * smaller than the offset and the subtraction wraps (idle reports 0, not
+     * 60). Guard the precondition instead of asserting through it. */
+    {
+        uint64_t now_ms = server_now_ms();
+        TF_CHECK_MSG(now_ms > 0u, "monotonic clock returned 0");
+        if (now_ms < 61000u) {
+            printf("note: runner uptime %llus < 61 s, backdate would underflow; skipping 60 s case\n",
+                   (unsigned long long)(now_ms / 1000u));
+        } else {
+            target.c->last_active_ms = now_ms - 60000u;
+            whois_idle(&asker, "bob", &idle, &signon);
+            TF_CHECK_MSG(idle == 60ull, "60 s of monotonic idle reports %llu, not 60", idle);
+        }
+    }
 
     /* 317's <signon> is wall-clock, not part of the idle computation: it
      * must be a plausible Unix time (stamped by time() at accept), at or
