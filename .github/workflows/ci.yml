@@ -34,19 +34,17 @@ concurrency:
 # ---------------------------------------------------------------------------
 # Where the work runs, and why
 #
-# The self-hosted CachyOS runner is preferred for Linux work: it is a much
-# faster machine, its toolchain is the same one the project is developed
-# against, and it costs nothing against hosted minutes.
+# The shared tweak-ci runners are preferred for Linux work: fast machines that
+# cost nothing against hosted minutes. All repos in the org use the same
+# `[self-hosted, tweak-ci]` label set; do not invent per-repo labels.
 #
 # Three constraints shape the layout, and each is a reason the obvious
 # "move everything" version is wrong:
 #
 #   1. PARALLELISM IS SET BY RUNNER INSTANCES, NOT BY THE WORKFLOW. A runner
-#      process handles exactly one job at a time, so a single runner serialises a
-#      4-way matrix. FOUR runners are registered (cachyos-x8664-1..4) by
-#      scripts/setup-self-hosted-runner.sh, all carrying the same label, so the
-#      matrix below is picked up concurrently. Raise the instance count to raise
-#      the ceiling.
+#      process handles exactly one job at a time. Register more instances
+#      carrying the `tweak-ci` label to raise the ceiling; the matrix below is
+#      picked up concurrently up to that count.
 #
 #   2. macOS CANNOT RUN THERE. ci_macos stays on a hosted macOS runner. That is
 #      not a preference, it is the platform.
@@ -85,8 +83,8 @@ jobs:
   # about the runner at all.
   #
   # SO IT STAYS SELF-HOSTED. Moving it to ubuntu-22.04 would be a one-line
-  # change that would also quietly delete the only reason this job exists:
-  # cachyos is a rolling distribution carrying a newer glibc than the pinned
+  # change that would also quietly delete the only reason this job exists: the
+  # shared runners carry a different distro with a newer glibc than the pinned
   # ubuntu-22.04 image, and a newer glibc declares more
   # __attribute__((warn_unused_result)) and fortify paths than the older one.
   # That is precisely the class that reached main history as a red PR --
@@ -95,8 +93,8 @@ jobs:
   # here; it was not read from the machine. The claim that ubuntu-22.04's glibc
   # already catches THAT one is not a claim about versions: it is read off the
   # ci_test log at run 37242557613, which is ubuntu-22.04's own GCC reporting
-  # the diagnostic. The argument for keeping cachyos is about the NEXT one, in a
-  # function nobody thought to check.) Stating that plainly: the distro breadth
+  # the diagnostic. The argument for keeping the shared runners is about the
+  # NEXT one, in a function nobody thought to check.) Stating that plainly:
   # IS preserved by keeping it, and WOULD NOT BE by moving it, and anyone
   # reading a future commit that moves this to a hosted runner should treat that
   # as a coverage regression rather than a cleanup.
@@ -106,7 +104,7 @@ jobs:
   # excludes them, so the PR-time gate -- ci_test, hosted -- is unaffected.
   ci_linux_cachyos:
     name: ci_linux ${{ matrix.compiler }} ${{ matrix.build_type }}
-    runs-on: [self-hosted, Linux, X64, cachyos-x8664]
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 45
     environment:
       name: ${{ github.actor == 'TheFirstIstari' && 'self-hosted-auto' || 'self-hosted' }}
@@ -118,15 +116,15 @@ jobs:
     # protect by tolerating its failures, and continue-on-error bought nothing
     # -- while costing the one thing a post-merge job exists to provide, which
     # is a truthful result. Under it, a Linux-only build break found only on
-    # cachyos was reported as a GREEN TICK on main. A red push to main is
-    # information and blocks nothing; a fake green is worse than either.
+    # the shared runners was reported as a GREEN TICK on main. A red push to
+    # main is information and blocks nothing; a fake green is worse than either.
     #
-    # It is also now the only job whose result can distinguish "cachyos is
-    # healthy" from "cachyos never ran", since the job that used to be the
+    # It is also now the only job whose result can distinguish "tweak-ci is
+    # healthy" from "tweak-ci never ran", since the job that used to be the
     # merge gate for Linux is post-merge by construction.
     #
-    # Six runner instances are registered (cachyos-x8664-1..6), so this matrix
-    # runs CONCURRENTLY rather than queueing behind a single runner.
+    # Runner instances carrying the `tweak-ci` label pick this matrix up
+    # CONCURRENTLY rather than queueing behind a single runner.
     # Measured: `gcc Release` and `clang Debug` completed in 19s each, at the
     # same time, on the same box.
     # See scripts/setup-self-hosted-runner.sh and scripts/actions-runner@.service.
@@ -163,16 +161,16 @@ jobs:
           # NOT $(nproc). Four matrix jobs land on this box at once, so asking each
           # for every core asks for 128 compiler processes on 32 cores. That is
           # 4x oversubscribed, and it is why ci_linux clang Debug failed in CI
-          # while passing 56/56 in 8.78s when run alone on the same machine
-          # (measured on cachyos-x8664). Divide instead: four jobs, so each gets a
-          # quarter of the cores.
+          # while passing 56/56 in 8.78s when run alone on the same class of
+          # machine (measured on the old cachyos-x8664 host). Divide instead:
+          # four jobs, so each gets a quarter of the cores.
           cmake --build build --parallel "$(( $(nproc) / 4 ))"
           ctest --test-dir build --output-on-failure --timeout 60 -j 2
 
-  # --- Independent merge gate: hosted, so it works when the runner is off ---
+  # --- Independent merge gate: hosted, so it works when the runners are off ---
   # Deliberately small and deliberately hosted. This is the check that keeps a
-  # merge possible when cachyos-x8664 is offline, and the one Linux result that
-  # is not produced by the maintainer's own machine.
+  # merge possible when the shared runners are offline, and the one Linux result
+  # that is not produced by the maintainer's own machine.
   ci_test:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -826,7 +824,7 @@ jobs:
     # in seconds. Hosted added only queue time. (Sanitizers stay hosted: they
     # are required checks, and required checks must not depend on a machine
     # that can be switched off -- header constraint 3.)
-    runs-on: [self-hosted, Linux, X64, cachyos-x8664]
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -999,7 +997,7 @@ jobs:
   # a debian:bookworm this project builds by hand. Running it on a hosted image
   # would mean rebuilding that image on every run and would then be measuring a
   # DIFFERENT image's ASan while the file's whole claim is about this one.
-  # cachyos-x8664 already runs ci_linux, already has the image, and already has
+  # tweak-ci already runs ci_linux, already has the image, and already has
   # docker. The exposure note in this file's header applies unchanged: anything
   # that reaches this runner executes code there, which is why the environment
   # below is the same one ci_linux_cachyos uses and why the schedule is the
@@ -1015,7 +1013,7 @@ jobs:
   # after one: it is how a change to the options gets proven before it lands.
   ci_teeth_linux:
     name: ci_teeth_linux (nightly)
-    runs-on: [self-hosted, Linux, X64, cachyos-x8664]
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 60
     environment:
       name: ${{ github.actor == 'TheFirstIstari' && 'self-hosted-auto' || 'self-hosted' }}
