@@ -545,11 +545,11 @@ int account_store_verify(const account_store_t *store, const char *name,
         }
     }
     /* A miss still pays one comparison, so an account that is not in the registry
-     * is not distinguishable by timing from one whose password is wrong. */
-    if (saw_match == 0u) {
-        dummy_used =
-            (unsigned)secret_const_time_eq(dummy, want, ACCOUNT_HASH_LEN);
-    }
+     * is not distinguishable by timing from one whose password is wrong. The
+     * compare runs UNCONDITIONALLY -- a hit must cost the same as a miss, so
+     * the guard that skipped it on a hit is gone and the result stays ignored. */
+    dummy_used =
+        (unsigned)secret_const_time_eq(dummy, want, ACCOUNT_HASH_LEN);
     (void)dummy_used;
     account_wipe(want, sizeof want);
     account_wipe(dummy, sizeof dummy);

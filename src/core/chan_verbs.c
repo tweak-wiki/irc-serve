@@ -2344,12 +2344,12 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         fwd[0] = m->params[1];
         if (mask != NULL && mask[0] != '\0') {
             if (strlen(mask) > (size_t)CHAN_MAX_BAN) {
-                /* NOT FORWARDED, AND SAID SO. The origin refuses a mask longer than
-                 * its own bound, and a node that quietly shortened its way inside
-                 * that bound would be answering for a change the origin never
-                 * accepted. The record is inside this branch rather than after both
-                 * of them, so `forwarded=1` on the other line means the STRIPPED
-                 * value went on the wire. */
+                /* NOT FORWARDED, AND SAID SO -- to the client, not just the log.
+                 * The owned path answers 417 for the same condition (:2060), and
+                 * a forwarding node that stayed silent left the client waiting
+                 * for a change the origin would refuse (#273). */
+                (void)reply_refused(s, c, "MODE", NULL, "417", NULL, 0,
+                                    "Input line was too long");
                 printf("[observable] chan_mode_forward: channel=%s nick=%s modes=%s "
                        "in_len=%zu kept_len=0 forwarded=0 reason=MASK_TOO_LONG\n",
                        ch->name, c->nick, m->params[1], strlen(mask));
