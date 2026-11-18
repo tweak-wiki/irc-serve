@@ -903,7 +903,22 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * spin on: it breaks, which is what the old `break` on a non-EINTR error
              * did. The loop's own bound is unchanged, so the cost of this path on a
              * plaintext mesh is one function call per pending chunk on a path that runs
-             * once per process. */
+             * once per process.
+             *
+             * MT 3.1 (#290): THIS DRAIN RUNS UNDER c->wq_lock, and that is the
+             * fix rather than decoration. transport_recv() on a TLS link is
+             * SSL_read on the conn's SSL*, and OpenSSL forbids concurrent use
+             * of one SSL* -- so at N > 0 a writer's SSL_write on the same conn
+             * would race this call and corrupt the SSL state or crash inside
+             * libssl. conn_fill() and conn_pump() already hold wq_lock across
+             * their transport calls (connection.c, caller-holds contract); this
+             * drain is the third transport_recv site and holds the same lock.
+             * NO DEADLOCK: the loop breaks on TRANSPORT_RETRY, so it never
+             * waits on a writer, and the only caller is server_shutdown(),
+             * which holds neither wq_lock nor reg_mu here (writers are stopped
+             * AFTER, and the order reg_mu -> wq_lock is never inverted because
+             * this site takes wq_lock alone). */
+            pthread_mutex_lock(&c->wq_lock);
             {
                 char sink[512];
                 size_t drained = 0u;
@@ -944,6 +959,7 @@ int fed_send_shutdown(server_t *s, const char *reason)
                            s->name, s->links[i].name, drained);
                 }
             }
+            pthread_mutex_unlock(&c->wq_lock);
         } else {
             printf("[observable] fed_shutdown_send_failed: self=%s peer=%s reason=%s\n",
                    s->name, s->links[i].name, fed_queue_why_name(why));
