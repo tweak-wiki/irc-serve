@@ -191,24 +191,21 @@ int main(void)
         message_free(&m);
     }
     {
-        /* A non-final param that cannot be represented is refused, not
-         * silently reshaped. */
+        /* A non-final param that cannot be represented is refused by the
+         * build, not silently reshaped. *out stays zeroed. */
         const char *const params[] = { "a b", "c" };
-        assert(message_build(&m, NULL, NULL, "PRIVMSG", params, 2) == 0);
-        out[0] = 'X';
-        assert(message_format(&m, out, sizeof out) == 0);
-        assert(out[0] == '\0');
-        message_free(&m);
+        memset(&m, 0xA5, sizeof m);
+        assert(message_build(&m, NULL, NULL, "PRIVMSG", params, 2) == -1);
+        assert(m.command == NULL);
+        assert(m.raw == NULL);
 
         const char *const params2[] = { ":early", "c" };
-        assert(message_build(&m, NULL, NULL, "PRIVMSG", params2, 2) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, NULL, "PRIVMSG", params2, 2) == -1);
+        assert(m.command == NULL);
 
         const char *const params3[] = { "", "c" };
-        assert(message_build(&m, NULL, NULL, "PRIVMSG", params3, 2) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, NULL, "PRIVMSG", params3, 2) == -1);
+        assert(m.command == NULL);
     }
     {
         /* A 15th param is colonned when it holds a separator, and bare when it
@@ -231,45 +228,39 @@ int main(void)
         message_free(&m);
     }
 
-    /* --- the formatter can never emit a line break, whatever the caller built
-     * ---. This is the line-injection defence, and it lives at the seam. */
+    /* --- the constructor never holds a line break, whatever the caller
+     * passed ---. This is the line-injection defence, now at the seam's
+     * front door: build refuses what format would refuse. */
     {
         const char *const params[] = { "#c", "a\rb" };
-        assert(message_build(&m, NULL, NULL, "PRIVMSG", params, 2) == 0);
-        out[0] = 'X';
-        assert(message_format(&m, out, sizeof out) == 0);
-        assert(out[0] == '\0');
-        message_free(&m);
+        memset(&m, 0xA5, sizeof m);
+        assert(message_build(&m, NULL, NULL, "PRIVMSG", params, 2) == -1);
+        assert(m.command == NULL);
+        assert(m.raw == NULL);
 
         const char *const nparams[] = { "#c", "a\nb" };
-        assert(message_build(&m, NULL, NULL, "PRIVMSG", nparams, 2) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, NULL, "PRIVMSG", nparams, 2) == -1);
+        assert(m.command == NULL);
 
-        assert(message_build(&m, NULL, "irc.a\rb", "PING", NULL, 0) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, "irc.a\rb", "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
 
-        assert(message_build(&m, NULL, NULL, "PI\nNG", NULL, 0) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, NULL, "PI\nNG", NULL, 0) == -1);
+        assert(m.command == NULL);
 
         /* A tag block containing a separator would break the framing. */
-        assert(message_build(&m, "a=1 2", NULL, "PING", NULL, 0) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, "a=1 2", NULL, "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
         /* And so would a tag block that already carries the '@'. */
-        assert(message_build(&m, "@a=1", NULL, "PING", NULL, 0) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, "@a=1", NULL, "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
         /* An empty prefix string is treated as no prefix, not as ":". */
         assert(message_build(&m, NULL, "", "PING", NULL, 0) == 0);
         assert_format(&m, "PING");
         message_free(&m);
         /* A prefix already starting with ':' would be re-prefixed wrongly. */
-        assert(message_build(&m, NULL, ":irc.a", "PING", NULL, 0) == 0);
-        assert(message_format(&m, out, sizeof out) == 0);
-        message_free(&m);
+        assert(message_build(&m, NULL, ":irc.a", "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
     }
 
     /* --- capacity: refused, never truncated, and never partially written --- */
