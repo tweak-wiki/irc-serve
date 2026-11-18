@@ -2263,6 +2263,41 @@ static void expect_sasl_store_hashes_passwords(void)
                  "an unknown authcid verified");
     sasl_store_free(store);
 }
+/* ---------------------------------------------------------------------------
+ * THE DUMMY COMPARE RUNS ON A HIT TOO (#271)
+ * ---------------------------------------------------------------------------
+ * Hit and miss must pay the same compare count, so the dummy compare in both
+ * verify paths runs unconditionally and its result stays ignored. The `if`
+ * this replaced is invisible at runtime -- hit still verifies, miss still
+ * does not -- so only a shape check fails if it comes back: no
+ * `if (saw_match ...)` guard may remain, and the `secret_const_time_eq(dummy`
+ * call must still be there. `saw_match` appears nowhere else in either file,
+ * so a whole-file search is the function-body search. */
+static void expect_dummy_compare_is_unconditional(void)
+{
+    static const char *const files[] = {
+        "src/sasl_framework.c",
+        "src/account_store.c",
+    };
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+        static char code[TF_SRC_MAX];
+        size_t len = 0;
+        long got = tf_read_code_into(code, sizeof code, files[i], &len);
+
+        TF_CHECK_MSG(got >= 0, "could not read %s", files[i]);
+        if (got < 0) {
+            continue;
+        }
+        TF_CHECK_MSG(strstr(code, "if (saw_match") == NULL
+                     && strstr(code, "if(saw_match") == NULL,
+                     "%s still guards the dummy compare on saw_match; "
+                     "a hit must cost the same compare as a miss", files[i]);
+        TF_CHECK_MSG(strstr(code, "secret_const_time_eq(dummy") != NULL,
+                     "%s lost the dummy compare entirely; a miss must still "
+                     "pay one comparison", files[i]);
+    }
+}
+
 
 /* ==========================================================================
  * TEETH, AND WHERE THEY WERE INJECTED
@@ -2443,6 +2478,7 @@ int main(void)
     /* ---- the rules no wire sequence can reach, asserted on return values ---- */
     expect_account_set_refuses();
     expect_sasl_store_hashes_passwords();
+    expect_dummy_compare_is_unconditional();
     expect_the_tag_charge_is_real();
 
     /* ---- the positive case, first: everything below is a contrast with it -- */
