@@ -860,7 +860,9 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * here unchanged (this site takes wq_lock alone, writers are
              * joined only after). N = 0 is unchanged: an uncontended lock. */
             pthread_mutex_lock(&c->wq_lock);
-            (void)conn_pump_locked(c);
+            if (conn_pump_locked(c) < 0) {
+                conn_mark_closing(c);
+            }
             /* THE DRAIN, AND IT IS WHAT MAKES THE GOODBYE SURVIVE ITS OWN CLOSE.
              *
              * server_shutdown() closes this socket a few lines of C later, and a
