@@ -1066,8 +1066,10 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
      * pair them with the wrong one. It is applied at the COMMIT rather than here,
      * because a burst that never commits changed nothing and a link's epoch must
      * not move on a transaction that was thrown away. */
-    (void)shadow_charge(s, "BEGIN_TOO_LARGE", wire_size(link->name, "SBURST",
-                                                        m->params, 2));
+    if (shadow_charge(s, "BEGIN_TOO_LARGE", wire_size(link->name, "SBURST",
+                                                       m->params, 2)) != 0) {
+        return -1;
+    }
     return 0;
 }
 
