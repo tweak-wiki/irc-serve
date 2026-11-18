@@ -217,6 +217,10 @@ irc_add_integration_test(test_flood_rate test_flood_rate.c)
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
 irc_add_integration_test(test_close_handoff test_close_handoff.c)
 
+# MT 3.1 (#290): the shutdown drain serializes under wq_lock -- TLS peer
+# link, N=4, shutdown while the peer streams. No TSan race, no crash.
+irc_add_integration_test(test_shutdown_drain test_shutdown_drain.c)
+
 # 3.4: the reaper is the only close site, and a closed slot leaves nothing
 # behind. The structural half is the test below.
 irc_add_integration_test(test_reaper_close test_reaper_close.c)
