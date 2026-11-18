@@ -294,11 +294,10 @@ void conn_want(conn_t *c, int read, int write)
     atomic_store_explicit(&c->want_write, write ? 1 : 0, memory_order_release);
 }
 
-int conn_pump(conn_t *c)
+int conn_pump_locked(conn_t *c)
 {
     int rc = 0;
 
-    pthread_mutex_lock(&c->wq_lock);
     /* MT 2.1: loop still calls queue/pump single-threaded; lock changes nothing. */
     for (;;) {
         size_t pending = c->wlen - c->woff;
@@ -353,6 +352,15 @@ int conn_pump(conn_t *c)
         }
     }
 out:
+    return rc;
+}
+
+int conn_pump(conn_t *c)
+{
+    int rc;
+
+    pthread_mutex_lock(&c->wq_lock);
+    rc = conn_pump_locked(c);
     pthread_mutex_unlock(&c->wq_lock);
     return rc;
 }
