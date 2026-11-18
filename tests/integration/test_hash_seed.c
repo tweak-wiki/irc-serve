@@ -39,33 +39,46 @@ static conn_t *seed_conn(int fd, const char *nick)
 static void seed_bulk(server_t *s, const char *what)
 {
     char nick[IRC_MAX_NICK + 1];
+    conn_t *conns[SEED_BULK];
     size_t i;
     size_t claimed = 0;
 
     for (i = 0; i < SEED_BULK; i++) {
-        conn_t *c;
-
         snprintf(nick, sizeof nick, "seed%04u", (unsigned)i);
-        c = seed_conn(300 + (int)i, nick);
-        if (server_nick_claim(s, nick, c) == 0) {
-            claimed++;
+        conns[i] = seed_conn(300 + (int)i, nick);
+        if (server_nick_claim(s, nick, conns[i]) != 0) {
+            conn_free(conns[i]);
+            conns[i] = NULL;
         } else {
-            conn_free(c);
+            claimed++;
         }
     }
     TF_CHECK_MSG(claimed > 0, "%s: no nick claimed at all", what);
     for (i = 0; i < SEED_BULK; i++) {
-        conn_t *found;
-
         snprintf(nick, sizeof nick, "seed%04u", (unsigned)i);
-        found = server_nick_lookup(s, nick);
-        if (found != NULL) {
-            TF_CHECK_MSG(found->nick[0] != '\0', "%s: empty nick", what);
+        if (conns[i] != NULL) {
+            TF_CHECK_MSG(server_nick_lookup(s, nick) == conns[i],
+                         "%s: '%s' does not resolve to its holder",
+                         what, nick);
         }
     }
     TF_CHECK_MSG(server_nick_count(s) == claimed,
                  "%s: enumeration holds %zu, table holds %zu",
                  what, server_nick_count(s), claimed);
+    /* Drain: release every name, then free every conn. server_shutdown()
+     * owns only by_fd-registered conns; these were never registered, so
+     * leaving them claimed leaks under LSan. */
+    for (i = 0; i < SEED_BULK; i++) {
+        if (conns[i] == NULL) {
+            continue;
+        }
+        snprintf(nick, sizeof nick, "seed%04u", (unsigned)i);
+        server_nick_release(s, nick);
+        conn_free(conns[i]);
+    }
+    TF_CHECK_MSG(server_nick_count(s) == 0,
+                 "%s: the drain left %zu entries enumerated",
+                 what, server_nick_count(s));
 }
 
 int main(void)
