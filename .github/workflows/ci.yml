@@ -741,14 +741,16 @@ jobs:
   # --- ThreadSanitizer cell (MT wave 1, #237) ---------------------------------
   # TSan only: mutually exclusive with the ASan+UBSan build above (the CMake
   # option refuses both at once). Linux-only -- TSan needs pthreads and a
-  # supported toolchain, and the hosted runner has both.
+  # supported toolchain. Self-hosted (advisory, not required): it runs the full
+  # suite under TSan, which is the heaviest single job here, and the shared
+  # runners finish it in minutes instead of queueing behind hosted.
   #
   # The --writers 4 half of this cell's name lands with #240: the binary
   # rejects unknown flags today, so the cell runs the suite under TSAN_OPTIONS
   # (halt_on_error=1, so a race fails the run instead of printing past it).
   ci_tsan:
     name: ci_tsan (ThreadSanitizer)
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 40
     permissions:
       contents: read
