@@ -28,7 +28,10 @@ add_executable(test_hs_deadline test_hs_deadline.c)
 # loop -- because the claim is about module state, and module state is
 # observable without a wire.
 add_executable(test_fed_isolation test_fed_isolation.c)
-# MT 1.5 (issue #239): per-node stop flag -- two nodes, stop one, other runs.
+# Issue #325: the two secret wipes -- node_main.c's argv slot after fed_open()
+# copies it, and fed_close()'s full-buffer volatile scrub. A unit test, same
+# as FedIsolation: both claims are about process memory.
+add_executable(test_secret_wipe test_secret_wipe.c)
 add_executable(test_stop_flag test_stop_flag.c)
 
 target_link_libraries(test_federate_handshake PRIVATE irc_core)
@@ -36,12 +39,14 @@ target_link_libraries(test_heartbeat PRIVATE irc_core)
 target_link_libraries(test_nick_policy PRIVATE irc_core)
 target_link_libraries(test_hs_deadline PRIVATE irc_core)
 target_link_libraries(test_fed_isolation PRIVATE irc_core)
+target_link_libraries(test_secret_wipe PRIVATE irc_core)
 target_link_libraries(test_stop_flag PRIVATE irc_core)
 add_test(NAME FederateHandshake COMMAND test_federate_handshake)
 add_test(NAME Heartbeat COMMAND test_heartbeat)
 add_test(NAME NickPolicy COMMAND test_nick_policy)
 add_test(NAME HsDeadline COMMAND test_hs_deadline)
 add_test(NAME FedIsolation COMMAND test_fed_isolation)
+add_test(NAME SecretWipe COMMAND test_secret_wipe)
 add_test(NAME StopFlag COMMAND test_stop_flag)
 
 set_tests_properties(FederateHandshake PROPERTIES LABELS Federation)
@@ -49,6 +54,7 @@ set_tests_properties(Heartbeat PROPERTIES LABELS Federation)
 set_tests_properties(NickPolicy PROPERTIES LABELS Federation)
 set_tests_properties(HsDeadline PROPERTIES LABELS Federation)
 set_tests_properties(FedIsolation PROPERTIES LABELS Federation)
+set_tests_properties(SecretWipe PROPERTIES LABELS Federation)
 set_tests_properties(StopFlag PROPERTIES LABELS Federation)
 
 # ---------------------------------------------------------------------------

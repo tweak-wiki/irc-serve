@@ -652,8 +652,15 @@ typedef struct {
     const char *user;
     int         have_user;
     const char *secret;
-    const char *secret_file;
+    /* The argv slot --secret's value came from, or NULL. The wipe after
+     * fed_open() mutates THROUGH this pointer, so it is a `char *` while
+     * `secret` stays a `const char *`: storing the slot here at parse time
+     * keeps the wipe free of a const-dropping cast (-Wcast-qual is in the
+     * warning set on purpose). NULL unless --secret was given, and never the
+     * --secret-file path. */
+    char *secret_argv;
     int have_secret;
+    const char *secret_file;
     /* The SASL credential store, or NULL. NULL is the DEFAULT and it means "this
      * node authenticates nobody", which is why it is a NULL and not an empty
      * path: a node that was handed a path it cannot read must be visibly
@@ -812,7 +819,7 @@ static int parse_args(int argc, char **argv, node_opts_t *o)
     opts_defaults(o);
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
-        const char *value = NULL;
+        char *value = NULL;
 
         if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
             return 1;
@@ -888,6 +895,7 @@ static int parse_args(int argc, char **argv, node_opts_t *o)
             o->have_user = 1;
         } else if (strcmp(arg, "--secret") == 0) {
             o->secret = value;
+            o->secret_argv = value;
             o->have_secret = 1;
         } else if (strcmp(arg, "--secret-file") == 0) {
             if (value[0] == '\0') {
@@ -1411,13 +1419,35 @@ int main(int argc, char **argv)
             secret_state = "set";
         }
         rc = fed_open(&srv, opts.secret);
-        /* fed_open() copied the secret, so the file's buffer must not outlive
-         * it -- wiped HERE, before the verdict is checked, so the failure
-         * path needs no second copy of it. Volatile, so the wipe is not
-         * optimised away. */
+        /* fed_open() copied the secret, so the buffers it came from must not
+         * outlive it -- wiped HERE, before the verdict is checked, so the
+         * failure path needs no second copy of either. The file's buffer is
+         * always wiped, exactly as before. The argv slot is wiped only when
+         * the secret came from --secret: it is the operator's command line,
+         * visible in `ps` to every local user, and only the bytes the secret
+         * occupied (strlen, bounded by the slot) -- never the argv pointer
+         * itself, and never --secret-file's path. Volatile, so the wipe is
+         * not optimised away. */
         wipe = file_secret;
         for (k = 0; k < sizeof file_secret; k++) {
             wipe[k] = 0;
+        }
+        /* Only the slot --secret's value came from: secret_argv is NULL for
+         * the default and for --secret-file, so neither the empty default
+         * nor the file's PATH is touched. The scan stops at the NUL, so at
+         * most the bytes the secret occupied are cleared -- the slot is a
+         * whole argv element and the secret filled it exactly, which is why
+         * a strlen-bounded wipe cannot touch a neighbour. */
+        if (opts.secret_argv != NULL) {
+            volatile char *slot = opts.secret_argv;
+            size_t n = 0;
+
+            while (n < (size_t)IRC_FED_MAX_SECRET && slot[n] != '\0') {
+                n++;
+            }
+            for (k = 0; k < n; k++) {
+                slot[k] = 0;
+            }
         }
         if (rc != 0) {
             printf("[observable] server init failed: name=%s "
