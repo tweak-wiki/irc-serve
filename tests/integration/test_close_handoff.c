@@ -3,10 +3,11 @@
  * At N > 0 the writers own conn_pump() under each conn's wq_lock, and the
  * reaper's close()+free() must not run while a writer holds that lock
  * mid-drain. The guarantee is structural, not timing-only: server_reap()
- * takes wq_lock with trylock, and a held lock skips the conn this tick
- * WITHOUT touching the 2 s wq_close_at deadline (a draining writer is
- * progress, not stalling). The deadline still bounds the deferral for a peer
- * that never reads.
+ * takes wq_lock with trylock, and a held lock skips the conn this tick. The
+ * skip arms (never resets) the 2 s wq_close_at deadline (#291), so a conn
+ * deferred tick after tick still closes once the lock frees and the bound
+ * has run out. The deadline still bounds the deferral for a peer that never
+ * reads.
  *
  * In-process and deterministic: no writers are started (writer_threads > 0 is
  * what arms the reaper path; the kick is a no-op with no pool). The test holds
@@ -63,31 +64,32 @@ int main(void)
                  "reaper closed a conn while wq_lock was held by a writer");
     TF_CHECK_MSG(server_conn(&s, fd) == c,
                  "reaper detached a conn while wq_lock was held");
-    /* The deadline must not have moved: a held lock is progress, and the
-     * skip above must leave wq_close_at alone so a slow drain keeps its
-     * full bound. Zero means the trylock skip fired before any deadline
-     * write, which is the ordering the handoff requires. */
-    TF_CHECK_MSG(s.wq_close_at[fd] == 0,
-                 "trylock skip touched the deadline (wq_close_at=%llu)",
+    /* #291: the first trylock skip arms the deadline (runs from the first
+     * deferral); later skips must not reset it. */
+    TF_CHECK_MSG(s.wq_close_at[fd] != 0,
+                 "trylock skip left no deadline behind");
+    /* --- past the deadline but the writer is still inside: still skipped.
+     * The structural guarantee (#242) outranks the bound; expiry forces
+     * close only via the normal fall-through once the lock is free. --- */
+    s.wq_close_at[fd] = 1;
+    TF_CHECK_MSG(server_reap(&s) == 0,
+                 "reaper closed a conn while wq_lock was held past deadline");
+    TF_CHECK_MSG(server_conn(&s, fd) == c,
+                 "reaper detached a conn while wq_lock was held past deadline");
+    /* Second skip must not reset the armed bound. */
+    TF_CHECK_MSG(s.wq_close_at[fd] == 1,
+                 "trylock skip reset the deadline (wq_close_at=%llu)",
                  (unsigned long long)s.wq_close_at[fd]);
     TF_CHECK_MSG(pthread_mutex_unlock(&c->wq_lock) == 0, "unlock failed");
 
-    /* --- lock free but bytes still queued: deadline deferral, still alive --- */
-    TF_CHECK_MSG(server_reap(&s) == 0,
-                 "reaper closed a CLOSING conn with pending bytes inside "
-                 "its deadline");
-    TF_CHECK_MSG(server_conn(&s, fd) == c,
-                 "reaper detached a conn with pending bytes inside its deadline");
-    TF_CHECK_MSG(s.wq_close_at[fd] != 0,
-                 "pending deferral left no deadline behind");
-
-    /* --- deadline expired: the bound holds, the conn finally closes --- */
-    s.wq_close_at[fd] = 1;
+    /* --- lock free and deadline expired: the bound holds, conn closes --- */
     TF_CHECK_MSG(server_reap(&s) == 1,
                  "reaper did not close past the deadline");
     TF_CHECK_MSG(server_conn(&s, fd) == NULL,
                  "closed conn still registered");
+    TF_CHECK_MSG(s.by_fd[fd] == NULL, "by_fd not cleared on close");
     TF_CHECK_MSG(s.nactive == 0, "nactive=%zu after close", s.nactive);
+
 
     close(pair[1]);
     server_shutdown(&s);
