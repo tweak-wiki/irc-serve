@@ -299,10 +299,10 @@ void message_free(message_t *m);
  * of 3.2 true for constructed messages as well as parsed ones. `params` may
  * be NULL when nparams is 0.
  *
- * A constructed message may hold a param the wire cannot represent (a space
- * in a non-final param, for instance). message_build() does not police that;
- * message_format() reports it, so there is exactly one place that decides
- * what is representable. */
+ * Refuses what message_format() would refuse -- CR or LF in any field, a tag
+ * block holding SP/HTAB/CR/LF or starting with '@', a ':'-leading or
+ * CR/LF-holding prefix, and a param the wire cannot carry in that
+ * position -- so no constructed message needs the renderer to catch it. */
 int message_build(message_t *out,
                   const char *tags,
                   const char *prefix,
