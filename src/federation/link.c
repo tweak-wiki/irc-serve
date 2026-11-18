@@ -43,6 +43,19 @@
 #if FED_RESULT_COUNT != IRC_FED_REJECT_REASONS
 #error "link.c's FED_RESULT_COUNT and server.h's IRC_FED_REJECT_REASONS disagree"
 #endif
+/* Wipe `n` bytes at `p`. Written through a volatile pointer for the same reason
+ * account_store.c's account_wipe() and sasl_framework.c's sasl_wipe() are: a
+ * memset() to memory that stays live is a store the compiler may prove dead
+ * and delete. */
+static void link_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        v[i] = 0u;
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * Module state, and what it is allowed to hold (issue #173)
@@ -2007,8 +2020,6 @@ int fed_open(server_t *s, const char *secret)
  * the unwrap only touches the dispatch seam. */
 void fed_close(server_t *s)
 {
-    size_t i;
-
     if (s == NULL || s->fed_opened == 0) {
         return;
     }
@@ -2017,9 +2028,7 @@ void fed_close(server_t *s)
     }
     s->fed_inner = NULL;
     s->fed_opened = 0;
-    for (i = 0; i < sizeof s->fed_secret; i++) {
-        s->fed_secret[i] = 0;
-    }
+    link_wipe(s->fed_secret, sizeof s->fed_secret);
     s->fed_secret_len = 0;
 }
 
