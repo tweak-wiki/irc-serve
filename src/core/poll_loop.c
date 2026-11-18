@@ -186,7 +186,9 @@ static void conn_readable(server_t *s, conn_t *c)
                  * defers close until writers drain it (see server_reap). */
                 need_flush = (s->writer_threads <= 0);
                 if (need_flush) {
-                    (void)conn_pump(c);
+                    if (conn_pump(c) < 0) {
+                        conn_mark_closing(c);
+                    }
                 } else {
                     server_writers_kick(s);
                 }
