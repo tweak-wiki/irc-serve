@@ -1266,6 +1266,10 @@ int conn_queue(conn_t *c, const char *data, size_t len);
  * plaintext connection the empty pass is a call the plaintext transport answers
  * without touching the descriptor, so the ordinary path is unchanged. */
 int conn_pump(conn_t *c);
+/* Same as conn_pump(), but the caller already holds c->wq_lock (the MT 3.2
+ * shutdown path holds it across the pump AND the drain so no writer can use
+ * the SSL* between the two). MUST NOT be called without the lock. */
+int conn_pump_locked(conn_t *c);
 
 /* Publish this connection's readiness intent: poll() must include POLLIN when
  * `read`, POLLOUT when `write`.

@@ -136,12 +136,12 @@ int main(void)
     }
     /* STRUCTURAL HALF, and it is needed because the runtime half above cannot
      * observe the race on this build: ci_tsan is WITH_TLS=OFF, so no SSL*
-     * exists to corrupt, and an unlocked drain passes the runtime sequence
-     * (verified by stashing the fix). The property is a property of the
-     * code's shape -- the drain's transport_recv runs under c->wq_lock -- so
-     * looking is the check, the same move test_close_sites.c makes. find the
-     * drain in fed_send_shutdown() and require a wq_lock lock between the
-     * function and the drain loop and an unlock after the block. */
+     * exists to corrupt, and an unlocked pump-and-drain passes the runtime
+     * sequence (verified by stashing the fix). The property is a property of
+     * the code's shape -- the pump AND the drain run under one c->wq_lock
+     * hold -- so looking is the check, the same move test_close_sites.c
+     * makes. Find fed_send_shutdown() and require one wq_lock lock ABOVE the
+     * pump that covers the drain, and one unlock after the drain block. */
     {
         char code[TF_SRC_MAX];
         size_t len = 0;
@@ -168,6 +168,16 @@ int main(void)
                      "transport_recv on a TLS link is SSL_read, and at N > 0 "
                      "a writer's SSL_write on the same SSL* without the "
                      "caller-holds lock is corruption or a crash (#290)");
+        { /* MT 3.2 (#326): the pump joins the drain under the SAME hold. */
+            const char *pump = strstr(fn, "conn_pump_locked(c)");
+
+            TF_CHECK_MSG(pump != NULL && lock != NULL && lock < pump &&
+                             pump < drain,
+                         "the shutdown PUMP does not run under c->wq_lock: "
+                         "at N > 0 a writer's SSL_write on the same SSL* "
+                         "races the pump's SSL_write with no serialization "
+                         "(#326)");
+        }
         unlock = strstr(drain, "pthread_mutex_unlock(&c->wq_lock)");
         TF_CHECK_MSG(unlock != NULL,
                      "the shutdown drain takes c->wq_lock and never releases "

@@ -863,7 +863,17 @@ int fed_send_shutdown(server_t *s, const char *reason)
         ok = fed_queue_line(s, c, &tags, s->name, "SHUTDOWN", NULL, 0, &why);
         if (ok == 0) {
             sent++;
-            (void)conn_pump(c);
+            /* MT 3.2 (#326): THE PUMP JOINS THE DRAIN UNDER c->wq_lock, and the
+             * lock below covers BOTH transport calls. conn_pump() takes the
+             * lock itself, so this site calls the _locked variant: at N > 0 a
+             * writer's SSL_write on the same conn would otherwise race this
+             * pump's SSL_write (and the drain's SSL_read) with no
+             * serialization, corrupting the SSL* or truncating the goodbye.
+             * The drain's own comment carries the lock-order argument; it holds
+             * here unchanged (this site takes wq_lock alone, writers are
+             * joined only after). N = 0 is unchanged: an uncontended lock. */
+            pthread_mutex_lock(&c->wq_lock);
+            (void)conn_pump_locked(c);
             /* THE DRAIN, AND IT IS WHAT MAKES THE GOODBYE SURVIVE ITS OWN CLOSE.
              *
              * server_shutdown() closes this socket a few lines of C later, and a
@@ -931,7 +941,6 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * which holds neither wq_lock nor reg_mu here (writers are stopped
              * AFTER, and the order reg_mu -> wq_lock is never inverted because
              * this site takes wq_lock alone). */
-            pthread_mutex_lock(&c->wq_lock);
             {
                 char sink[512];
                 size_t drained = 0u;
