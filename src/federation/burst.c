@@ -168,7 +168,8 @@ enum {
     ((unsigned)(BURST_CHAN_REFUSED_TOPIC | BURST_CHAN_REFUSED_MODES))
 
 typedef struct burst_shadow {
-    int             open;  /* a BEGIN has arrived and no COMMIT has           */
+    int             open; /* a BEGIN has arrived and no COMMIT has           */
+    uint64_t        open_at_ms; /* server_now_ms() at BEGIN, for #327's timeout */
     char            origin[IRC_MAX_SERVER_NAME + 1];
     uint64_t        epoch; /* what the BEGIN claimed                          */
     uint64_t        expect_nnicks;
@@ -851,6 +852,7 @@ static void shadow_release(burst_shadow_t *sh)
     sh->nchans = 0u;
     sh->cur = NULL;
     sh->open = 0;
+    sh->open_at_ms = 0u;
     sh->origin[0] = '\0';
     sh->epoch = 0u;
     sh->expect_nnicks = 0u;
@@ -897,6 +899,23 @@ void fed_burst_abandon(server_t *s, server_link_t *link)
            sh->origin, sh->nnicks, sh->nchans, sh->nmembers,
            sh->bytes);
     shadow_release(sh);
+}
+
+void fed_burst_sweep(server_t *s, uint64_t now_ms)
+{
+    burst_shadow_t *sh = sh_of(s);
+
+    if (sh == NULL || sh->open == 0) {
+        return;
+    }
+    /* Saturating age: a stamp from the future (clock step) reads as 0 rather
+     * than as 2^64-1, so a future stamp never discards a fresh transaction. */
+    if (now_ms >= sh->open_at_ms &&
+        (uint64_t)(now_ms - sh->open_at_ms) >=
+            (uint64_t)IRC_BURST_BUSY_TIMEOUT_MS) {
+        shadow_discard(s, "TIMEOUT", sh->origin, sh->nnicks, sh->nchans,
+                       sh->nmembers);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1028,13 +1047,21 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
      * with BUSY, so two peers bursting at once do not destroy each other. */
     if (sh->open != 0) {
         if (!chan_same_name(sh->origin, link->name)) {
-            printf("[observable] fed_burst_refused: peer=%s reason=BUSY "
-                   "owner=%s\n",
-                   link->name, sh->origin);
-            return -1;
+            /* #327: a BUSY is not forever. A peer that opened a burst and went
+            * silent holds the shadow open and refuses every other peer; the
+            * sweep abandons it past the 30s timeout and the new BEGIN
+            * proceeds, while within the window the refusal stands. */
+            fed_burst_sweep(s, server_now_ms());
+            if (sh->open != 0) {
+                printf("[observable] fed_burst_refused: peer=%s reason=BUSY "
+                       "owner=%s\n",
+                       link->name, sh->origin);
+                return -1;
+            }
+        } else {
+            shadow_discard(s, "SUPERSEDED", sh->origin, sh->nnicks,
+                           sh->nchans, sh->nmembers);
         }
-        shadow_discard(s, "SUPERSEDED", sh->origin, sh->nnicks,
-                       sh->nchans, sh->nmembers);
     }
     /* The transaction is about the PEER, and the peer is the link. A burst whose
      * tag block names a third server is a RELAYED burst, and this protocol has
@@ -1060,6 +1087,7 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
     sh->epoch = epoch;
     sh->expect_nnicks = nnicks;
     sh->open = 1;
+    sh->open_at_ms = server_now_ms();
     /* A peer that restarts and says so is the one case the epoch is FOR: the
      * ids this node will accept from that peer after the commit belong to the
      * boot the burst described, and leaving link->epoch at the old value would
