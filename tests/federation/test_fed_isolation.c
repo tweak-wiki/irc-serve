@@ -122,7 +122,6 @@ int main(void)
     assert(a.fed_advertise_ms == 111u);
     assert(b.fed_advertise_ms == 222u);
 
-    /* --- the burst budget is per node -------------------------------------- */
     fed_burst_set_max_bytes(&a, 1001u);
     assert(a.burst_max_bytes == 1001u);
     assert(b.burst_max_bytes == (size_t)IRC_BURST_MAX_BYTES);
@@ -153,6 +152,42 @@ int main(void)
     message_free(&m);
     assert(b.n_fed_malformed == 1u);
     assert(a.n_fed_malformed == 0u);
+    /* --- #324: an oversized BEGIN is refused at the BEGIN --- */
+    /* A budget below the BEGIN's own charge: the frozen 179-byte tag block plus
+     * the origin, verb, params and framing is ~200 bytes, so 100 cannot fit any
+     * BEGIN at all. The refusal must come from apply_begin itself -- a single
+     * abandon with reason=BEGIN_TOO_LARGE -- and the shadow left closed, so the
+     * records behind it are strays (fed_malformed) rather than staged members
+     * of a half-open transaction. A COMMIT that closed a half-open shadow would
+     * have produced a second abandon at SBURSTE; here there is exactly one. */
+    fed_burst_set_max_bytes(&b, 100u);
+    (void)snprintf(line, sizeof line,
+                    "@irc-serve-origin=irc.y;irc-serve-epoch=7;irc-serve-id=9;"
+                    "irc-serve-hops=0 :irc.y SBURST 7 2");
+    assert(message_parse(line, &m) == 0);
+    assert(fed_burst_apply(&b, lb, &m) != 0);
+    message_free(&m);
+    assert(b.n_burst_abandoned == 1u);
+    assert(b.n_fed_malformed == 1u);
+    /* The records behind it are strays, not staged: one malformed each, no
+     * further abandon. The SBURSTN is refused with NO_TRANSACTION and the
+     * SBURSTE with NO_TRANSACTION too, because the shadow was never opened. */
+    (void)snprintf(line, sizeof line,
+                    "@irc-serve-origin=irc.y;irc-serve-epoch=7;irc-serve-id=10;"
+                    "irc-serve-hops=0 :irc.y SBURSTN bob u h - 1 :hi");
+    assert(message_parse(line, &m) == 0);
+    assert(fed_burst_apply(&b, lb, &m) != 0);
+    message_free(&m);
+    (void)snprintf(line, sizeof line,
+                    "@irc-serve-origin=irc.y;irc-serve-epoch=7;irc-serve-id=11;"
+                    "irc-serve-hops=0 :irc.y SBURSTE 7 2 0 0");
+    assert(message_parse(line, &m) == 0);
+    assert(fed_burst_apply(&b, lb, &m) != 0);
+    message_free(&m);
+    assert(b.n_burst_abandoned == 1u);
+    assert(b.n_fed_malformed == 3u);
+    fed_burst_set_max_bytes(&b, (size_t)IRC_BURST_MAX_BYTES);
+
 
     /* --- the resume window is per node ------------------------------------- */
     resume_set_window(&a, 800u);
