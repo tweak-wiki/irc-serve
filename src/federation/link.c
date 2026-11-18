@@ -2451,8 +2451,14 @@ void fed_tick(server_t *s, uint64_t now_ms)
         (void)fed_nickreg_sweep(s, now_ms);
     }
 
-    /* A node with no peers pays three integer comparisons and returns: this
-     * one, the occupancy test above, and the pointer test just here. */
+    /* #327: a burst shadow left open by a peer that went silent must not hold
+     * BUSY forever. The sweep discards it past the 30s timeout (counted
+     * abandoned) whether or not any link is up. */
+    fed_burst_sweep(s, now_ms);
+
+    /* A node with no peers pays four integer comparisons and returns: this
+     * one, the burst sweep's open test, the occupancy test above, and the
+     * pointer test just here. */
     if (server_link_count(s) == 0u) {
         return;
     }
