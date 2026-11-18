@@ -592,6 +592,10 @@ struct server {
      * the sequence stays monotonic and skips 0 on wrap. */
     uint64_t  msg_id;
     uint64_t  epoch;
+    /* Issue #331: the per-boot hash seed (server_msgid_seed() at server_init),
+     * shared by the nick and channel tables. Public so tests can observe that
+     * two boots differ; the tables themselves carry the working copy. */
+    uint64_t  hash_seed;
 
     server_dispatch_fn dispatch;
     server_tick_fn      on_tick;

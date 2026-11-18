@@ -357,6 +357,12 @@ irc_add_integration_test(test_nick_index test_nick_index.c)
 # particular pair to collide.
 irc_add_integration_test(test_strtab_probe test_strtab_probe.c)
 
+# The same table's per-boot hash seed (issue #331): without it an attacker
+# pre-computes colliding nicks and forces a long probe chain with legal
+# NICKs. Two boots must draw different seeds, and the seeded hash must still
+# store and resolve 500 nicks on both.
+irc_add_integration_test(test_hash_seed test_hash_seed.c)
+
 # 3: numerics are never written to a peer link. Source inspection, and labelled
 # as such; Phase 6 adds the end-to-end version once a peer exists.
 irc_add_integration_test(test_reply_guard test_reply_guard.c)
