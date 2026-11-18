@@ -391,6 +391,16 @@ int fed_burst_apply(server_t *s, server_link_t *link, const message_t *m);
  * second mechanism to a problem that has one. */
 void fed_burst_abandon(server_t *s, server_link_t *link);
 
+/* #327: how long an open burst shadow may sit idle before a second peer's
+ * SBURST stops being refused with BUSY. 30 seconds per operator decision. */
+#define IRC_BURST_BUSY_TIMEOUT_MS (30000u)
+
+/* Sweep a stale open shadow: discard it (counted abandoned) when it has been
+ * open longer than IRC_BURST_BUSY_TIMEOUT_MS. Called from fed_tick() and from
+ * the BUSY arm of apply_begin(); safe with no shadow or no open transaction. */
+void fed_burst_sweep(server_t *s, uint64_t now_ms);
+
+
 /* Release any open shadow, as a node teardown rather than as a protocol event.
  *
  * THE CALLER IS server_shutdown(), and this arm releases the shadow the node
