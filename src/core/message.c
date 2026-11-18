@@ -465,6 +465,11 @@ void message_free(message_t *m)
     memset(m, 0, sizeof *m);
 }
 
+/* Forward: the representability rules live with the renderer below, and the
+ * constructor mirrors them so a build never holds what format would refuse. */
+static int has_line_break(const char *s);
+static int needs_colon(const char *s);
+
 /* --------------------------------------------------------------------------
  * message_build
  * ------------------------------------------------------------------------ */
@@ -490,6 +495,31 @@ int message_build(message_t *out,
         return -1;
     }
 
+    /* Mirror message_format_ex's refusals so a build never holds what the
+     * renderer would refuse. *out stays zeroed on every refusal above and
+     * below. Empty tags/prefix mean "absent", as in the copy below. */
+    if (tags != NULL && tags[0] != '\0') {
+        if (tags[0] == '@' || strpbrk(tags, " \t\r\n") != NULL) {
+            return -1;
+        }
+    }
+    if (prefix != NULL && prefix[0] != '\0') {
+        if (prefix[0] == ':' || has_line_break(prefix)) {
+            return -1;
+        }
+    }
+    if (has_line_break(command)) {
+        return -1;
+    }
+    for (int i = 0; i < nparams; i++) {
+        if (params[i] == NULL || has_line_break(params[i])) {
+            return -1;
+        }
+        if (needs_colon(params[i]) != 0 && i != nparams - 1) {
+            return -1;
+        }
+    }
+
     size_t need = strlen(command) + 1;
     if (tags != NULL) {
         need += strlen(tags) + 1;
@@ -498,9 +528,6 @@ int message_build(message_t *out,
         need += strlen(prefix) + 1;
     }
     for (int i = 0; i < nparams; i++) {
-        if (params[i] == NULL) {
-            return -1;
-        }
         need += strlen(params[i]) + 1;
     }
 
