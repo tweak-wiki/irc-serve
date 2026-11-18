@@ -689,7 +689,8 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
                         2);
         return 0;
     }
-    if ((now_ms - s->resume_windows[idx].dropped_ms) >= s->resume_window_ms) {
+    if (now_ms >= s->resume_windows[idx].dropped_ms &&
+        (now_ms - s->resume_windows[idx].dropped_ms) >= s->resume_window_ms) {
         /* Unreachable given the arm above, and kept as the belt to it: the first
          * arm reads the age and this one reads the bound, and a change to one
          * that missed the other would be a window that is neither restored nor
