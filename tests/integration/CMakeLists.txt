@@ -610,6 +610,7 @@ irc_add_integration_test(test_nick_duplicate test_nick_duplicate.c)
 # The CTest NAME is unchanged (Reconnect) -- see irc_ctest_name() for why, and
 # tests/loadbal/CMakeLists.txt for what is left of the three.
 irc_add_integration_test(test_reconnect test_reconnect.c)
+irc_add_integration_test(test_resume_future_stamp test_resume_future_stamp.c)
 
 # 7/Phase 9: 2.3's peer discovery -- ADVERTISE (a load figure, and a dial hint
 # this node records and NEVER dials) and SHUTDOWN (a goodbye that must not spend
