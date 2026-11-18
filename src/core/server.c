@@ -122,12 +122,20 @@ struct strtab {
     struct strtab_entry *buckets;
     size_t               nentries;
     int                  folded;  /* keys are ASCII-folded on the way in */
+    /* Issue #331: per-boot random seed, XORed into the FNV-1a offset basis.
+     * Without it an attacker pre-computes colliding nicks and forces a long
+     * probe chain on the hot fanout path (single-client CPU DoS with legal
+     * NICKs). Drawn once per server_init from server_msgid_seed() and shared
+     * by both tables, so two boots hash the same nick to different buckets. */
+    uint64_t             seed;
 };
 
-static uint64_t strtab_hash(const char *s)
+static uint64_t strtab_hash(const char *s, uint64_t seed)
 {
-    /* FNV-1a, 64-bit. */
-    uint64_t h = 1469598103934665603ull;
+    /* FNV-1a, 64-bit, with the per-boot seed XORed into the offset basis
+     * (init-XOR, issue #331): the prime multiply avalanches the seed into
+     * every byte, so pre-boot precomputation buys nothing. */
+    uint64_t h = 1469598103934665603ull ^ seed;
 
     while (*s != '\0') {
         h ^= (uint64_t)(unsigned char)*s;
@@ -186,7 +194,7 @@ static int strtab_fold(char *out, size_t cap, const char *key)
     return 0;
 }
 
-static struct strtab *strtab_new(int folded)
+static struct strtab *strtab_new(int folded, uint64_t seed)
 {
     struct strtab *t = (struct strtab *)calloc(1, sizeof *t);
 
@@ -199,6 +207,7 @@ static struct strtab *strtab_new(int folded)
         return NULL;
     }
     t->folded = folded;
+    t->seed = (seed != 0) ? seed : 1469598103934665603ull;
     return t;
 }
 
@@ -245,7 +254,7 @@ static size_t strtab_probe(const struct strtab *t, const char *key, int *found)
     if (t->folded) {
         k = fold;
     }
-    idx = (size_t)(strtab_hash(k) % STRTAB_BUCKETS);
+    idx = (size_t)(strtab_hash(k, t->seed) % STRTAB_BUCKETS);
     for (probe = 0; probe < STRTAB_BUCKETS; probe++) {
         size_t at = (idx + probe) % STRTAB_BUCKETS;
         const struct strtab_entry *e = &t->buckets[at];
@@ -437,7 +446,7 @@ static void strtab_remove_at(struct strtab *t, size_t at)
         if (!e->used) {
             break; /* the rest of the chain is not reachable through here */
         }
-        home = (size_t)(strtab_hash(e->key) % STRTAB_BUCKETS);
+        home = (size_t)(strtab_hash(e->key, t->seed) % STRTAB_BUCKETS);
         k = (from + STRTAB_BUCKETS - home) % STRTAB_BUCKETS;
         pd = (from + STRTAB_BUCKETS - hole) % STRTAB_BUCKETS;
         if (k >= pd) {
@@ -672,9 +681,12 @@ int server_init(server_t *s, const char *name)
     /* Folded and exact, for the reasons spelled out at the strtab: 2.1 makes
      * nicknames case-insensitive while the case the user chose is what gets
      * displayed, and 2.2 makes a channel name uppercase-normalised, which is
-     * also how it is displayed. */
-    s->nicks = strtab_new(1);
-    s->chans = strtab_new(0);
+     * also how it is displayed. Issue #331: both tables share one per-boot
+     * random seed (same source as the #180 msg_id start), so the home bucket
+     * of every key differs per boot and pre-computed collisions do not hold. */
+    s->hash_seed = server_msgid_seed();
+    s->nicks = strtab_new(1, s->hash_seed);
+    s->chans = strtab_new(0, s->hash_seed);
     if (s->by_fd == NULL || s->nicks == NULL || s->chans == NULL) {
         server_shutdown(s);
         return -1;
