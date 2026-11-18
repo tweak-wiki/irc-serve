@@ -680,6 +680,12 @@ irc_add_integration_test(test_account test_account.c)
 # wire-level case on top of it.
 irc_add_integration_test(test_fanout_gate test_fanout_gate.c)
 
+# #273: a forwarded MODE +b with an over-long mask answers 417 to the client
+# and forwards nothing. In-process: no wire path reaches the forward arm with
+# an op (op has no wire writer on a non-owning node), so the arm is driven
+# directly on a server whose channel names a linked peer.
+irc_add_integration_test(test_mode_forward_mask test_mode_forward_mask.c)
+
 # #174: the dedup store's -1 error arm (RLIMIT_AS fault injection) and G7's
 # error/dup counter split. In-process: the ceiling has to apply to the very
 # calloc the store makes, which no forked node lets a test time.
