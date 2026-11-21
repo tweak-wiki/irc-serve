@@ -373,7 +373,7 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
     size_t at = 0;
 
     if (store == NULL || authcid == NULL || password == NULL ||
-        authcid[0] == '\0') {
+        authcid[0] == '\0' || password[0] == '\0') {
         return -1;
     }
     alen = strlen(authcid);
