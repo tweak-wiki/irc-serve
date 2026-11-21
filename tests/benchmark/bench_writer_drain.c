@@ -13,10 +13,12 @@
  * RSS must stay under WRITER_RSS_MB_MAX (default 32 MiB) and the N=4 drain
  * must finish within WRITER_DRAIN_N4_MAX_MS (default 5000 ms), or the
  * benchmark fails. Both caps have wide headroom over the measured baseline
- * (N=4 drains ~15-40 ms at ~4-6 MiB peak) so a loaded runner still passes
+ * (N=4 drains ~10-40 ms at ~4-6 MiB peak) so a loaded runner still passes
  * while a real blowup -- e.g. per-writer buffer duplication under reg_mu
- * (#279) -- trips it. Either cap set to 0 disables that check (sanitizer
- * builds inflate both numbers and should be evaluated separately).
+ * (#279) -- trips it. Either cap set to 0 disables that check.
+ * Sanitizer-instrumented builds skip the RSS cap by default (shadow memory
+ * and quarantine dwarf the product's own footprint; set WRITER_RSS_MB_MAX
+ * explicitly to evaluate an instrumented build against a number).
  * The default writer count is NOT flipped here.
  */
 #include <fcntl.h>
@@ -202,6 +204,22 @@ close_peers:
     return rc;
 }
 
+/* Nonzero when compiled with a sanitizer: its shadow memory and quarantine
+ * dwarf the product's own footprint, so the RSS cap is off unless asked for.
+ * Covers Clang's __has_feature forms and GCC's __SANITIZE_*__ macros. */
+static int sanitizer_build(void)
+{
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    defined(__SANITIZE_UNDEFINED__) || \
+    (defined(__has_feature) && \
+     (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
+      __has_feature(undefined_behavior_sanitizer) || __has_feature(memory_sanitizer)))
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 /* Env cap in the given units; unset/empty means `def`, 0 disables. */
 static double env_cap(const char *name, double def)
 {
@@ -237,7 +255,8 @@ int main(void)
     rss = rss_mb();
     printf("writer_rss: rss=%.2f MiB\n", rss);
     if (rc == 0) {
-        rss_max = env_cap("WRITER_RSS_MB_MAX", 32.0);
+        rss_max = sanitizer_build() ? env_cap("WRITER_RSS_MB_MAX", 0.0)
+                                    : env_cap("WRITER_RSS_MB_MAX", 32.0);
         n4_max_ms = env_cap("WRITER_DRAIN_N4_MAX_MS", 5000.0);
         if (rss_max > 0.0 && rss > rss_max) {
             printf("writer_oracle: FAIL rss %.2f MiB exceeds %.2f MiB\n", rss, rss_max);
