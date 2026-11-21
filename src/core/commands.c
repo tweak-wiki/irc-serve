@@ -2277,9 +2277,35 @@ static void handle_unregister(server_t *s, conn_t *c, const message_t *m)
  * other two are the credential.
  *
  * The payload is also not rendered into a buffer anywhere on this path: it is
- * decoded into a stack array, split, verified, and dropped. There is no place in
+ * decoded into a stack array, split, verified, and scrubbed -- every return
+ * below runs auth_wipe_credential() over all four locals, so the bytes do not
+ * survive in the dead frame for the next call to reuse. There is no place in
  * this function where a credential could be printed by accident later, because
- * there is no variable holding one afterwards. */
+ * no variable holds one afterwards. */
+/* Overwrite `n` bytes at `p`, through a volatile pointer: a memset() to a stack
+ * buffer whose frame is about to be reused is a store the compiler may prove
+ * dead and delete, which is why sasl_framework.c's sasl_wipe() does the same. */
+static void auth_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+
+    for (size_t i = 0; i < n; i++) {
+        v[i] = 0u;
+    }
+}
+
+/* Scrub the four locals handle_authenticate() decodes the credential into. One
+ * call site per buffer rather than four wipes inline, so the ten returns below
+ * cannot scrub three and forget one. */
+static void auth_wipe_credential(unsigned char *payload, char *authzid,
+                                 char *authcid, char *passwd)
+{
+    auth_wipe(payload, SASL_MAX_PAYLOAD);
+    auth_wipe(authzid, SASL_MAX_AUTHCID + 1u);
+    auth_wipe(authcid, SASL_MAX_AUTHCID + 1u);
+    auth_wipe(passwd, SASL_MAX_PASSWORD + 1u);
+}
+
 static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
 {
     const char *mech = NULL;
@@ -2314,6 +2340,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                             NULL, 0, "SASL authentication failed: too many attempts");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TOO_MANY_ATTEMPTS\n",
                c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2325,6 +2352,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                             NULL, 0, "SASL authentication failed");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=ALREADY_FAILED\n",
                c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2335,6 +2363,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
     if (m->nparams >= 1 && strcmp(m->params[0], "*") == 0) {
         c->sasl = (int)SASL_ABORTED;
         printf("[observable] sasl: fd=%d outcome=ABORTED\n", c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2375,6 +2404,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                     "are available SASL mechanisms");
         printf("[observable] sasl: fd=%d outcome=NO_MECHANISM store=%zu\n", c->fd,
                sasl_store_count(s->sasl_store));
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
     if (strcasecmp(mech, "PLAIN") != 0) {
@@ -2404,6 +2434,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                    "mech_len=%zu mech_bad_bytes=%zu\n",
                    c->fd, shown, strlen(mech), conn_text_bad_count(mech));
         }
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2428,6 +2459,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                             "this node for SASL PLAIN");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TLS_REQUIRED\n",
                c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2439,6 +2471,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
         params[1] = "+";
         (void)send_line(s, c, NULL, "AUTHENTICATE", params, 2);
         printf("[observable] sasl: fd=%d outcome=STARTED mech=PLAIN\n", c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2469,6 +2502,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
         conn_mark_closing(c);
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=BAD_PAYLOAD\n",
                c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2534,6 +2568,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                    c->fd, shown, strlen(authcid), conn_text_bad_count(authcid),
                    no_store ? "NO_STORE" : "BAD_CREDENTIAL");
         }
+        auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
 
@@ -2609,6 +2644,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * its AUTHENTICATE has already satisfied the state machine, and if it was
      * held for CAP it is still held -- so the gate is re-evaluated rather than
      * bypassed. */
+    auth_wipe_credential(payload, authzid, authcid, passwd);
     commands_state_update(s, c);
 }
 
