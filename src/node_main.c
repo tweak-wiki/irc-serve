@@ -1104,13 +1104,139 @@ static int resolve_peer(server_t *s, const node_peer_t *peer)
     return 0;
 }
 
-int main(int argc, char **argv)
+/* The run phase: arm the loop, pump it, then shut down and report. Takes the
+ * initialised server only; everything it prints comes from server state.
+ * Returns the process exit code: 0 after a clean loop, 1 after a loop
+ * error (the error itself is already on stdout). */
+static int run_node(server_t *srv)
 {
-    node_opts_t opts;
-    server_t srv;
-    int bound;
+    int rc;
+
+    /* Readiness: emitted after the listener is up and immediately before the
+     * loop is armed, so anything waiting on this line is talking to a serving
+     * node. */
+    printf("[observable] loop_running: listener_fd=%d tick_ms=%d state=ARMED\n",
+           srv->listen_fd, POLL_TICK_MS);
+    fflush(stdout);
+
+    rc = poll_loop_run(srv);
+    if (rc != 0) {
+        printf("[observable] loop_error: state=FAILED\n");
+    }
+
+    /* Shutdown BEFORE reporting. server_shutdown() closes every connection
+     * still registered, so the numbers printed here describe the node as it
+     * actually finished, not a snapshot taken mid-teardown with connections
+     * still open. */
+    server_shutdown(srv);
+
+    /* `dial_connected` AND `dial_failed` ARE HERE BECAUSE PHASE 12 ADDED A WAY FOR A
+     * DIAL TO FAIL, and this line is the only place the shipped binary reports
+     * anything.
+     *
+     * They were here before this phase and were REMOVED at the same time, because
+     * the harness's inline children were the only thing that ever printed them and
+     * the shipped binary had no peer to dial. Phase 12 gave it one -- and gave the
+     * counter a second failure mode, since a TCP connect can now succeed and the
+     * CERTIFICATE still be refused. A node whose peer links are all failing on
+     * certificates produces `dial_failed=0`, `fed_dead=0` and no established links,
+     * and without these two numbers that combination is indistinguishable from a
+     * node with no peers configured.
+     *
+     * THE PAIR IS DISTINGUISHABLE AND THAT IS WHY BOTH ARE HERE. `dial_connected=1`
+     * with `dial_failed=0` and no link established says the socket worked and the
+     * handshake did not, which is a certificate problem with a completely
+     * different fix from a refused port. test_peer_tls.c asserts exactly that
+     * reading, and it could not before these two numbers were published. */
+    printf("[observable] loop_stats: ticks=%llu eintr=%llu accepted=%llu "
+           "closed=%llu lines=%llu parse_reject=%llu frame_error=%llu "
+           "writeq_overflow=%llu write_error=%llu partial_writes=%llu "
+           "rejected_fd=%llu dial_connected=%llu dial_failed=%llu "
+           "pass_seen=%llu reply_refused=%llu msg_stripped=%llu "
+           "fed_rejected=%llu fed_duplicate=%llu fed_hs_timeout=%llu "
+           "fed_dead=%llu fed_retry_exhausted=%llu "
+           "fed_preauth_drop=%llu fed_hop_drop=%llu "
+           "fed_own_origin=%llu fed_untagged_relay=%llu "
+           "fed_unknown_verb=%llu fed_verb_deferred=%llu fed_malformed=%llu "
+           "fed_dup_drop=%llu fed_dedup_dup=%llu fed_dedup_error=%llu fed_squit_self=%llu "
+           "nickreg_known=%zu nickreg_evicted=%llu "
+           "resume_noted=%llu resume_applied=%llu resume_expired=%llu "
+           "resume_rejected=%llu resume_evicted=%llu resume_swept=%llu "
+           "resume_chan_gone=%llu resume_chan_taken=%llu resume_held=%zu "
+           "burst_refused=%llu burst_abandoned=%llu burst_truncated=%llu "
+           "topic_cache_full=%llu sasl_ok=%llu sasl_fail=%llu "
+           "tls_handshake_failed=%llu tls_client_refused=%llu\n",
+           (unsigned long long)srv->n_ticks, (unsigned long long)srv->n_eintr,
+           (unsigned long long)srv->n_accepted, (unsigned long long)srv->n_closed,
+           (unsigned long long)srv->n_lines,
+           (unsigned long long)srv->n_parse_reject,
+           (unsigned long long)srv->n_frame_error,
+           (unsigned long long)srv->n_writeq_overflow,
+           (unsigned long long)atomic_load_explicit(&srv->n_write_error, memory_order_relaxed),
+           (unsigned long long)atomic_load_explicit(&srv->n_partial_writes, memory_order_relaxed),
+           (unsigned long long)srv->n_rejected_fd,
+           (unsigned long long)srv->n_dial_connected,
+           (unsigned long long)srv->n_dial_failed,
+           (unsigned long long)srv->n_pass_seen,
+           (unsigned long long)atomic_load_explicit(&srv->n_reply_refused, memory_order_relaxed),
+           (unsigned long long)srv->n_msg_stripped,
+           (unsigned long long)srv->n_link_rejected,
+           (unsigned long long)srv->n_link_duplicate,
+           (unsigned long long)srv->n_fed_hs_timeout,
+            (unsigned long long)srv->n_fed_dead,
+            (unsigned long long)srv->n_fed_retry_exhausted,
+            (unsigned long long)srv->n_fed_preauth_drop,
+           (unsigned long long)srv->n_fed_hop_drop,
+           (unsigned long long)srv->n_fed_own_origin,
+           (unsigned long long)srv->n_fed_untagged_relay,
+           (unsigned long long)srv->n_fed_unknown_verb,
+           (unsigned long long)srv->n_fed_verb_deferred,
+           (unsigned long long)srv->n_fed_malformed,
+           (unsigned long long)srv->n_fed_dup_drop,
+           (unsigned long long)srv->n_fed_dedup_dup,
+           (unsigned long long)srv->n_fed_dedup_error,
+           (unsigned long long)srv->n_fed_squit_self,
+            (size_t)fed_nickreg_count(srv),
+            (unsigned long long)srv->n_rnick_evicted,
+            (unsigned long long)srv->n_resume_noted,
+            (unsigned long long)srv->n_resume_applied,
+            (unsigned long long)srv->n_resume_expired,
+            (unsigned long long)srv->n_resume_rejected,
+            (unsigned long long)srv->n_resume_evicted,
+            (unsigned long long)srv->n_resume_swept,
+            (unsigned long long)srv->n_resume_chan_gone,
+            (unsigned long long)srv->n_resume_chan_taken,
+            (size_t)resume_count(srv),
+           (unsigned long long)srv->n_burst_refused,
+           (unsigned long long)srv->n_burst_abandoned,
+           (unsigned long long)srv->n_burst_truncated,
+           (unsigned long long)srv->n_topic_cache_full,
+           (unsigned long long)srv->n_sasl_ok,
+           (unsigned long long)srv->n_sasl_fail,
+           (unsigned long long)srv->n_tls_handshake_failed,
+           (unsigned long long)srv->n_tls_client_refused);
+
+    /* The link table itself, and last, after the counters: 8 asks for "a way to
+     * dump peers and their FSM states" and the state is what the counters are
+     * about. It is printed at shutdown as well as on every event, so a node that
+     * exits cleanly still leaves a record of what it was linked to. */
+    fed_dump(srv, "shutdown");
+
+    /* exit 0 even after a loop error: a clean shutdown is what a test asserts,
+     * and a failed loop has already said so on stdout. */
+    printf("[observable] server_shutdown: state=STOPPED\n");
+    return (rc == 0) ? 0 : 1;
+}
+
+/* The runtime phase: drop privilege, then load everything the loop needs --
+ * stores, the federation secret, peers -- and print the startup banner.
+ * Returns 0 once the node is ready to run, 1 on any refusal (already
+ * reported). Mutates opts only for the secret handover (see below). */
+static int init_runtime(server_t *srv, node_opts_t *opts)
+{
     int i;
     int rc;
+    int bound;
     /* What the startup line reports about the secret. Captured BEFORE fed_open()
      * takes a copy and the file's buffer is wiped, because after the wipe the
      * buffer reads as empty and the line would say `none` for a node that has
@@ -1119,191 +1245,11 @@ int main(int argc, char **argv)
     const char *secret_state = "none";
     const char *secret_source = "none";
 
-    /* Before any output: see the note on line buffering above. */
-    setvbuf(stdout, NULL, _IOLBF, 0);
-
-    rc = parse_args(argc, argv, &opts);
-    if (rc != 0) {
-        if (rc > 0) {
-            usage(stdout, argv[0]);
-            return 0;
-        }
-        usage(stderr, argv[0]);
-        return 2;
-    }
-
-    printf("%s initializing...\n", IRC_SERVE_VERSION);
-
-    if (install_handler(SIGTERM, on_stop_signal) != 0 ||
-        install_handler(SIGINT, on_stop_signal) != 0 ||
-        install_handler(SIGUSR1, on_usr1_signal) != 0) {
-        perror("sigaction");
-        return 1;
-    }
-    /* A write to a peer that has already gone must surface as EPIPE from
-     * send(), which is what MSG_NOSIGNAL in connection.c relies on. */
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        perror("signal");
-        return 1;
-    }
-
-    if (server_init(&srv, opts.name) != 0) {
-        printf("[observable] server init failed: name=%s reason=invalid_name\n",
-               opts.name);
-        return 1;
-    }
-    g_srv_for_stop = &srv;
-    /* Observable per-line framing/parse output. The node's own [observable]
-     * lines are the contract described at the top of this file, so the trace
-     * flag is on for the shipped binary. */
-    srv.trace = 1;
-    /* MT 2.2 (#241): store the count, then start the pool. A start failure
-     * refuses startup rather than degrading silently: writers owned the drain
-     * from this point on, so a half-started pool is a node that cannot send. */
-    server_set_writer_threads(&srv, opts.writers);
-    if (server_writers_start(&srv) != 0) {
-        fprintf(stderr, "irc-serve: writer pool failed to start\n");
-        server_shutdown(&srv);
-        return 1;
-    }
-    /* The command surface. Phase 2 installed nothing here, which was the
-     * honest state of a node with no vocabulary: the loop accepted, framed and
-     * parsed and then said nothing at all. This is the assignment rather than a
-     * commands_install() helper so that what the shipped binary answers with is
-     * visible at the point where it decides it. */
-    srv.dispatch = commands_dispatch;
-
-    /* BOTH LISTENERS ARE BOUND HERE, before the drop (issue #182:
-     * parse -> bind plain -> TLS init -> bind TLS -> drop -> load stores ->
-     * fed_open -> loop). Binding is the one step that can need privilege -- a
-     * low port -- and the TLS listener cannot be bound until the certificate
-     * is loaded (server_listen_tls() refuses a port it cannot encrypt), so the
-     * TLS configuration is validated and loaded between the two binds, still
-     * as root. Stores, the secret file and peers are read after the drop. */
-    if (server_listen(&srv, opts.port) != 0) {
-        printf("[observable] server startup failed: port=%d reason=%s\n",
-               opts.port, strerror(errno));
-        server_shutdown(&srv);
-        return 1;
-    }
-
-    /* ------------------------------------------------------------------------
-     * PHASE 12: TLS, and WHERE it is configured matters more than it looks
-     * ------------------------------------------------------------------------
-     * Here, between the two binds and before the drop, for two reasons at once:
-     * 3.4 forbids a blocking call inside the event loop, and reading a
-     * certificate is as blocking as reading a file; AND server_listen_tls()
-     * below REFUSES a port it cannot encrypt, so srv.tls has to exist before
-     * the TLS listener is bound. Both binds need privilege, so both precede
-     * the drop -- which is also what lets a root-owned 0600 key load: after
-     * the drop the node is `nobody` and could not open it. (Stores, the secret
-     * file and peers stay after the drop; see the drop's comment.)
-     *
-     * THE ORDER inside this block is load-bearing and each step refuses rather
-     * than degrades:
-     *
-     *   1. The cert/key PAIR is checked before either is opened. Half a
-     *      configuration is not a state this binary can be in.
-     *   2. tls_backend_node_init() checks the KEY'S PERMISSIONS before loading
-     *      anything, so a world-readable key refuses the whole configuration
-     *      rather than producing a node that offers a certificate whose private
-     *      half is on a shared filesystem.
-     *   3. --peer-tls is applied only after the peers exist and only if TLS
-     *      exists, and a name that matches no peer is a STARTUP ERROR: a flag that
-     *      quietly does nothing on a security option is worse than no flag.
-     */
-    if ((opts.tls_cert == NULL) != (opts.tls_key == NULL)) {
-        fprintf(stderr, "irc-serve: --tls-cert and --tls-key are a pair; "
-                        "supplying one is not a configuration this node has\n");
-        server_shutdown(&srv);
-        return 1;
-    }
-    if (opts.tls_cert != NULL) {
-        /* THE KEY'S MODE IS CHECKED BEFORE ANYTHING IS LOADED, and it is a refusal
-         * of the whole CONFIGURATION rather than of the file: a node that cannot
-         * prove its key is private must not come up offering a certificate, because
-         * half-configured TLS that looks configured is the worst of the three
-         * states -- an operator reading `tls=configured` would believe in it. */
-        if (key_file_is_private(opts.tls_key) != 0) {
-            fprintf(stderr, "irc-serve: the TLS private key is readable by group "
-                            "or other; refusing to start\n");
-            server_shutdown(&srv);
-            return 1;
-        }
-        if (tls_backend_node_init(&srv.tls, opts.tls_cert, opts.tls_key,
-                                  opts.tls_ca, opts.tls_insecure,
-                                  opts.tls_ocsp_staple,
-                                  (opts.tls_staple_permissive != 0) ? 0 : 1)
-            != 0) {
-            /* A CERTIFICATE THAT DID NOT LOAD IS A STARTUP FAILURE, and this is
-             * the one configuration error in the phase that is. The reasoning is
-             * cap.h's rule applied to the node rather than to a capability: a node
-             * that was told to serve TLS and cannot must NOT come up as a node
-             * that does not, because "my node has no `sts` in CAP LS" is a thing
-             * an operator has to go looking for and "TLS is on and broken" is
-             * worse than either. Compare --sasl-store, whose failure is NOT
-             * fatal: there, a node without a store refuses every AUTHENTICATE and
-             * says so, which is a correct node. Here, a node without a
-             * certificate would serve plaintext on the port the operator believes
-             * is encrypted. */
-            fprintf(stderr, "irc-serve: TLS was configured and could not be "
-                            "loaded; refusing to start rather than serving "
-                            "plaintext\n");
-            server_shutdown(&srv);
-            return 1;
-        }
-        srv.tls_require = opts.tls_require;
-        srv.sts_duration = opts.tls_sts_duration;
-    } else {
-        /* Every TLS option without a certificate pair is an ERROR rather than a
-         * silent no-op, for the same reason: `--tls-port 6697 --tls-require` on a
-         * node with no certificate is a command line that says "this node is
-         * encrypted" and is not. --tls-insecure is included in the test because
-         * it says the same thing: "accept unverifiable peers" on a node that can
-         * have no peers is a configuration an operator believes in and does not
-         * have. */
-        if (opts.have_tls_port || opts.tls_require != 0 ||
-            opts.tls_ca != NULL || opts.tls_sts_duration != 0u ||
-            opts.tls_insecure != 0 || opts.tls_ocsp_staple != NULL ||
-            opts.tls_staple_permissive != 0) {
-            fprintf(stderr, "irc-serve: TLS options were given without "
-                            "--tls-cert and --tls-key\n");
-            server_shutdown(&srv);
-            return 1;
-        }
-        if (opts.ntls_peers > 0) {
-            fprintf(stderr, "irc-serve: --peer-tls was given but this node has "
-                            "no TLS\n");
-            server_shutdown(&srv);
-            return 1;
-        }
-    }
-
-    /* THE IMPLICIT-TLS LISTENER, second and after the plain one. Its failure is
-     * FATAL rather than a warning, and that is a different decision from the
-     * certificate's: an operator who asked for --tls-port has said clients will be
-     * encrypted from the first byte, and a node that could not bind that port and
-     * said nothing would leave those clients on a plaintext port they were told
-     * not to use. A REFUSAL here is the honest answer. The certificate is already
-     * loaded above, so the no_tls_configured arm below is unreachable through
-     * this binary -- defence in depth, for a future caller that is not main(). */
-    if (opts.have_tls_port) {
-        if (server_listen_tls(&srv, opts.tls_port) != 0) {
-            printf("[observable] server startup failed: tls_port=%d reason=%s\n",
-                   opts.tls_port,
-                   (srv.tls == NULL) ? "no_tls_configured" : strerror(errno));
-            server_shutdown(&srv);
-            return 1;
-        }
-        printf("[observable] tls_bind: port=%d fd=%d state=LISTENING\n",
-               server_tls_port(&srv), srv.tls_listen_fd);
-    }
-
     /* THE DROP, after both binds and before any store, secret or peer state is
      * read. Root without an explicit --user refuses here; anything else sheds
      * to --user or skips, with one [observable] line either way. */
-    if (drop_privileges(&opts) != 0) {
-        server_shutdown(&srv);
+    if (drop_privileges(opts) != 0) {
+        server_shutdown(srv);
         return 1;
     }
 
@@ -1324,11 +1270,11 @@ int main(int argc, char **argv)
      * the rule cap.c exists to enforce, so "no store" has to be a state this
      * binary can be in, and it is.
      */
-    if (opts.sasl_store != NULL) {
-        srv.sasl_store = sasl_store_load(opts.sasl_store);
-        if (srv.sasl_store == NULL) {
+    if (opts->sasl_store != NULL) {
+        srv->sasl_store = sasl_store_load(opts->sasl_store);
+        if (srv->sasl_store == NULL) {
             fprintf(stderr, "irc-serve: --sasl-store %s was refused; this node "
-                            "will advertise no sasl capability\n", opts.sasl_store);
+                            "will advertise no sasl capability\n", opts->sasl_store);
         }
     }
 
@@ -1354,12 +1300,12 @@ int main(int argc, char **argv)
      * authenticate at all. That equivalence is what makes the account subsystem
      * ADDITIVE: nothing a deployment did before this option changes.
      */
-    if (opts.account_store != NULL) {
-        srv.account_store = account_store_load(opts.account_store);
-        if (srv.account_store == NULL) {
+    if (opts->account_store != NULL) {
+        srv->account_store = account_store_load(opts->account_store);
+        if (srv->account_store == NULL) {
             fprintf(stderr, "irc-serve: --account-store %s was refused; this node "
                             "will identify no client to an account\n",
-                    opts.account_store);
+                    opts->account_store);
         }
     }
 
@@ -1392,27 +1338,27 @@ int main(int argc, char **argv)
         volatile char *wipe;
         size_t k;
 
-        if (opts.secret_file != NULL) {
-            if (load_secret_file(opts.secret_file, file_secret,
+        if (opts->secret_file != NULL) {
+            if (load_secret_file(opts->secret_file, file_secret,
                                  sizeof file_secret) != 0) {
                 fprintf(stderr, "irc-serve: --secret-file %s was refused; "
                                 "refusing to start rather than federating "
-                                "with no secret\n", opts.secret_file);
-                server_shutdown(&srv);
+                                "with no secret\n", opts->secret_file);
+                server_shutdown(srv);
                 return 1;
             }
-            opts.secret = file_secret;
-        } else if (opts.have_secret) {
+            opts->secret = file_secret;
+        } else if (opts->have_secret) {
             fprintf(stderr, "irc-serve: --secret is visible in `ps`; prefer "
                             "--secret-file\n");
         }
-        if (opts.secret_file != NULL || opts.have_secret) {
-            secret_source = (opts.secret_file != NULL) ? "file" : "argv_warn";
+        if (opts->secret_file != NULL || opts->have_secret) {
+            secret_source = (opts->secret_file != NULL) ? "file" : "argv_warn";
         }
-        if (opts.secret[0] != '\0') {
+        if (opts->secret[0] != '\0') {
             secret_state = "set";
         }
-        rc = fed_open(&srv, opts.secret);
+        rc = fed_open(srv, opts->secret);
         /* fed_open() copied the secret, so the buffers it came from must not
          * outlive it -- wiped HERE, before the verdict is checked, so the
          * failure path needs no second copy of either. The file's buffer is
@@ -1432,8 +1378,8 @@ int main(int argc, char **argv)
          * most the bytes the secret occupied are cleared -- the slot is a
          * whole argv element and the secret filled it exactly, which is why
          * a strlen-bounded wipe cannot touch a neighbour. */
-        if (opts.secret_argv != NULL) {
-            volatile char *slot = opts.secret_argv;
+        if (opts->secret_argv != NULL) {
+            volatile char *slot = opts->secret_argv;
             size_t n = 0;
 
             while (n < (size_t)IRC_FED_MAX_SECRET && slot[n] != '\0') {
@@ -1445,17 +1391,17 @@ int main(int argc, char **argv)
         }
         if (rc != 0) {
             printf("[observable] server init failed: name=%s "
-                   "reason=federation_open\n", opts.name);
-            server_shutdown(&srv);
+                   "reason=federation_open\n", opts->name);
+            server_shutdown(srv);
             return 1;
         }
     }
-    srv.on_tick = fed_tick;
+    srv->on_tick = fed_tick;
 
     /* Resolve and configure the peers, still before the loop. */
-    for (i = 0; i < opts.npeers; i++) {
-        if (resolve_peer(&srv, &opts.peers[i]) != 0) {
-            server_shutdown(&srv);
+    for (i = 0; i < opts->npeers; i++) {
+        if (resolve_peer(srv, &opts->peers[i]) != 0) {
+            server_shutdown(srv);
             return 1;
         }
     }
@@ -1465,12 +1411,12 @@ int main(int argc, char **argv)
      * treats as DUE NOW -- so a require_tls set after the first tick would be set
      * after the first plaintext attempt, which is the whole downgrade this flag
      * exists to prevent. */
-    for (i = 0; i < opts.ntls_peers; i++) {
-        if (fed_link_set_tls(&srv, opts.tls_peers[i], 1) != 0) {
+    for (i = 0; i < opts->ntls_peers; i++) {
+        if (fed_link_set_tls(srv, opts->tls_peers[i], 1) != 0) {
             fprintf(stderr, "irc-serve: --peer-tls %s names no configured peer. "
                             "Each --peer-tls must match a --peer.\n",
-                    opts.tls_peers[i]);
-            server_shutdown(&srv);
+                    opts->tls_peers[i]);
+            server_shutdown(srv);
             return 1;
         }
     }
@@ -1478,21 +1424,21 @@ int main(int argc, char **argv)
     /* Read the port back rather than echoing the argument: with port 0 the
      * argument is not the port, and a caller that cannot learn the real one
      * cannot connect. */
-    bound = server_port(&srv);
+    bound = server_port(srv);
     if (bound < 0) {
         printf("[observable] server startup failed: reason=getsockname\n");
-        server_shutdown(&srv);
+        server_shutdown(srv);
         return 1;
     }
     printf("[observable] tcp_bind: port=%d fd=%d state=LISTENING\n",
-           bound, srv.listen_fd);
+           bound, srv->listen_fd);
     /* THE STARTUP BANNER (issue #182): version, name, port and whether a secret
      * is set -- and never the secret itself, which must not appear in `ps`-visible
      * output or in any log this line is copied to. One line, after bind and the
      * drop, so a reader can tell what is running, where, and whether it
      * federates, without reading the command line. */
     printf("[observable] startup: version=%s name=%s port=%d secret=%s\n",
-           IRC_SERVE_VERSION, opts.name, bound, secret_state);
+           IRC_SERVE_VERSION, opts->name, bound, secret_state);
     /* `sasl=` is the startup line's half of "advertise only what you have": a
      * reader comparing two nodes' startup output can tell which one offers
      * authentication without opening either one's credential file. */
@@ -1537,136 +1483,255 @@ int main(int argc, char **argv)
     {
         const char *tls_state = "absent";
 
-        if (srv.tls != NULL) {
-            tls_state = opts.tls_insecure ? "insecure"
-                                          : (srv.tls_require ? "required"
+        if (srv->tls != NULL) {
+            tls_state = opts->tls_insecure ? "insecure"
+                                          : (srv->tls_require ? "required"
                                                              : "configured");
         }
         printf("[observable] server initialized: name=%s epoch=%llu peers=%d "
                "secret=%s secret_source=%s sasl=%s accounts=%s tls=%s tls_port=%d "
                "sts_duration=%u\n",
-               opts.name, (unsigned long long)srv.epoch,
-               (int)server_link_count(&srv),
+               opts->name, (unsigned long long)srv->epoch,
+               (int)server_link_count(srv),
                secret_state,
                secret_source,
-               sasl_store_count(srv.sasl_store) > 0u ? "loaded" : "none",
-               account_store_count(srv.account_store) > 0u ? "loaded" : "none",
-               tls_state, server_tls_port(&srv),
-               (unsigned)srv.sts_duration);
+               sasl_store_count(srv->sasl_store) > 0u ? "loaded" : "none",
+               account_store_count(srv->account_store) > 0u ? "loaded" : "none",
+               tls_state, server_tls_port(srv),
+               (unsigned)srv->sts_duration);
+    }
+    return 0;
+}
+
+/* The TLS phase: validate and load the certificate between the two binds,
+ * then bind the implicit-TLS listener. Still privileged (a root-owned 0600
+ * key loads here), before the drop. Returns 0 when TLS is settled -- absent
+ * or bound -- 1 on any refusal (already reported). */
+static int init_tls(server_t *srv, const node_opts_t *opts)
+{
+    /* ------------------------------------------------------------------------
+     * PHASE 12: TLS, and WHERE it is configured matters more than it looks
+     * ------------------------------------------------------------------------
+     * Here, between the two binds and before the drop, for two reasons at once:
+     * 3.4 forbids a blocking call inside the event loop, and reading a
+     * certificate is as blocking as reading a file; AND server_listen_tls()
+     * below REFUSES a port it cannot encrypt, so srv.tls has to exist before
+     * the TLS listener is bound. Both binds need privilege, so both precede
+     * the drop -- which is also what lets a root-owned 0600 key load: after
+     * the drop the node is `nobody` and could not open it. (Stores, the secret
+     * file and peers stay after the drop; see the drop's comment.)
+     *
+     * THE ORDER inside this block is load-bearing and each step refuses rather
+     * than degrades:
+     *
+     *   1. The cert/key PAIR is checked before either is opened. Half a
+     *      configuration is not a state this binary can be in.
+     *   2. tls_backend_node_init() checks the KEY'S PERMISSIONS before loading
+     *      anything, so a world-readable key refuses the whole configuration
+     *      rather than producing a node that offers a certificate whose private
+     *      half is on a shared filesystem.
+     *   3. --peer-tls is applied only after the peers exist and only if TLS
+     *      exists, and a name that matches no peer is a STARTUP ERROR: a flag that
+     *      quietly does nothing on a security option is worse than no flag.
+     */
+    if ((opts->tls_cert == NULL) != (opts->tls_key == NULL)) {
+        fprintf(stderr, "irc-serve: --tls-cert and --tls-key are a pair; "
+                        "supplying one is not a configuration this node has\n");
+        server_shutdown(srv);
+        return 1;
+    }
+    if (opts->tls_cert != NULL) {
+        /* THE KEY'S MODE IS CHECKED BEFORE ANYTHING IS LOADED, and it is a refusal
+         * of the whole CONFIGURATION rather than of the file: a node that cannot
+         * prove its key is private must not come up offering a certificate, because
+         * half-configured TLS that looks configured is the worst of the three
+         * states -- an operator reading `tls=configured` would believe in it. */
+        if (key_file_is_private(opts->tls_key) != 0) {
+            fprintf(stderr, "irc-serve: the TLS private key is readable by group "
+                            "or other; refusing to start\n");
+            server_shutdown(srv);
+            return 1;
+        }
+        if (tls_backend_node_init(&srv->tls, opts->tls_cert, opts->tls_key,
+                                  opts->tls_ca, opts->tls_insecure,
+                                  opts->tls_ocsp_staple,
+                                  (opts->tls_staple_permissive != 0) ? 0 : 1)
+            != 0) {
+            /* A CERTIFICATE THAT DID NOT LOAD IS A STARTUP FAILURE, and this is
+             * the one configuration error in the phase that is. The reasoning is
+             * cap.h's rule applied to the node rather than to a capability: a node
+             * that was told to serve TLS and cannot must NOT come up as a node
+             * that does not, because "my node has no `sts` in CAP LS" is a thing
+             * an operator has to go looking for and "TLS is on and broken" is
+             * worse than either. Compare --sasl-store, whose failure is NOT
+             * fatal: there, a node without a store refuses every AUTHENTICATE and
+             * says so, which is a correct node. Here, a node without a
+             * certificate would serve plaintext on the port the operator believes
+             * is encrypted. */
+            fprintf(stderr, "irc-serve: TLS was configured and could not be "
+                            "loaded; refusing to start rather than serving "
+                            "plaintext\n");
+            server_shutdown(srv);
+            return 1;
+        }
+        srv->tls_require = opts->tls_require;
+        srv->sts_duration = opts->tls_sts_duration;
+    } else {
+        /* Every TLS option without a certificate pair is an ERROR rather than a
+         * silent no-op, for the same reason: `--tls-port 6697 --tls-require` on a
+         * node with no certificate is a command line that says "this node is
+         * encrypted" and is not. --tls-insecure is included in the test because
+         * it says the same thing: "accept unverifiable peers" on a node that can
+         * have no peers is a configuration an operator believes in and does not
+         * have. */
+        if (opts->have_tls_port || opts->tls_require != 0 ||
+            opts->tls_ca != NULL || opts->tls_sts_duration != 0u ||
+            opts->tls_insecure != 0 || opts->tls_ocsp_staple != NULL ||
+            opts->tls_staple_permissive != 0) {
+            fprintf(stderr, "irc-serve: TLS options were given without "
+                            "--tls-cert and --tls-key\n");
+            server_shutdown(srv);
+            return 1;
+        }
+        if (opts->ntls_peers > 0) {
+            fprintf(stderr, "irc-serve: --peer-tls was given but this node has "
+                            "no TLS\n");
+            server_shutdown(srv);
+            return 1;
+        }
     }
 
-    /* Readiness: emitted after the listener is up and immediately before the
-     * loop is armed, so anything waiting on this line is talking to a serving
-     * node. */
-    printf("[observable] loop_running: listener_fd=%d tick_ms=%d state=ARMED\n",
-           srv.listen_fd, POLL_TICK_MS);
-    fflush(stdout);
+    /* THE IMPLICIT-TLS LISTENER, second and after the plain one. Its failure is
+     * FATAL rather than a warning, and that is a different decision from the
+     * certificate's: an operator who asked for --tls-port has said clients will be
+     * encrypted from the first byte, and a node that could not bind that port and
+     * said nothing would leave those clients on a plaintext port they were told
+     * not to use. A REFUSAL here is the honest answer. The certificate is already
+     * loaded above, so the no_tls_configured arm below is unreachable through
+     * this binary -- defence in depth, for a future caller that is not main(). */
+    if (opts->have_tls_port) {
+        if (server_listen_tls(srv, opts->tls_port) != 0) {
+            printf("[observable] server startup failed: tls_port=%d reason=%s\n",
+                   opts->tls_port,
+                   (srv->tls == NULL) ? "no_tls_configured" : strerror(errno));
+            server_shutdown(srv);
+            return 1;
+        }
+        printf("[observable] tls_bind: port=%d fd=%d state=LISTENING\n",
+               server_tls_port(srv), srv->tls_listen_fd);
+    }
+    return 0;
+}
 
-    rc = poll_loop_run(&srv);
+/* The base init phase: signals, server state, the writer pool, the command
+ * surface, and the plaintext listener bind. Returns 0 once the node holds a
+ * bound port, 1 on any refusal (already reported). */
+static int init_base(server_t *srv, const node_opts_t *opts)
+{
+    printf("%s initializing...\n", IRC_SERVE_VERSION);
+
+    if (install_handler(SIGTERM, on_stop_signal) != 0 ||
+        install_handler(SIGINT, on_stop_signal) != 0 ||
+        install_handler(SIGUSR1, on_usr1_signal) != 0) {
+        perror("sigaction");
+        return 1;
+    }
+    /* A write to a peer that has already gone must surface as EPIPE from
+     * send(), which is what MSG_NOSIGNAL in connection.c relies on. */
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
+
+    if (server_init(srv, opts->name) != 0) {
+        printf("[observable] server init failed: name=%s reason=invalid_name\n",
+               opts->name);
+        return 1;
+    }
+    g_srv_for_stop = srv;
+    /* Observable per-line framing/parse output. The node's own [observable]
+     * lines are the contract described at the top of this file, so the trace
+     * flag is on for the shipped binary. */
+    srv->trace = 1;
+    /* MT 2.2 (#241): store the count, then start the pool. A start failure
+     * refuses startup rather than degrading silently: writers owned the drain
+     * from this point on, so a half-started pool is a node that cannot send. */
+    server_set_writer_threads(srv, opts->writers);
+    if (server_writers_start(srv) != 0) {
+        fprintf(stderr, "irc-serve: writer pool failed to start\n");
+        server_shutdown(srv);
+        return 1;
+    }
+    /* The command surface. Phase 2 installed nothing here, which was the
+     * honest state of a node with no vocabulary: the loop accepted, framed and
+     * parsed and then said nothing at all. This is the assignment rather than a
+     * commands_install() helper so that what the shipped binary answers with is
+     * visible at the point where it decides it. */
+    srv->dispatch = commands_dispatch;
+
+    /* THE PLAIN LISTENER IS BOUND HERE, before the drop (issue #182:
+     * parse -> bind plain -> TLS init -> bind TLS -> drop -> load stores ->
+     * fed_open -> loop). Binding is the one step that can need privilege -- a
+     * low port -- and the TLS listener cannot be bound until the certificate
+     * is loaded (server_listen_tls() refuses a port it cannot encrypt), so the
+     * TLS configuration is validated and loaded between the two binds, still
+     * as root. Stores, the secret file and peers are read after the drop. */
+    if (server_listen(srv, opts->port) != 0) {
+        printf("[observable] server startup failed: port=%d reason=%s\n",
+               opts->port, strerror(errno));
+        server_shutdown(srv);
+        return 1;
+    }
+    return 0;
+}
+
+/* The parse phase: argv into opts, with --help/usage handled. Returns -1 to
+ * proceed, or the process exit code: 0 after --help, 2 after a usage error.
+ * (Help exits 0, so 0 cannot mean "proceed" -- hence the sentinel.) */
+static int parse_opts(int argc, char **argv, node_opts_t *opts)
+{
+    int rc = parse_args(argc, argv, opts);
+
     if (rc != 0) {
-        printf("[observable] loop_error: state=FAILED\n");
+        if (rc > 0) {
+            usage(stdout, argv[0]);
+            return 0;
+        }
+        usage(stderr, argv[0]);
+        return 2;
     }
+    return -1;
+}
 
-    /* Shutdown BEFORE reporting. server_shutdown() closes every connection
-     * still registered, so the numbers printed here describe the node as it
-     * actually finished, not a snapshot taken mid-teardown with connections
-     * still open. */
-    server_shutdown(&srv);
+/* main() is orchestration only: parse, then base init, then TLS, then the
+ * runtime (drop, stores, federation, banner), then the loop. Each phase is a
+ * static function above with value-in/value-out shape, so a future unit seam
+ * can drive one without a process; main itself only maps phase results to
+ * exit codes. Order is load-bearing (see init_tls); do not reorder. */
+int main(int argc, char **argv)
+{
+    node_opts_t opts;
+    server_t srv;
+    int rc;
 
-    /* `dial_connected` AND `dial_failed` ARE HERE BECAUSE PHASE 12 ADDED A WAY FOR A
-     * DIAL TO FAIL, and this line is the only place the shipped binary reports
-     * anything.
-     *
-     * They were here before this phase and were REMOVED at the same time, because
-     * the harness's inline children were the only thing that ever printed them and
-     * the shipped binary had no peer to dial. Phase 12 gave it one -- and gave the
-     * counter a second failure mode, since a TCP connect can now succeed and the
-     * CERTIFICATE still be refused. A node whose peer links are all failing on
-     * certificates produces `dial_failed=0`, `fed_dead=0` and no established links,
-     * and without these two numbers that combination is indistinguishable from a
-     * node with no peers configured.
-     *
-     * THE PAIR IS DISTINGUISHABLE AND THAT IS WHY BOTH ARE HERE. `dial_connected=1`
-     * with `dial_failed=0` and no link established says the socket worked and the
-     * handshake did not, which is a certificate problem with a completely
-     * different fix from a refused port. test_peer_tls.c asserts exactly that
-     * reading, and it could not before these two numbers were published. */
-    printf("[observable] loop_stats: ticks=%llu eintr=%llu accepted=%llu "
-           "closed=%llu lines=%llu parse_reject=%llu frame_error=%llu "
-           "writeq_overflow=%llu write_error=%llu partial_writes=%llu "
-           "rejected_fd=%llu dial_connected=%llu dial_failed=%llu "
-           "pass_seen=%llu reply_refused=%llu msg_stripped=%llu "
-           "fed_rejected=%llu fed_duplicate=%llu fed_hs_timeout=%llu "
-           "fed_dead=%llu fed_retry_exhausted=%llu "
-           "fed_preauth_drop=%llu fed_hop_drop=%llu "
-           "fed_own_origin=%llu fed_untagged_relay=%llu "
-           "fed_unknown_verb=%llu fed_verb_deferred=%llu fed_malformed=%llu "
-           "fed_dup_drop=%llu fed_dedup_dup=%llu fed_dedup_error=%llu fed_squit_self=%llu "
-           "nickreg_known=%zu nickreg_evicted=%llu "
-           "resume_noted=%llu resume_applied=%llu resume_expired=%llu "
-           "resume_rejected=%llu resume_evicted=%llu resume_swept=%llu "
-           "resume_chan_gone=%llu resume_chan_taken=%llu resume_held=%zu "
-           "burst_refused=%llu burst_abandoned=%llu burst_truncated=%llu "
-           "topic_cache_full=%llu sasl_ok=%llu sasl_fail=%llu "
-           "tls_handshake_failed=%llu tls_client_refused=%llu\n",
-           (unsigned long long)srv.n_ticks, (unsigned long long)srv.n_eintr,
-           (unsigned long long)srv.n_accepted, (unsigned long long)srv.n_closed,
-           (unsigned long long)srv.n_lines,
-           (unsigned long long)srv.n_parse_reject,
-           (unsigned long long)srv.n_frame_error,
-           (unsigned long long)srv.n_writeq_overflow,
-           (unsigned long long)atomic_load_explicit(&srv.n_write_error, memory_order_relaxed),
-           (unsigned long long)atomic_load_explicit(&srv.n_partial_writes, memory_order_relaxed),
-           (unsigned long long)srv.n_rejected_fd,
-           (unsigned long long)srv.n_dial_connected,
-           (unsigned long long)srv.n_dial_failed,
-           (unsigned long long)srv.n_pass_seen,
-           (unsigned long long)atomic_load_explicit(&srv.n_reply_refused, memory_order_relaxed),
-           (unsigned long long)srv.n_msg_stripped,
-           (unsigned long long)srv.n_link_rejected,
-           (unsigned long long)srv.n_link_duplicate,
-           (unsigned long long)srv.n_fed_hs_timeout,
-            (unsigned long long)srv.n_fed_dead,
-            (unsigned long long)srv.n_fed_retry_exhausted,
-            (unsigned long long)srv.n_fed_preauth_drop,
-           (unsigned long long)srv.n_fed_hop_drop,
-           (unsigned long long)srv.n_fed_own_origin,
-           (unsigned long long)srv.n_fed_untagged_relay,
-           (unsigned long long)srv.n_fed_unknown_verb,
-           (unsigned long long)srv.n_fed_verb_deferred,
-           (unsigned long long)srv.n_fed_malformed,
-           (unsigned long long)srv.n_fed_dup_drop,
-           (unsigned long long)srv.n_fed_dedup_dup,
-           (unsigned long long)srv.n_fed_dedup_error,
-           (unsigned long long)srv.n_fed_squit_self,
-            (size_t)fed_nickreg_count(&srv),
-            (unsigned long long)srv.n_rnick_evicted,
-            (unsigned long long)srv.n_resume_noted,
-            (unsigned long long)srv.n_resume_applied,
-            (unsigned long long)srv.n_resume_expired,
-            (unsigned long long)srv.n_resume_rejected,
-            (unsigned long long)srv.n_resume_evicted,
-            (unsigned long long)srv.n_resume_swept,
-            (unsigned long long)srv.n_resume_chan_gone,
-            (unsigned long long)srv.n_resume_chan_taken,
-            (size_t)resume_count(&srv),
-           (unsigned long long)srv.n_burst_refused,
-           (unsigned long long)srv.n_burst_abandoned,
-           (unsigned long long)srv.n_burst_truncated,
-           (unsigned long long)srv.n_topic_cache_full,
-           (unsigned long long)srv.n_sasl_ok,
-           (unsigned long long)srv.n_sasl_fail,
-           (unsigned long long)srv.n_tls_handshake_failed,
-           (unsigned long long)srv.n_tls_client_refused);
+    /* Before any output: see the note on line buffering above. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
-    /* The link table itself, and last, after the counters: 8 asks for "a way to
-     * dump peers and their FSM states" and the state is what the counters are
-     * about. It is printed at shutdown as well as on every event, so a node that
-     * exits cleanly still leaves a record of what it was linked to. */
-    fed_dump(&srv, "shutdown");
-
-    /* exit 0 even after a loop error: a clean shutdown is what a test asserts,
-     * and a failed loop has already said so on stdout. */
-    printf("[observable] server_shutdown: state=STOPPED\n");
-    return (rc == 0) ? 0 : 1;
+    rc = parse_opts(argc, argv, &opts);
+    if (rc >= 0) {
+        return rc;
+    }
+    rc = init_base(&srv, &opts);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = init_tls(&srv, &opts);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = init_runtime(&srv, &opts);
+    if (rc != 0) {
+        return rc;
+    }
+    return run_node(&srv);
 }
