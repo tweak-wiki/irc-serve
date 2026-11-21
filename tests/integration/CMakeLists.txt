@@ -210,6 +210,9 @@ irc_add_integration_test(test_writer_fault test_writer_fault.c)
 # cap queued ahead of a thin conn; the thin conn drains while the fat conn
 # has moved at most two slices, and the fat conn then drains byte-exact.
 irc_add_integration_test(test_writer_slice test_writer_slice.c)
+# MT #366: sticky fd%N scheduling + demand steal of whole conns past
+# WRITER_STEAL_BYTES; idle writer drains the fat owner's conns, FIFO holds.
+irc_add_integration_test(test_writer_sticky test_writer_sticky.c)
 # 3.4: explicit fd >= FD_SETSIZE rejection at the accept site.
 irc_add_integration_test(test_fdsize_reject test_fdsize_reject.c)
 

@@ -120,44 +120,30 @@ int main(void)
                      wakes(&s, (int)j), before[j]);
     }
 
-    /* A targeted conn kick wakes its owner; a NULL-conn kick lands on slot
-     * 0, still targeted -- never a broadcast. */
+    /* A targeted conn kick wakes its owner; NULL server/conn kicks are
+     * no-ops -- never a broadcast. */
     for (i = 0; i < NW; i++) {
         before[i] = wakes(&s, i);
     }
     server_writers_kick_conn(&s, conns[other]);
     server_writers_kick_conn(NULL, NULL); /* no-op, must not crash */
-    server_writers_kick_conn(&s, NULL);   /* NULL conn: slot 0, still targeted */
+    server_writers_kick_conn(&s, NULL);   /* no-op, must not crash */
     deadline = now_us() + (long long)DEADLINE_MS * 1000LL;
     while (now_us() < deadline) {
         unsigned long want_other = before[slots[other]] + 1u;
-        unsigned long want_zero = before[0] + 1u;
 
-        if (slots[other] == 0) {
-            want_zero++;
-        }
-        if (wakes(&s, slots[other]) == want_other &&
-            wakes(&s, 0) == want_zero) {
+        if (wakes(&s, slots[other]) == want_other) {
             break;
         }
         (void)usleep(1000);
     }
-    {
-        unsigned long want_other = before[slots[other]] + 1u;
-        unsigned long want_zero = before[0] + 1u;
-
-        if (slots[other] == 0) {
-            want_zero++;
-        }
-        TF_CHECK_MSG(wakes(&s, slots[other]) == want_other,
-                     "kick_conn target slot %d: %lu != %lu", slots[other],
-                     wakes(&s, slots[other]), want_other);
-        TF_CHECK_MSG(wakes(&s, 0) == want_zero,
-                     "NULL-conn kick: slot 0 %lu != %lu", wakes(&s, 0),
-                     want_zero);
-    }
+    TF_CHECK_MSG(wakes(&s, slots[other]) == before[slots[other]] + 1u,
+                 "kick_conn target slot %d: %lu != %lu", slots[other],
+                 wakes(&s, slots[other]), before[slots[other]] + 1u);
+    /* The two NULL kicks above must not have woken anyone: only the
+     * targeted slot moved. */
     for (j = 0; j < (size_t)NW; j++) {
-        if ((int)j == slots[other] || (int)j == 0) {
+        if ((int)j == slots[other]) {
             continue;
         }
         TF_CHECK_MSG(wakes(&s, (int)j) == before[j],
