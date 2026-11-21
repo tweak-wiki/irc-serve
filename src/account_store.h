@@ -57,15 +57,15 @@
  * ---------------------------------------------------------------------------
  * One record per line:
  *
- *     <name> TAB <password> TAB <created>
+ *     <name> TAB <password> TAB <created>             (legacy), or
+ *     <name> TAB $pbkdf2-sha256$<iter>$<salt> TAB <created>  (hashed)
  *
- *   name      the account name. See account_store.h's ACCOUNT_MAX_NAME for the
- *             bound and for why this module does not impose a CHARSET rule.
- *   password  the secret. A TAB is impossible in it because a TAB is the
- *             separator, and a SPACE is possible and is why the separator is a
- *             TAB: a registry that cannot hold a passphrase pushes operators
- *             towards weak ones, which is exactly the argument
- *             sasl_store_load() makes for the same choice.
+ * A legacy line is re-salted with a fresh per-record salt and stretched on
+ * the way in, so the heap never holds what the file held; the hashed form
+ * is what account_store_format_record() writes. A `$`-leading field that is
+ * not the full `$pbkdf2-sha256$` magic is still a legacy password; a field
+ * wearing the magic but misshapen fails the whole load rather than being
+ * skipped.
  *   created   integer seconds since the Unix epoch: when the operator created
  *             the record. It is the one piece of registration metadata this
  *             module holds, and the reason it is HERE rather than "a field for
@@ -228,8 +228,9 @@ account_store_t *account_store_new(void);
 
 /* Add or replace the record for `name`. Returns 0, or -1 on a NULL/empty
  * `name`, an over-long name or password, a name or password containing a TAB,
- * or a full store. The name is COPIED; `password` is HASHED (salted SHA-256
- * under the registry's per-boot salt) and never stored. The timestamp is a
+ * an unwire-safe name, or a full store. The name is COPIED; `password` is
+ * HASHED (PBKDF2-HMAC-SHA256 under a fresh per-record salt, stored with the
+ * digest) and never stored. The timestamp is a
  * C long rather than a string because it is a NUMBER, and a number kept as
  * a string is a number two comparisons from being compared wrongly.
  *
@@ -239,8 +240,8 @@ account_store_t *account_store_new(void);
  * which is "the epoch" and is honest about being unknown rather than false:
  * it cannot be confused with a real creation time because it is not one.
  *
- * THERE IS NO account_store_has(), and the absence is a decision rather than an
- * oversight. "Does this account exist" is a weaker question than "does this
+ * THERE IS NO account_store_has(), and the absence is a decision rather than
+ * an oversight. "Does this account exist" is a weaker question than "does this
  * account exist AND is this its password", verify() below answers the stronger
  * one, and a second entry point that answers the weaker one over the same table
  * is a second place for the two answers to disagree -- which is the shape of
@@ -248,6 +249,14 @@ account_store_t *account_store_new(void);
  * path and another on another. One question, one function. */
 int account_store_add(account_store_t *store, const char *name,
                       const char *password, long created);
+
+/* Format a file-ready hashed record for `name`/`password`/`created`: the line
+ * an operator pastes into --account-store's file, and the line tests write
+ * into fixture files. The salt is fresh per call, so two calls with the same
+ * password produce different lines. Returns 0, or -1 on invalid fields or
+ * a too-small `cap`. */
+int account_store_format_record(const char *name, const char *password,
+                                long created, char *out, size_t cap);
 
 /* Does `name` exist AND is `password` the password held for it?
  *
@@ -261,10 +270,10 @@ int account_store_add(account_store_t *store, const char *name,
  * comparison against a fixed dummy, so "no such account" and "wrong password"
  * cost the same and neither costs a function of WHERE the difference is. The
  * cost, stated rather than hidden: one bounded linear scan of at most
- * ACCOUNT_MAX_RECORDS constant-time comparisons per login, which is noise
- * next to the base64 decode that precedes it. The password itself is never
- * stored -- each record holds SHA-256(salt || password) under a per-boot
- * salt -- so the comparison is hash-against-hash. */
+ * ACCOUNT_MAX_RECORDS constant-time comparisons plus one PBKDF2 per login,
+ * which is noise next to the digits the operator typed to get here. The
+ * password itself is never stored -- each record holds a per-record salt and
+ * a PBKDF2-HMAC-SHA256 digest -- so the comparison is hash-against-hash. */
 int account_store_verify(const account_store_t *store, const char *name,
                          const char *password);
 

@@ -60,14 +60,16 @@
  *   AGAINST THE HOST'S getpwnam(). Real, but it makes a federated node's user
  *   namespace the host's, so a container image's `root` becomes an IRC identity
  *   nobody chose, and the node's `--name` gives no hint of it.
- *   A HASH. Right in the abstract and -- for the FILE -- wrong here: this
- *   tree contains no cryptographic code and hand-rolling a primitive into an
- *   authentication path is a worse outcome than being explicit about what the
- *   file is. The file is a secret store, so it is required to be a SECRET
- *   FILE -- see sasl_store_load() -- and that requirement, not a hash, is the
- *   control on what is on disk. What is hashed is the HEAP copy: each record
- *   holds SHA-256(salt || password) under a per-boot salt, so a core dump or
- *   an allocator reuse reads back digests rather than passwords.
+ *   A HASH. Right in the abstract, and this is where the file gets one: each
+ *   record holds a per-record salt and a PBKDF2-HMAC-SHA256 digest, so a
+ *   stolen file is a slow brute-force per password rather than a fast one
+ *   over the whole table, and identical passwords hash differently. Legacy
+ *   `authcid<TAB>password` lines still load -- re-salted and stretched on the
+ *   way in -- so an old file keeps working while its disk copy stays
+ *   plaintext; sasl_store_format_record() writes the hashed line to replace
+ *   it with. What is hashed is always the HEAP copy too: each record holds
+ *   salt plus digest, so a core dump or an allocator reuse reads back
+ *   digests rather than passwords.
  */
 #ifndef IRC_SASL_FRAMEWORK_H
 #define IRC_SASL_FRAMEWORK_H
@@ -141,12 +143,19 @@ typedef struct {
  * a warning: the cost of getting it wrong is every password on the node, and
  * the cost of getting it right is an operator who has to run `chmod 600`.
  *
- * FORMAT. One record per line, `authcid<TAB>password`. Blank lines and lines
- * whose first non-blank byte is '#' are ignored. The TAB is mandatory and is
- * the only separator, because the alternative -- splitting on whitespace -- makes
- * a password with a space in it unrepresentable, and a store that cannot hold a
- * passphrase is a store that pushes operators to weak ones. A record with no
- * TAB is malformed and fails the whole load rather than being skipped. */
+ * FORMAT. One record per line: `authcid<TAB>password` (legacy) or
+ * `authcid<TAB>$pbkdf2-sha256$<iter>$<salthex>$<dkhex>` (hashed, as
+ * written by sasl_store_format_record()). A legacy line is re-salted with
+ * a fresh per-record salt and stretched on the way in, so the heap never
+ * holds what the file held. A `$`-leading field that is not the full magic
+ * is still a legacy password; a field wearing the magic but misshapen is
+ * malformed and fails the whole load rather than being skipped. Blank lines
+ * and lines whose first non-blank byte is '#' are ignored. The TAB is
+ * mandatory and is the only separator, because the alternative -- splitting
+ * on whitespace -- makes a password with a space in it unrepresentable,
+ * and a store that cannot hold a passphrase is a store that pushes
+ * operators to weak ones. A record with no TAB is malformed and fails the
+ * whole load rather than being skipped. */
 sasl_store_t *sasl_store_load(const char *path);
 
 /* An empty store, for a caller that wants to build one in memory. sasl_state_
@@ -156,8 +165,17 @@ sasl_store_t *sasl_store_new(void);
 
 /* Add or replace the record for `authcid`. Returns 0, or -1 on a NULL/empty or
  * over-long authcid, an over-long password, or a full store. `password` is
- * HASHED (salted SHA-256 under the store's per-boot salt) and never stored. */
+ * HASHED (PBKDF2-HMAC-SHA256 under a fresh per-record salt, stored with the
+ * digest) and never stored. */
 int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password);
+
+/* Format a file-ready hashed record for `authcid`/`password`: the line an
+ * operator pastes into --sasl-store's file, and the line tests write into
+ * fixture files. The salt is fresh per call, so two calls with the same
+ * password produce different lines. Returns 0, or -1 on invalid fields or
+ * a too-small `cap`. */
+int sasl_store_format_record(const char *authcid, const char *password,
+                             char *out, size_t cap);
 
 /* Number of records loaded. 0 on a NULL store, which is the honest answer for
  * "this node can authenticate nobody". */
@@ -207,13 +225,13 @@ int sasl_plain_parse(const char *payload, size_t len,
  * is the whole reason this is a loop with an accumulator rather than a
  * strcmp() and a return.
  *
- * THE COST, stated rather than hidden: a node with N credentials spends N
- * constant-time comparisons per AUTHENTICATE, and N is capped at
- * SASL_MAX_CREDENTIALS, so the worst case is 64 short comparisons on a
- * connection that has not registered. That is noise next to the base64 decode
- * that precedes it. The password itself is never stored -- each record holds
- * SHA-256(salt || password) under a per-boot salt -- so the comparison is
- * hash-against-hash and a heap dump reads back digests. */
+ * THE COST, stated rather than hidden: a node spends one PBKDF2 per
+ * AUTHENTICATE plus a bounded linear walk of at most SASL_MAX_CREDENTIALS
+ * string comparisons to find the record -- the walk, not the KDF, is what
+ * scales with N, and both cases cost the same. The password itself is never
+ * stored -- each record holds a per-record salt and a PBKDF2-HMAC-SHA256
+ * digest -- so the comparison is hash-against-hash and a heap dump reads
+ * back digests. */
 int sasl_plain_verify(const sasl_store_t *store,
                       const char *authzid, const char *authcid, const char *passwd);
 

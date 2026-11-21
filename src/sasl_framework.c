@@ -209,10 +209,10 @@ static void sasl_wipe(void *p, size_t n)
     }
 }
 
-/* One salt per store, generated in sasl_store_new(): every *_load() builds its
- * store there, so every boot hashes under a fresh salt, and the in-memory
- * *_add() path hashes under the same one -- which is what makes the two agree.
- * Salt per boot is enough because the stores are per node (see the header). */
+/* One salt per RECORD, generated where the record is created: a boot-wide salt
+ * meant identical passwords hashed identically, which told who shared a
+ * password. Uniqueness (not secrecy) is all a salt needs, and getentropy()
+ * per record is one syscall on a path that runs once per credential. */
 static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 {
 #if defined(__APPLE__)
@@ -264,44 +264,178 @@ static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 #endif
 }
 
-/* SHA-256(salt || password). The heap's only copy of the secret is this
- * digest; the password bytes themselves are never stored. */
-static void sasl_hash_password(const unsigned char salt[SASL_SALT_LEN],
-                               const char *password,
-                               unsigned char out[SASL_HASH_LEN])
-{
-    sasl_sha256_t ctx;
+/* --------------------------------------------------------------------------
+ * PBKDF2-HMAC-SHA256, and why it is here rather than in a library
+ * --------------------------------------------------------------------------
+ * Two defects stood here: SHA-256(salt || password) is fast enough to brute
+ * force on a GPU, and the salt was generated once per boot, so identical
+ * passwords hashed identically and told who shared a password. The fix is a
+ * slow KDF under a per-record salt. The default build links nothing beyond
+ * libc (see src/CMakeLists.txt's WITH_TLS comment) and the TLS backend
+ * offers no KDF entry point, so the lines below are built on this file's own
+ * SHA-256 rather than on a new dependency.
+ *
+ * dkLen is SASL_HASH_LEN (32): exactly one HMAC block, so there is no block
+ * index past INT(1) and no output truncation to get wrong. */
+#define SASL_PBKDF2_ITER     20000u    /* iterations for every NEW digest */
+#define SASL_PBKDF2_ITER_MIN 1000u     /* weakest digest this loader honours */
+#define SASL_PBKDF2_ITER_MAX 10000000u /* absurdity bound on a parsed count */
 
+/* The version tag a hashed file record wears, and the rule for recognising
+ * one: the password field STARTS WITH this magic. A legacy password that
+ * starts with a lone `$` is still plaintext -- only this full prefix enters
+ * the hashed arm, and anything wearing it but misshapen is malformed rather
+ * than guessed at. */
+#define SASL_HASH_MAGIC "$pbkdf2-sha256$"
+
+static void sasl_hmac_sha256(const unsigned char *key, size_t keylen,
+                             const unsigned char *data, size_t datalen,
+                             unsigned char out[SASL_HASH_LEN])
+{
+    unsigned char kbuf[64];
+    unsigned char ipad[64];
+    unsigned char opad[64];
+    unsigned char inner[SASL_HASH_LEN];
+    sasl_sha256_t ctx;
+    size_t i;
+
+    /* Keys longer than a block hash down; shorter ones zero-pad. Either way
+     * the pads below see exactly one block. */
+    if (keylen > sizeof kbuf) {
+        sasl_sha256_init(&ctx);
+        sasl_sha256_update(&ctx, key, keylen);
+        sasl_sha256_final(&ctx, kbuf);
+        memset(kbuf + SASL_HASH_LEN, 0, sizeof kbuf - SASL_HASH_LEN);
+    } else {
+        memcpy(kbuf, key, keylen);
+        memset(kbuf + keylen, 0, sizeof kbuf - keylen);
+    }
+    for (i = 0; i < sizeof kbuf; i++) {
+        ipad[i] = (unsigned char)(kbuf[i] ^ 0x36u);
+        opad[i] = (unsigned char)(kbuf[i] ^ 0x5cu);
+    }
     sasl_sha256_init(&ctx);
-    sasl_sha256_update(&ctx, salt, SASL_SALT_LEN);
-    sasl_sha256_update(&ctx, (const unsigned char *)password, strlen(password));
+    sasl_sha256_update(&ctx, ipad, sizeof ipad);
+    sasl_sha256_update(&ctx, data, datalen);
+    sasl_sha256_final(&ctx, inner);
+    sasl_sha256_init(&ctx);
+    sasl_sha256_update(&ctx, opad, sizeof opad);
+    sasl_sha256_update(&ctx, inner, sizeof inner);
     sasl_sha256_final(&ctx, out);
-    /* The tail of the password may still sit in the context's block. */
+    /* Key material in five buffers, none of which may outlive the call. */
+    sasl_wipe(kbuf, sizeof kbuf);
+    sasl_wipe(ipad, sizeof ipad);
+    sasl_wipe(opad, sizeof opad);
+    sasl_wipe(inner, sizeof inner);
     sasl_wipe(&ctx, sizeof ctx);
 }
 
-/* shortcut: the FILE stays plaintext-on-disk (0600 enforced at load); what is
- * hashed is the HEAP copy. When the operator threat model needs the disk copy
- * gone too, upgrade to a salted file format. */
+/* PBKDF2(password, salt, iter, 32). Callers guarantee iter >= 1: fresh digests
+ * pass SASL_PBKDF2_ITER and parsed ones passed the MIN bound below. */
+static void sasl_pbkdf2(const char *password,
+                        const unsigned char salt[SASL_SALT_LEN],
+                        unsigned int iter, unsigned char out[SASL_HASH_LEN])
+{
+    unsigned char msg[SASL_SALT_LEN + 4u];
+    unsigned char u[SASL_HASH_LEN];
+    unsigned char t[SASL_HASH_LEN];
+    size_t pwlen = strlen(password);
+    unsigned int i;
+    size_t j;
+
+    memcpy(msg, salt, SASL_SALT_LEN);
+    msg[SASL_SALT_LEN] = 0u;
+    msg[SASL_SALT_LEN + 1u] = 0u;
+    msg[SASL_SALT_LEN + 2u] = 0u;
+    msg[SASL_SALT_LEN + 3u] = 1u; /* INT(1), big-endian: the only block */
+    sasl_hmac_sha256((const unsigned char *)password, pwlen, msg, sizeof msg,
+                     u);
+    memcpy(out, u, SASL_HASH_LEN);
+    for (i = 1u; i < iter; i++) {
+        sasl_hmac_sha256((const unsigned char *)password, pwlen, u, sizeof u,
+                         t);
+        for (j = 0; j < SASL_HASH_LEN; j++) {
+            out[j] ^= t[j];
+        }
+        memcpy(u, t, sizeof u);
+    }
+    sasl_wipe(msg, sizeof msg);
+    sasl_wipe(u, sizeof u);
+    sasl_wipe(t, sizeof t);
+}
+
+/* The KDF this store hashes under. The heap's only copy of the secret is this
+ * digest; the password bytes themselves are never stored. */
+static void sasl_hash_password(const unsigned char salt[SASL_SALT_LEN],
+                               unsigned int iter, const char *password,
+                               unsigned char out[SASL_HASH_LEN])
+{
+    sasl_pbkdf2(password, salt, iter, out);
+}
+
+static int sasl_hex_val(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/* Decode exactly 2*outlen hex chars; -1 on anything else. Fixed length rather
+ * than NUL-terminated so a short field cannot decode to a short salt. */
+static int sasl_hex_decode(const char *in, unsigned char *out, size_t outlen)
+{
+    size_t i;
+
+    for (i = 0; i < outlen; i++) {
+        int hi = sasl_hex_val(in[2u * i]);
+        int lo = sasl_hex_val(in[2u * i + 1u]);
+
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i] = (unsigned char)((unsigned)hi << 4u | (unsigned)lo);
+    }
+    return 0;
+}
+
+static void sasl_hex_encode(const unsigned char *in, size_t inlen, char *out)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t i;
+
+    for (i = 0; i < inlen; i++) {
+        out[2u * i] = digits[in[i] >> 4u];
+        out[2u * i + 1u] = digits[in[i] & 15u];
+    }
+    out[2u * inlen] = '\0';
+}
+
+/* A record holds a salt and a stretched digest, never a password: the FILE may
+ * still carry a legacy plaintext line (0600 enforced at load), but the compat
+ * reader re-salts and stretches it on the way in, so what is on the HEAP --
+ * and what a dump reads back -- is always salt plus digest. */
 struct sasl_record {
     char authcid[SASL_MAX_AUTHCID + 1];
-    unsigned char phash[SASL_HASH_LEN]; /* SHA-256(salt || password) */
+    unsigned char salt[SASL_SALT_LEN]; /* unique per record, stored with it */
+    unsigned char phash[SASL_HASH_LEN]; /* PBKDF2(password, salt, iter) */
+    unsigned int iter; /* the count this digest was stretched with */
 };
 
 struct sasl_store {
     struct sasl_record rec[SASL_MAX_CREDENTIALS];
     size_t n;
-    unsigned char salt[SASL_SALT_LEN];
 };
 
 sasl_store_t *sasl_store_new(void)
 {
-    sasl_store_t *store = (sasl_store_t *)calloc(1, sizeof(sasl_store_t));
-
-    if (store != NULL) {
-        sasl_gen_salt(store->salt);
-    }
-    return store;
+    return (sasl_store_t *)calloc(1, sizeof(sasl_store_t));
 }
 
 void sasl_store_free(sasl_store_t *store)
@@ -366,11 +500,29 @@ static int authcid_eq(const char *a, const char *b)
     return diff == 0u;
 }
 
+/* Slot for authcid: the existing record, or the new tail. (size_t)-1 when the
+ * store is full. Split out of sasl_store_add() so the hashed-record path
+ * below shares the replace rule rather than reimplementing it. */
+static size_t store_slot_for(sasl_store_t *store, const char *authcid)
+{
+    size_t i;
+
+    for (i = 0; i < store->n; i++) {
+        if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
+            return i;
+        }
+    }
+    if (store->n >= (size_t)SASL_MAX_CREDENTIALS) {
+        return (size_t)-1;
+    }
+    return store->n;
+}
+
 int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password)
 {
     size_t alen;
     size_t plen;
-    size_t at = 0;
+    size_t at;
 
     if (store == NULL || authcid == NULL || password == NULL ||
         authcid[0] == '\0') {
@@ -386,28 +538,139 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
     if (strchr(authcid, '\t') != NULL || strchr(password, '\t') != NULL) {
         return -1;
     }
-
-    for (size_t i = 0; i < store->n; i++) {
-        if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
-            at = i;
-            break;
-        }
-        at = store->n;
+    at = store_slot_for(store, authcid);
+    if (at == (size_t)-1) {
+        return -1;
     }
     if (at == store->n) {
-        if (store->n >= (size_t)SASL_MAX_CREDENTIALS) {
-            return -1;
-        }
         store->n++;
     }
     memcpy(store->rec[at].authcid, authcid, alen + 1u);
-    sasl_hash_password(store->salt, password, store->rec[at].phash);
+    /* Fresh salt per record: two records with the same password hash
+     * differently, so the store no longer tells who shares a password. */
+    sasl_gen_salt(store->rec[at].salt);
+    store->rec[at].iter = SASL_PBKDF2_ITER;
+    sasl_hash_password(store->rec[at].salt, SASL_PBKDF2_ITER, password,
+                       store->rec[at].phash);
     return 0;
 }
 
-/* One record per line: `authcid<TAB>password`. Returns 0 on success, -1 on a
- * malformed line. The line is modified in place, so the caller hands it a buffer
- * it owns. */
+/* Install an already-hashed record: the file carried the salt and the digest,
+ * so there is nothing to derive. The authcid bound is checked HERE, because
+ * this path does not go through sasl_store_add(). */
+static int store_put_hashed(sasl_store_t *store, const char *authcid,
+                            const unsigned char salt[SASL_SALT_LEN],
+                            unsigned int iter,
+                            const unsigned char dk[SASL_HASH_LEN])
+{
+    size_t at;
+
+    if (store == NULL || authcid == NULL || authcid[0] == '\0' ||
+        strlen(authcid) > (size_t)SASL_MAX_AUTHCID) {
+        return -1;
+    }
+    at = store_slot_for(store, authcid);
+    if (at == (size_t)-1) {
+        return -1;
+    }
+    if (at == store->n) {
+        store->n++;
+    }
+    memcpy(store->rec[at].authcid, authcid, strlen(authcid) + 1u);
+    memcpy(store->rec[at].salt, salt, SASL_SALT_LEN);
+    memcpy(store->rec[at].phash, dk, SASL_HASH_LEN);
+    store->rec[at].iter = iter;
+    return 0;
+}
+
+/* A hashed file field: `$pbkdf2-sha256$<iter>$<salthex>$<dkhex>`. Every length
+ * is exact and iter is bounded: a truncated salt is not a salt, and a count
+ * outside MIN..MAX is not this node's KDF. Anything wearing the magic but not
+ * shaped like this is malformed -- guessing would promote a corrupted hash
+ * into a record no password can ever match, which fails LOUD on every login
+ * instead of once at load. */
+static int store_parse_hashed(sasl_store_t *store, const char *authcid,
+                              const char *field)
+{
+    const char *p = field + sizeof SASL_HASH_MAGIC - 1u;
+    const char *d1 = strchr(p, '$');
+    const char *d2;
+    unsigned long iter = 0;
+    unsigned char salt[SASL_SALT_LEN];
+    unsigned char dk[SASL_HASH_LEN];
+    int rc = -1;
+
+    if (d1 == NULL || d1 == p) {
+        goto out; /* no count, or an empty one */
+    }
+    for (const char *q = p; q != d1; q++) {
+        if (*q < '0' || *q > '9') {
+            goto out;
+        }
+        iter = iter * 10u + (unsigned long)(*q - '0');
+        if (iter > (unsigned long)SASL_PBKDF2_ITER_MAX) {
+            goto out;
+        }
+    }
+    if (iter < (unsigned long)SASL_PBKDF2_ITER_MIN) {
+        goto out;
+    }
+    d2 = strchr(d1 + 1, '$');
+    if (d2 == NULL || (size_t)(d2 - (d1 + 1)) != 2u * SASL_SALT_LEN ||
+        strlen(d2 + 1) != 2u * SASL_HASH_LEN) {
+        goto out;
+    }
+    if (sasl_hex_decode(d1 + 1, salt, sizeof salt) != 0 ||
+        sasl_hex_decode(d2 + 1, dk, sizeof dk) != 0) {
+        goto out;
+    }
+    rc = store_put_hashed(store, authcid, salt, (unsigned int)iter, dk);
+out:
+    sasl_wipe(salt, sizeof salt);
+    sasl_wipe(dk, sizeof dk);
+    return rc;
+}
+
+/* Format a file-ready hashed record for authcid/password: the line an
+ * operator pastes into --sasl-store's file, and the line tests write into
+ * fixture files. Returns 0, or -1 on invalid fields or a too-small `cap`. */
+int sasl_store_format_record(const char *authcid, const char *password,
+                             char *out, size_t cap)
+{
+    unsigned char salt[SASL_SALT_LEN];
+    unsigned char dk[SASL_HASH_LEN];
+    char salthex[2u * SASL_SALT_LEN + 1u];
+    char dkhex[2u * SASL_HASH_LEN + 1u];
+    int n;
+    int rc = -1;
+
+    if (authcid == NULL || password == NULL || out == NULL || cap == 0u ||
+        authcid[0] == '\0' || strlen(authcid) > (size_t)SASL_MAX_AUTHCID ||
+        strlen(password) > (size_t)SASL_MAX_PASSWORD ||
+        strchr(authcid, '\t') != NULL || strchr(password, '\t') != NULL) {
+        return -1;
+    }
+    sasl_gen_salt(salt);
+    sasl_hash_password(salt, SASL_PBKDF2_ITER, password, dk);
+    sasl_hex_encode(salt, sizeof salt, salthex);
+    sasl_hex_encode(dk, sizeof dk, dkhex);
+    n = snprintf(out, cap, "%s\t%s%u$%s$%s", authcid, SASL_HASH_MAGIC,
+                 SASL_PBKDF2_ITER, salthex, dkhex);
+    if (n >= 0 && (size_t)n < cap) {
+        rc = 0;
+    }
+    sasl_wipe(salt, sizeof salt);
+    sasl_wipe(dk, sizeof dk);
+    sasl_wipe(salthex, sizeof salthex);
+    sasl_wipe(dkhex, sizeof dkhex);
+    return rc;
+}
+
+/* One record per line: `authcid<TAB>password` (legacy: re-salted and stretched
+ * on the way in, so the heap never holds what the file held), or
+ * `authcid<TAB>$pbkdf2-sha256$...` (the format sasl_store_format_record()
+ * writes). Returns 0 on success, -1 on a malformed line. The line is modified
+ * in place, so the caller hands it a buffer it owns. */
 static int store_parse_line(sasl_store_t *store, char *line)
 {
     char *tab = strchr(line, '\t');
@@ -431,6 +694,9 @@ static int store_parse_line(sasl_store_t *store, char *line)
     }
     if (line[0] == '\0') {
         return -1; /* "TAB password": a record with no authcid */
+    }
+    if (strncmp(value, SASL_HASH_MAGIC, sizeof SASL_HASH_MAGIC - 1u) == 0) {
+        return store_parse_hashed(store, line, value);
     }
     return sasl_store_add(store, line, value);
 }
@@ -714,18 +980,26 @@ int sasl_plain_parse(const char *payload, size_t len,
  * Password verification, against the shared constant-time compare
  * ------------------------------------------------------------------------ */
 
-/* A fixed dummy compared against when no record matched, so that "no such
- * authcid" and "wrong password" cost the same. It is a constant, not a derived
- * value, so it cannot leak anything by being computable. */
-static const char k_dummy_pass[] = "irc-serve-no-such-credential";
+/* A fixed dummy salt and digest, so that "no such authcid" and "wrong
+ * password" cost the same: a miss derives under the dummy salt and compares
+ * against the dummy digest, paying exactly the one KDF and one comparison a
+ * hit pays. Both are constants, not derived values, so neither can leak
+ * anything by being computable. */
+static const unsigned char dummy_salt[SASL_SALT_LEN] = "irc-serve-dummy";
+static const unsigned char dummy_hash[SASL_HASH_LEN] = {
+    0x5au, 0x3cu, 0x91u, 0x07u, 0xb2u, 0xe4u, 0x48u, 0xfdu,
+    0x1du, 0x66u, 0xa0u, 0xc3u, 0x79u, 0x2bu, 0x8eu, 0x54u,
+    0xd6u, 0x0fu, 0x33u, 0x9bu, 0x47u, 0xc1u, 0x5eu, 0xaa,
+    0x82u, 0x14u, 0xfbu, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u
+};
 
 int sasl_plain_verify(const sasl_store_t *store,
                       const char *authzid, const char *authcid, const char *passwd)
 {
     unsigned char want[SASL_HASH_LEN];
-    unsigned char dummy[SASL_HASH_LEN];
     unsigned saw_match = 0u;
     unsigned dummy_used = 0u;
+    size_t match = (size_t)-1;
 
     if (authcid == NULL || authcid[0] == '\0' || passwd == NULL) {
         return 0;
@@ -746,31 +1020,42 @@ int sasl_plain_verify(const sasl_store_t *store,
         return 0;
     }
 
-    /* The offered password is hashed ONCE, under the store's salt; every
-     * comparison below is hash-against-hash, so the timing argument in the
-     * header holds over digests exactly as it did over passwords. */
-    sasl_hash_password(store->salt, passwd, want);
-    sasl_hash_password(store->salt, k_dummy_pass, dummy);
-
-    /* The walk does not stop at a match. Two reasons, and both are timing: a
-     * walk that returned at the match would make the answer's latency a function
-     * of WHICH record matched, and a client that can time its way down the
-     * operator list has turned a credential store into an index. */
+    /* The walk runs to the end whether or not anything matched: a walk that
+     * stopped at the match would make the answer's latency a function of
+     * WHICH record matched, and a client that can time its way down the
+     * operator list has turned a credential store into an index. Names are
+     * unique (add replaces), so the first match is the record. */
     for (size_t i = 0; i < store->n; i++) {
-        if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
-            saw_match |=
-                (unsigned)secret_const_time_eq(store->rec[i].phash, want, SASL_HASH_LEN);
+        if (match == (size_t)-1 &&
+            authcid_eq(store->rec[i].authcid, authcid) != 0) {
+            match = i;
         }
+    }
+    /* The offered password is derived ONCE: under the matched record's salt
+     * and iteration count -- old records keep verifying under the count they
+     * were stretched with -- or under the dummy salt when nothing matched, so
+     * a miss pays the same KDF a hit pays. Every comparison below is
+     * hash-against-hash, so the timing argument in the header holds over
+     * digests exactly as it did over passwords. */
+    if (match != (size_t)-1) {
+        sasl_hash_password(store->rec[match].salt, store->rec[match].iter,
+                           passwd, want);
+    } else {
+        sasl_hash_password(dummy_salt, SASL_PBKDF2_ITER, passwd, want);
+    }
+    if (match != (size_t)-1) {
+        saw_match |=
+            (unsigned)secret_const_time_eq(store->rec[match].phash, want,
+                                           SASL_HASH_LEN);
     }
     /* And a miss still pays one comparison, so an authcid that is not in the
      * store is not distinguishable from one whose password is wrong. The
      * compare runs UNCONDITIONALLY -- a hit must cost the same as a miss, so
      * the guard that skipped it on a hit is gone and the result stays ignored. */
     dummy_used =
-        (unsigned)secret_const_time_eq(dummy, want, SASL_HASH_LEN);
+        (unsigned)secret_const_time_eq(dummy_hash, want, SASL_HASH_LEN);
     (void)dummy_used;
     sasl_wipe(want, sizeof want);
-    sasl_wipe(dummy, sizeof dummy);
     return (int)(saw_match & 1u);
 }
 

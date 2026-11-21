@@ -95,6 +95,7 @@
  * accumulated buffer, so a second ` 318 ` would match the first and the wait
  * that was supposed to cover the command under test would never happen.
  */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2264,6 +2265,191 @@ static void expect_sasl_store_hashes_passwords(void)
     sasl_store_free(store);
 }
 /* ---------------------------------------------------------------------------
+ * PER-RECORD SALTS, AND THE TWO FILE FORMATS
+ * ---------------------------------------------------------------------------
+ * Issue #218: the store used to hash under one per-boot salt, so identical
+ * passwords hashed identically, and the file held plaintext. Records now
+ * carry their own salt and a PBKDF2-HMAC-SHA256 digest; files may carry that
+ * hashed form (written by *_format_record()) or a legacy plaintext line
+ * (re-salted and stretched at load).
+ *
+ * Three claims, for EACH store: two records with the same password verify
+ * and their formatted lines differ (the salt is per record, not per boot);
+ * a legacy file loads and verifies (compat); a formatted file loads and
+ * verifies, and a misshapen hashed line refuses the whole load. */
+static void expect_pbkdf2_records(void)
+{
+    sasl_store_t *ss = sasl_store_new();
+    account_store_t *as = account_store_new();
+    char f1[256];
+    char f2[256];
+    char line[512];
+    char path[] = "/tmp/irc_serve_acct_kdf.XXXXXX";
+    int fd;
+    ssize_t nw;
+    sasl_store_t *ls;
+    account_store_t *la;
+
+    TF_CHECK_MSG(ss != NULL && as != NULL, "store_new() failed");
+    if (ss == NULL || as == NULL) {
+        sasl_store_free(ss);
+        account_store_free(as);
+        return;
+    }
+    /* SAME PASSWORD, TWO RECORDS: both verify, so the salt is per record. */
+    TF_CHECK_MSG(sasl_store_add(ss, "alice", "correct horse") == 0,
+                 "sasl_store_add() refused alice");
+    TF_CHECK_MSG(sasl_store_add(ss, "bob", "correct horse") == 0,
+                 "sasl_store_add() refused bob");
+    TF_CHECK_MSG(sasl_plain_verify(ss, "", "alice", "correct horse") == 1,
+                 "alice no longer verifies under a per-record salt");
+    TF_CHECK_MSG(sasl_plain_verify(ss, "", "bob", "correct horse") == 1,
+                 "bob no longer verifies under a per-record salt");
+    TF_CHECK_MSG(sasl_plain_verify(ss, "", "alice", "wrong") == 0,
+                 "a wrong password verified under a per-record salt");
+    /* ...and their FORMATTED LINES DIFFER, which is the observable half of
+     * "identical passwords hash differently": the salt is fresh per call. */
+    TF_CHECK_MSG(sasl_store_format_record("alice", "correct horse", f1,
+                                          sizeof f1) == 0,
+                 "sasl_store_format_record() refused a valid credential");
+    TF_CHECK_MSG(sasl_store_format_record("alice", "correct horse", f2,
+                                          sizeof f2) == 0,
+                 "sasl_store_format_record() refused a valid credential twice");
+    TF_CHECK_MSG(strcmp(f1, f2) != 0,
+                 "two formatted lines for the same password are identical; the "
+                 "salt is not per record");
+    /* A missing NUL's worth of room is a refusal, not a truncation: a cut
+     * digest is a record no password can ever match. */
+    TF_CHECK_MSG(sasl_store_format_record("alice", "correct horse", f1,
+                                          (size_t)10) == -1,
+                 "sasl_store_format_record() wrote into a 10-byte buffer");
+    /* A `$`-leading password that is NOT the magic is still a legacy
+     * password, not a malformed hash. */
+    TF_CHECK_MSG(sasl_store_add(ss, "mallory", "$not-a-hash") == 0,
+                 "sasl_store_add() refused a `$`-leading password");
+    TF_CHECK_MSG(sasl_plain_verify(ss, "", "mallory", "$not-a-hash") == 1,
+                 "a `$`-leading legacy password no longer verifies");
+    sasl_store_free(ss);
+
+    /* Same three claims for the registry, which also carries `created`. */
+    TF_CHECK_MSG(account_store_add(as, "alice", "correct horse", 0) == 0,
+                 "account_store_add() refused alice");
+    TF_CHECK_MSG(account_store_add(as, "bob", "correct horse", 0) == 0,
+                 "account_store_add() refused bob");
+    TF_CHECK_MSG(account_store_verify(as, "alice", "correct horse") == 1,
+                 "alice no longer verifies under a per-record salt");
+    TF_CHECK_MSG(account_store_verify(as, "bob", "correct horse") == 1,
+                 "bob no longer verifies under a per-record salt");
+    TF_CHECK_MSG(account_store_verify(as, "alice", "wrong") == 0,
+                 "a wrong password verified under a per-record salt");
+    TF_CHECK_MSG(account_store_format_record("alice", "correct horse", 7, f1,
+                                             sizeof f1) == 0,
+                 "account_store_format_record() refused a valid record");
+    TF_CHECK_MSG(account_store_format_record("alice", "correct horse", 7, f2,
+                                             sizeof f2) == 0,
+                 "account_store_format_record() refused a valid record twice");
+    TF_CHECK_MSG(strcmp(f1, f2) != 0,
+                 "two formatted registry lines for the same password are "
+                 "identical; the salt is not per record");
+    account_store_free(as);
+
+    /* ---- the file round trips, both formats, both stores ---- */
+    fd = mkstemp(path);
+    TF_CHECK_MSG(fd >= 0, "could not create the kdf round-trip file");
+    if (fd < 0) {
+        return;
+    }
+    /* A legacy line and a hashed line for the SAME password in one file:
+     * both verify, so compat and canonical agree. */
+    TF_CHECK_MSG(sasl_store_format_record("bob", "correct horse", line,
+                                          sizeof line) == 0,
+                 "sasl_store_format_record() refused a valid credential");
+    nw = write(fd, "alice\tcorrect horse\n", (size_t)20);
+    TF_CHECK_MSG(nw == 20, "could not write the legacy credential line");
+    nw = write(fd, line, strlen(line));
+    TF_CHECK_MSG(nw == (ssize_t)strlen(line),
+                 "could not write the hashed credential line");
+    nw = write(fd, "\n", (size_t)1);
+    TF_CHECK_MSG(nw == 1, "could not terminate the hashed credential line");
+    (void)close(fd);
+    TF_CHECK_MSG(chmod(path, S_IRUSR | S_IWUSR) == 0,
+                 "could not chmod the kdf round-trip file");
+    ls = sasl_store_load(path);
+    TF_CHECK_MSG(ls != NULL, "a mixed legacy+hashed credential file refused "
+                 "to load: %s", (ls == NULL) ? path : "");
+    if (ls != NULL) {
+        TF_CHECK_MSG(sasl_store_count(ls) == (size_t)2,
+                     "the mixed credential file did not load two records");
+        TF_CHECK_MSG(sasl_plain_verify(ls, "", "alice", "correct horse") == 1,
+                     "the legacy credential line no longer verifies (compat)");
+        TF_CHECK_MSG(sasl_plain_verify(ls, "", "bob", "correct horse") == 1,
+                     "the hashed credential line does not verify");
+        TF_CHECK_MSG(sasl_plain_verify(ls, "", "bob", "wrong") == 0,
+                     "a wrong password verified against the hashed line");
+        TF_CHECK_MSG(sasl_store_holds_no_plaintext(ls, "correct horse") == 1,
+                     "the loaded store holds the literal legacy password");
+        sasl_store_free(ls);
+    }
+    /* A weakened count is malformed, not a record: iter=10 stretches nothing
+     * a GPU would notice, and honouring it would make the format a way to
+     * smuggle fast hashes past the KDF. */
+    fd = open(path, O_WRONLY | O_TRUNC);
+    TF_CHECK_MSG(fd >= 0, "could not reopen the kdf round-trip file");
+    if (fd >= 0) {
+        static const char weak[] =
+            "alice\t$pbkdf2-sha256$10$"
+            "30313233343536373839616263646566$"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+        nw = write(fd, weak, strlen(weak));
+        TF_CHECK_MSG(nw == (ssize_t)strlen(weak),
+                     "could not write the weakened hash line");
+        (void)close(fd);
+        ls = sasl_store_load(path);
+        TF_CHECK_MSG(ls == NULL,
+                     "a hashed line with iter=10 LOADED; counts under the "
+                     "minimum must refuse the file");
+        sasl_store_free(ls);
+    }
+    /* The registry round trip: one legacy line, one hashed line, `created`
+     * intact on the hashed one. */
+    TF_CHECK_MSG(account_store_format_record("bob", "correct horse",
+                                             1750000000L, line,
+                                             sizeof line) == 0,
+                 "account_store_format_record() refused a valid record");
+    fd = open(path, O_WRONLY | O_TRUNC);
+    TF_CHECK_MSG(fd >= 0, "could not reopen the kdf round-trip file");
+    if (fd >= 0) {
+        nw = write(fd, "alice\tcorrect horse\t1750000000\n", (size_t)31);
+        TF_CHECK_MSG(nw == 31, "could not write the legacy registry line");
+        nw = write(fd, line, strlen(line));
+        TF_CHECK_MSG(nw == (ssize_t)strlen(line),
+                     "could not write the hashed registry line");
+        nw = write(fd, "\n", (size_t)1);
+        TF_CHECK_MSG(nw == 1, "could not terminate the hashed registry line");
+        (void)close(fd);
+        la = account_store_load(path);
+        TF_CHECK_MSG(la != NULL, "a mixed legacy+hashed registry file refused "
+                     "to load");
+        if (la != NULL) {
+            TF_CHECK_MSG(account_store_count(la) == (size_t)2,
+                         "the mixed registry file did not load two records");
+            TF_CHECK_MSG(account_store_verify(la, "alice",
+                                              "correct horse") == 1,
+                         "the legacy registry line no longer verifies "
+                         "(compat)");
+            TF_CHECK_MSG(account_store_verify(la, "bob", "correct horse") == 1,
+                         "the hashed registry line does not verify");
+            TF_CHECK_MSG(account_store_verify(la, "bob", "wrong") == 0,
+                         "a wrong password verified against the hashed line");
+            TF_CHECK_MSG(account_store_holds_no_plaintext(la,
+                         "correct horse") == 1,
+                         "the loaded registry holds the literal password");
+            account_store_free(la);
+        }
+    }
+    (void)unlink(path);
+}
+/* ---------------------------------------------------------------------------
  * THE DUMMY COMPARE RUNS ON A HIT TOO (#271)
  * ---------------------------------------------------------------------------
  * Hit and miss must pay the same compare count, so the dummy compare in both
@@ -2478,6 +2664,7 @@ int main(void)
     /* ---- the rules no wire sequence can reach, asserted on return values ---- */
     expect_account_set_refuses();
     expect_sasl_store_hashes_passwords();
+    expect_pbkdf2_records();
     expect_dummy_compare_is_unconditional();
     expect_the_tag_charge_is_real();
 
