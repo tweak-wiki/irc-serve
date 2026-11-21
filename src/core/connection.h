@@ -201,6 +201,16 @@ struct server;
  */
 #define CONN_WQ_MAX ((size_t)(256u * 1024u))
 
+/* MT 3.x (#369): one bounded writer drain slice, in bytes. A writer with an
+ * unbounded backlog on one conn drains at most this many bytes (a WQ cap
+ * quantum would be the whole queue; a 32 KiB slice is one eighth of it),
+ * then moves on to the next owned conn with queued bytes, so a thin conn's
+ * reply (417s, reaps) goes out within one slice of being queued.
+ * Round-robin, not priority: the fat conn still progresses, one slice per
+ * visit.
+ */
+#define CONN_WQ_SLICE ((size_t)(32u * 1024u))
+
 /* Read buffer cap. IRC_MAX_LINE (8 KiB, from 3.2) is the largest legal line
  * counting its terminator, so a buffer that reaches that size without having
  * seen a terminator is a line that can never become legal: conn_fill() stops
@@ -1290,6 +1300,11 @@ int conn_queue(conn_t *c, const char *data, size_t len);
  * then wake the loop for a connection that still has nothing to send. On a
  * plaintext connection the empty pass is a call the plaintext transport answers
  * without touching the descriptor, so the ordinary path is unchanged. */
+/* MT 3.x (#369): bounded writer drain slice. Same contract as
+ * conn_pump_locked(), but stops after CONN_WQ_SLICE bytes have moved, so one
+ * fat conn cannot hold a writer for its whole backlog while a thin conn's
+ * reply waits. Caller already holds wq_lock. */
+int conn_pump_slice_locked(conn_t *c);
 int conn_pump(conn_t *c);
 /* Same as conn_pump(), but the caller already holds c->wq_lock (the MT 3.2
  * shutdown path holds it across the pump AND the drain so no writer can use

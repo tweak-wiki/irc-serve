@@ -206,6 +206,10 @@ irc_add_integration_test(test_writer_order test_writer_order.c)
 # MT 4.2 (#247): fault containment -- a fatal send error on one conn at N > 0
 # closes only it; the loop and all other conns proceed.
 irc_add_integration_test(test_writer_fault test_writer_fault.c)
+# MT 3.x (#369): bounded drain slice -- one writer, a fat conn holding a full
+# cap queued ahead of a thin conn; the thin conn drains while the fat conn
+# has moved at most two slices, and the fat conn then drains byte-exact.
+irc_add_integration_test(test_writer_slice test_writer_slice.c)
 # 3.4: explicit fd >= FD_SETSIZE rejection at the accept site.
 irc_add_integration_test(test_fdsize_reject test_fdsize_reject.c)
 
