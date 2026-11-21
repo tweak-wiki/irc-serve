@@ -152,7 +152,7 @@ static const arity_case_t k_arity[] = {
     { "NOTICE"                     , "NOTICE",  "no target and no text -- too FEW" },
     { "SETNAME"                    , "SETNAME", "the realname is mandatory -- too FEW" },
     { "CHOPER"                     , "CHOPER",  "no target and no password -- too FEW" },
-    { "WHOIS a b"                  , "WHOIS",   "exactly one nickname -- too MANY" },
+    { "WHOIS a b c"                , "WHOIS",   "at most a server and a nickname -- too MANY" },
     { "AWAY one two"               , "AWAY",    "one message, not two -- too MANY" },
     { "SETNAME x y"                , "SETNAME", "exactly one realname -- too MANY" },
     { "CHOPER alice"               , "CHOPER",  "a target and a password -- too FEW" },
