@@ -814,17 +814,29 @@ static void writer_drain_one(server_t *s)
     }
 }
 
+/* Issue #367: per-writer thread argument. Carries both ends the thread
+ * needs; the thread frees it on entry, so stop has nothing to release. */
+struct writer_arg {
+    server_t *s;
+    int idx;
+};
+
 static void *writer_main(void *arg)
 {
-    server_t *s = (server_t *)arg;
+    struct writer_arg *wa = (struct writer_arg *)arg;
+    server_t *s = wa->s;
+    int idx = wa->idx;
     /* MT 2.4 (#243): wakeup-generation predicate. Each writer remembers the
-     * last generation it consumed; a kick between drain-finish and the lock
-     * bumps wq_gen, so the waiter below sees gen != seen and drains instead
-     * of sleeping past it (idle conn, no POLLOUT-driven pump at N > 0).
-     * wq_stop is part of the same predicate, so the shutdown broadcast is
-     * never mistaken for a spurious wakeup. */
+     * last generation it consumed on its OWN slot; a targeted kick between
+     * drain-finish and the lock bumps that slot's gen, so the waiter below
+     * sees gen != seen and drains instead of sleeping past it (idle conn,
+     * no POLLOUT-driven pump at N > 0). wq_stop is part of the same
+     * predicate, so the shutdown wakeup is never mistaken for a spurious
+     * wakeup. Consuming a generation counts one wake (wq_wakes), so one
+     * kick per queued conn shows up as exactly one wake on its owner. */
     unsigned long seen = 0ul;
 
+    free(wa);
     for (;;) {
         /* Drain first: queued work is handled without waiting for a wakeup. */
         writer_drain_one(s);
@@ -834,11 +846,13 @@ static void *writer_main(void *arg)
                 pthread_mutex_unlock(&s->wq_mu);
                 return NULL;
             }
-            if (s->wq_gen != seen) {
-                seen = s->wq_gen;
+            if (s->wq_slot_gen[idx] != seen) {
+                seen = s->wq_slot_gen[idx];
+                (void)atomic_fetch_add_explicit(&s->wq_wakes[idx], 1u,
+                                                  memory_order_relaxed);
                 break;
             }
-            pthread_cond_wait(&s->wq_avail, &s->wq_mu);
+            pthread_cond_wait(&s->wq_slot_avail[idx], &s->wq_mu);
         }
         pthread_mutex_unlock(&s->wq_mu);
     }
@@ -852,62 +866,154 @@ int server_writers_start(server_t *s)
         return 0;
     }
     s->writers = (pthread_t *)calloc((size_t)s->writer_threads, sizeof *s->writers);
-    if (s->writers == NULL) {
+    s->wq_slot_avail =
+        (pthread_cond_t *)calloc((size_t)s->writer_threads, sizeof *s->wq_slot_avail);
+    s->wq_slot_gen =
+        (unsigned long *)calloc((size_t)s->writer_threads, sizeof *s->wq_slot_gen);
+    s->wq_wakes =
+        (atomic_ullong *)calloc((size_t)s->writer_threads, sizeof *s->wq_wakes);
+    if (s->writers == NULL || s->wq_slot_avail == NULL || s->wq_slot_gen == NULL ||
+        s->wq_wakes == NULL) {
+        free(s->writers);
+        free(s->wq_slot_avail);
+        free(s->wq_slot_gen);
+        free(s->wq_wakes);
+        s->writers = NULL;
+        s->wq_slot_avail = NULL;
+        s->wq_slot_gen = NULL;
+        s->wq_wakes = NULL;
         return -1;
     }
     if (pthread_mutex_init(&s->wq_mu, NULL) != 0) {
         free(s->writers);
+        free(s->wq_slot_avail);
+        free(s->wq_slot_gen);
+        free(s->wq_wakes);
         s->writers = NULL;
+        s->wq_slot_avail = NULL;
+        s->wq_slot_gen = NULL;
+        s->wq_wakes = NULL;
         return -1;
     }
-    if (pthread_cond_init(&s->wq_avail, NULL) != 0) {
-        pthread_mutex_destroy(&s->wq_mu);
-        free(s->writers);
-        s->writers = NULL;
-        return -1;
-    }
-    s->wq_stop = 0;
-    s->wq_gen = 1ul; /* nonzero: writers start with seen = 0, so the first
-                      * predicate check drains rather than sleeps. */
-    s->writers_started = 1;
     for (i = 0; i < s->writer_threads; i++) {
-        if (pthread_create(&s->writers[i], NULL, writer_main, s) != 0) {
-            int j;
+        if (pthread_cond_init(&s->wq_slot_avail[i], NULL) != 0) {
+            int k;
 
-            pthread_mutex_lock(&s->wq_mu);
-            s->wq_stop = 1;
-            pthread_cond_broadcast(&s->wq_avail);
-            pthread_mutex_unlock(&s->wq_mu);
-            for (j = 0; j < i; j++) {
-                (void)pthread_join(s->writers[j], NULL);
+            for (k = 0; k < i; k++) {
+                (void)pthread_cond_destroy(&s->wq_slot_avail[k]);
             }
-            pthread_cond_destroy(&s->wq_avail);
             pthread_mutex_destroy(&s->wq_mu);
             free(s->writers);
+            free(s->wq_slot_avail);
+            free(s->wq_slot_gen);
+            free(s->wq_wakes);
             s->writers = NULL;
-            s->writers_started = 0;
-            s->writer_threads = 0;
+            s->wq_slot_avail = NULL;
+            s->wq_slot_gen = NULL;
+            s->wq_wakes = NULL;
             return -1;
         }
     }
-    /* MT 2.4 (#243): bumping wq_gen turns the broadcast into a countable
+    s->wq_stop = 0;
+    for (i = 0; i < s->writer_threads; i++) {
+        /* nonzero: writers start with seen = 0, so the first predicate
+         * check drains rather than sleeps. */
+        s->wq_slot_gen[i] = 1ul;
+    }
+    s->writers_started = 1;
+    for (i = 0; i < s->writer_threads; i++) {
+        struct writer_arg *wa = (struct writer_arg *)malloc(sizeof *wa);
+
+        if (wa == NULL) {
+            break;
+        }
+        wa->s = s;
+        wa->idx = i;
+        if (pthread_create(&s->writers[i], NULL, writer_main, wa) == 0) {
+            continue;
+        }
+        free(wa);
+        break;
+    }
+    if (i < s->writer_threads) {
+        int j;
+
+        pthread_mutex_lock(&s->wq_mu);
+        s->wq_stop = 1;
+        for (j = 0; j < s->writer_threads; j++) {
+            pthread_cond_signal(&s->wq_slot_avail[j]);
+        }
+        pthread_mutex_unlock(&s->wq_mu);
+        for (j = 0; j < i; j++) {
+            (void)pthread_join(s->writers[j], NULL);
+        }
+        for (j = 0; j < s->writer_threads; j++) {
+            (void)pthread_cond_destroy(&s->wq_slot_avail[j]);
+        }
+        pthread_mutex_destroy(&s->wq_mu);
+        free(s->writers);
+        free(s->wq_slot_avail);
+        free(s->wq_slot_gen);
+        free(s->wq_wakes);
+        s->writers = NULL;
+        s->wq_slot_avail = NULL;
+        s->wq_slot_gen = NULL;
+        s->wq_wakes = NULL;
+        s->writers_started = 0;
+        s->writer_threads = 0;
+        return -1;
+    }
+    /* MT 2.4 (#243): bumping each slot gen turns the start into a countable
      * event; a writer that finished draining just before takes this lock,
      * sees gen != seen, and drains again instead of losing the wakeup. */
     pthread_mutex_lock(&s->wq_mu);
-    s->wq_gen++;
-    pthread_cond_broadcast(&s->wq_avail);
+    for (i = 0; i < s->writer_threads; i++) {
+        s->wq_slot_gen[i]++;
+        pthread_cond_signal(&s->wq_slot_avail[i]);
+    }
     pthread_mutex_unlock(&s->wq_mu);
     return 0;
 }
 
+/* Issue #367: owner slot for a conn. fd % N spreads conns across writers;
+ * a stale or missing fd still lands on slot 0, never nowhere. */
+static int writer_owner_slot(const server_t *s, int fd)
+{
+    if (s->writer_threads <= 0) {
+        return 0;
+    }
+    if (fd < 0) {
+        return 0;
+    }
+    return fd % s->writer_threads;
+}
+
 void server_writers_kick(server_t *s)
 {
+    int i;
+
     if (s == NULL || !s->writers_started) {
         return;
     }
     pthread_mutex_lock(&s->wq_mu);
-    s->wq_gen++;
-    pthread_cond_broadcast(&s->wq_avail);
+    for (i = 0; i < s->writer_threads; i++) {
+        s->wq_slot_gen[i]++;
+        pthread_cond_signal(&s->wq_slot_avail[i]);
+    }
+    pthread_mutex_unlock(&s->wq_mu);
+}
+
+void server_writers_kick_conn(server_t *s, const conn_t *c)
+{
+    int slot;
+
+    if (s == NULL || !s->writers_started) {
+        return;
+    }
+    slot = writer_owner_slot(s, (c != NULL) ? c->fd : -1);
+    pthread_mutex_lock(&s->wq_mu);
+    s->wq_slot_gen[slot]++;
+    pthread_cond_signal(&s->wq_slot_avail[slot]);
     pthread_mutex_unlock(&s->wq_mu);
 }
 
@@ -920,15 +1026,25 @@ void server_writers_stop(server_t *s)
     }
     pthread_mutex_lock(&s->wq_mu);
     s->wq_stop = 1;
-    pthread_cond_broadcast(&s->wq_avail);
+    for (i = 0; i < s->writer_threads; i++) {
+        pthread_cond_signal(&s->wq_slot_avail[i]);
+    }
     pthread_mutex_unlock(&s->wq_mu);
     for (i = 0; i < s->writer_threads; i++) {
         (void)pthread_join(s->writers[i], NULL);
     }
-    pthread_cond_destroy(&s->wq_avail);
+    for (i = 0; i < s->writer_threads; i++) {
+        (void)pthread_cond_destroy(&s->wq_slot_avail[i]);
+    }
     pthread_mutex_destroy(&s->wq_mu);
     free(s->writers);
+    free(s->wq_slot_avail);
+    free(s->wq_slot_gen);
+    free(s->wq_wakes);
     s->writers = NULL;
+    s->wq_slot_avail = NULL;
+    s->wq_slot_gen = NULL;
+    s->wq_wakes = NULL;
     s->writers_started = 0;
 }
 
@@ -1823,8 +1939,8 @@ void server_close_conn(server_t *s, int fd)
 int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
 {
     if (c == NULL || conn_queue(c, data, len) == 0) {
-        /* MT 2.2 (#241): wake writers on growth; no-op when N == 0. */
-        server_writers_kick(s);
+        /* Issue #367: wake exactly this conn's owning writer, never all. */
+        server_writers_kick_conn(s, c);
         return 0;
     }
     /* 3.4: bounded write queues, and a saturated link is DROPPED, not
@@ -1878,7 +1994,7 @@ int server_reap(server_t *s)
                         s->wq_close_at[fd] == 0) {
                         s->wq_close_at[fd] = server_now_ms() + 2000u;
                     }
-                    server_writers_kick(s);
+                    server_writers_kick_conn(s, c);
                     i++;
                     continue;
                 }
@@ -1892,7 +2008,7 @@ int server_reap(server_t *s)
                             s->wq_close_at[fd] = now + 2000u;
                         }
                         if (now < s->wq_close_at[fd]) {
-                            server_writers_kick(s);
+                            server_writers_kick_conn(s, c);
                             i++;
                             continue;
                         }
