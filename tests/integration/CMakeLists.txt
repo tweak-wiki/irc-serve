@@ -220,6 +220,11 @@ irc_add_integration_test(test_eintr test_eintr.c)
 # gets one 417 and a close, an honest client is unaffected.
 irc_add_integration_test(test_flood_rate test_flood_rate.c)
 
+# #282: the two writer interactions with no N=4 coverage -- TLS pending-drain
+# under writers (byte-exact PONG oracle; TSan is the race oracle) and
+# 417-flush-deferred-to-writers (417 before close plus a short pump).
+irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
+
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
 # #368: loop/writer handoff fields share their own cache lines; a field
 # migrating across the boundary fails the build of this assertion.
