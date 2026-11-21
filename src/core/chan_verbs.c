@@ -1480,6 +1480,11 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
  */
 void handle_names(server_t *s, conn_t *c, const message_t *m)
 {
+    if (m->nparams > 1) {
+        (void)reply_refused(s, c, "NAMES", "TOO_MANY_PARAMS", "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
     if (m->nparams > 0) {
         char canonical[CHAN_MAX_NAME + 1];
         chan_t *ch;
@@ -1549,6 +1554,11 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
  */
 void handle_list(server_t *s, conn_t *c, const message_t *m)
 {
+    if (m->nparams > 1) {
+        (void)reply_refused(s, c, "LIST", "TOO_MANY_PARAMS", "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
     char count[24];
 
     if (m->nparams > 0) {
