@@ -1279,20 +1279,25 @@ struct server {
      * time under that conn's wq_lock -- bytes enter and leave in queue order,
      * and the lock makes concurrent drains of the same conn impossible. */
     int       writer_threads;
-    /* Pool state; NULL/idle when writer_threads == 0. wq_avail is signalled
-     * whenever a conn's want_write rises (server_queue) or the pool starts;
-     * wq_stop ends the wait so join can proceed at shutdown. wq_gen is the
-     * wakeup generation, bumped under wq_mu by every kick: writers wait on
-     * the (stop, gen-changed) predicate, so a kick landing while a writer
-     * is mid-drain (not yet waiting) is still observed -- a blind wait would
-     * sleep past it and stall an idle conn's queued bytes with no further
-     * kick coming and no POLLOUT-driven pump at N > 0. */
+    /* Pool state; NULL/idle when writer_threads == 0. Each writer parks on
+     * its own slot condvar; queueing bytes on a conn signals exactly the
+     * owning writer's slot (owner = fd % N), never a broadcast: waking all
+     * writers per queued conn is the broadcast-storm shape from #316. Only
+     * pool start/stop touch every slot. wq_stop ends the wait so join can
+     * proceed at shutdown. Each slot gen is the wakeup generation, bumped
+     * under wq_mu by its kick: a writer waits on the (stop, gen-changed)
+     * predicate, so a kick landing while it is mid-drain (not yet waiting)
+     * is still observed -- a blind wait would sleep past it and stall an
+     * idle conn's queued bytes with no further kick coming and no
+     * POLLOUT-driven pump at N > 0. wq_wakes counts consumed wakeups per
+     * writer (one kick, one wake); tests pin one wake per queued conn. */
     pthread_t *writers;          /* N thread handles, or NULL */
-    pthread_mutex_t wq_mu;        /* guards wq_avail/wq_stop/wq_gen below */
-    pthread_cond_t wq_avail;      /* work may be available */
-    unsigned long wq_gen;         /* kick generation; wait predicate */
+    pthread_mutex_t wq_mu;        /* guards wq_stop/slots below */
+    pthread_cond_t *wq_slot_avail; /* N per-writer condvars, or NULL */
+    unsigned long *wq_slot_gen;   /* N kick generations; wait predicate */
+    atomic_ullong *wq_wakes;      /* N consumed-wakeup counters, one per writer */
     int       wq_stop;            /* 1: writers exit after draining what they hold */
-    int       writers_started;    /* 1: wq_mu/wq_avail/writers are live */
+    int       writers_started;    /* 1: wq_mu/slots/writers are live */
     /* MT 2.2 (#241): registry mutex. The loop thread is the only mutator
      * (server_add_conn / the detach half of server_close_conn), but writers
      * resolve conns through the same by_fd/active structures -- without this
@@ -1708,6 +1713,11 @@ void server_set_writer_threads(server_t *s, int n);
  * by_fd walk, so no writer touches a conn the reaper freed. */
 int server_writers_start(server_t *s);
 void server_writers_kick(server_t *s);
+/* Issue #367: targeted wakeup. Queueing bytes on one conn signals exactly
+ * its owning writer (fd % N); other writers stay parked. NULL conn (or a
+ * conn with no usable fd) falls back to slot 0, which always exists at
+ * N > 0 -- never a broadcast. */
+void server_writers_kick_conn(server_t *s, const conn_t *c);
 void server_writers_stop(server_t *s);
 
 /* The tick hook and the clock, called by the loop. server_tick() stamps the
