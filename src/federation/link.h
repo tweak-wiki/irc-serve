@@ -462,6 +462,10 @@
  * a silently truncated secret is a weaker secret than the operator asked for
  * and the peer is configured with the full one, so the failure would be a link
  * that never authenticates. */
+#ifndef IRC_FED_MAX_SECRET
+#define IRC_FED_MAX_SECRET 128
+#endif
+
 /* The floor on a configured shared secret. Below 16 bytes an online guesser
  * with no lockout to beat (the FEDERATE endpoint is socket-reachable) breaks
  * it; fed_open() REFUSES a shorter non-empty secret rather than warning, with
@@ -469,9 +473,6 @@
  * legacy short secrets. */
 #ifndef IRC_FED_MIN_SECRET
 #define IRC_FED_MIN_SECRET 16
-#endif
-#ifndef IRC_FED_MAX_SECRET
-#define IRC_FED_MAX_SECRET 128
 #endif
 
 /* ---------------------------------------------------------------------------
