@@ -76,8 +76,13 @@ to dedup insert (every relayed msg), `strtab`/`chan_t` only on NICK/JOIN/PART.
    green with N=4.
 3. Flip default only after soak + benchmark evidence. Rollback = `--writers 0`.
 
-## Open Questions
+## Open Questions (resolved 2026-11-21 — see `openspec/specs/threading/spec.md`)
 
-- N writer threads vs one-per-N-conns striping: default N=2, tune by benchmark.
-- Writer wakeup via `eventfd`/pipe vs condvar: pick by portability probe
-  (Linux + macOS both needed); condvar is the fallback.
+- Striping: fd-hash sticky (`fd mod N`) as the baseline; idle writers steal
+  whole connections (never half a queue) when the owner's backlog exceeds a
+  bound — see threading spec stickiness + demand rebalancing.
+- Wakeup: targeted per-writer signal (per-writer eventfd or condvar +
+  private runqueue — portability probe picks the primitive, targeting is
+  non-negotiable); no broadcast. Handoff fields grouped on own cache lines
+  (`pahole` check); bounded drain slice per turn so one fat conn cannot
+  starve its writer's others.
