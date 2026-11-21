@@ -514,23 +514,27 @@ int main(void)
     }
 
     /* =======================================================================
-     * 5. THE HOLDER RE-ASSERTING HIS OWN NAME IN ANOTHER CASE IS SILENT
-     * ==================================================================== */
+    * 5. THE HOLDER RE-ASSERTING HIS OWN NAME IN ANOTHER CASE IS SILENT AND
+    *    ADOPTS THE NEW SPELLING (issue #215)
+    * ==================================================================== */
     /* RFC 2812 3.2: a NICK to the name you already have changes nothing and
-     * generates no error. With a folded registry, `BOB` IS the name bob holds,
-     * so this must be silent too.
-     *
-     * This is its own section because it is the half of the change most likely
-     * to be got wrong, and in the direction that is invisible until somebody
-     * does it: a handler that still compared `want` against conn_t::nick with
-     * strcmp would treat "BOB" as a rename, fall through to the claim, find the
-     * name already held by THIS connection, and answer 433 to bob for the
-     * nickname he is holding. A test that only checked the DUPLICATE case would
-     * not see it, because dave's claim and bob's re-assertion end up at the same
-     * lookup by opposite routes.
-     *
-     * What is asserted is silence plus STAYING PUT: the two checks below would
-     * both fail if the NICK had been treated as a rename. */
+    * generates no error. With a folded registry, `BOB` IS the name bob holds,
+    * so this must be silent too -- and the new spelling is what everybody
+    * sees afterwards. No release/re-claim happens: the registry key already
+    * folds, so only the display bytes in conn_t::nick move.
+    *
+    * This is its own section because it is the half of the change most likely
+    * to be got wrong, and in the direction that is invisible until somebody
+    * does it: a handler that still compared `want` against conn_t::nick with
+    * strcmp would treat "BOB" as a rename, fall through to the claim, find the
+    * name already held by THIS connection, and answer 433 to bob for the
+    * nickname he is holding. A test that only checked the DUPLICATE case would
+    * not see it, because dave's claim and bob's re-assertion end up at the same
+    * lookup by opposite routes.
+    *
+    * What is asserted is silence plus the NEW spelling on the wire: the three
+    * checks below fail if the NICK was refused, if it re-sent the welcome
+    * burst, or if the old spelling stuck. */
     {
         size_t f1 = open_window(&bob);
         size_t e1;
@@ -547,11 +551,11 @@ int main(void)
                      "and would be pushed back into its connect path",
                      count_in_window(&bob, f1, e1, " 001 "));
     }
-    /* Still `bob` on the wire, and still reachable by the lowercase spelling. A
-     * rename to `BOB` would satisfy the silence above and fail both of these. */
+    /* `BOB` on the wire now, still reachable by the lowercase spelling. Staying
+    * put at `bob` would satisfy the silence above and fail both of these. */
     send_expect(&alice, "WHOIS bob",
-                ":irc.test 311 alice bob bob 127.0.0.1 * :Real bob\r\n");
-    send_expect(&alice, "ISON BOB", ":irc.test 303 alice :bob\r\n");
+                ":irc.test 311 alice BOB bob 127.0.0.1 * :Real bob\r\n");
+    send_expect(&alice, "ISON BOB", ":irc.test 303 alice :BOB\r\n");
 
     /* =======================================================================
      * 6. A HELD NAME IS RELEASED AND THE UPPERCASE SPELLING TAKES IT -- AND
@@ -567,7 +571,7 @@ int main(void)
      * next step cannot pass for the wrong reason: if bob had not actually given
      * the name up, carol's success would prove nothing about release. */
     TF_CHECK_MSG(tc_send(&bob.c, "NICK bob2") == 0, "tc_send failed");
-    TF_CHECK_MSG(nf_expect(&node, "from=bob to=bob2", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&node, "from=BOB to=bob2", T_IO_MS) == 0,
                  "bob did not rename, so the release this section checks did not "
                  "happen");
     client_connect(&carol.c, &node);
