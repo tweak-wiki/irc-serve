@@ -576,13 +576,26 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
      * single client and asking per entry would ask the same question once per row
      * of a reply this node builds in a loop. See who_flags(). */
     const int multiprefix = cap_multiprefix_enabled(c);
+    /* RFC 2812 3.3.4: WHO [<mask> ["o"]]. The second parameter selects only
+     * channel operators; anything else there is refused like any bad arity. */
+    int ops_only = 0;
 
-    if (m->nparams > 1) {
+    if (m->nparams > 2) {
         (void)reply_refused(s, c, "WHO", "TOO_MANY_PARAMS", "461", NULL, 0,
                             "Not enough parameters");
         return;
     }
-    if (m->nparams == 1) {
+    if (m->nparams == 2) {
+        const char *flag = m->params[1];
+
+        if ((flag[0] != 'o' && flag[0] != 'O') || flag[1] != '\0') {
+            (void)reply_refused(s, c, "WHO", "INVALID_PARAMS", "461", NULL, 0,
+                                "Not enough parameters");
+            return;
+        }
+        ops_only = 1;
+        mask = m->params[0];
+    } else if (m->nparams == 1) {
         mask = m->params[0];
     }
 
@@ -614,6 +627,10 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
         for (size_t i = 0; i < ch->nmembers; i++) {
             if (chan_member_live(&ch->members[i]) == 0 ||
                 ch->members[i].c->nick[0] == '\0') {
+                continue;
+            }
+            if (ops_only != 0 &&
+                (ch->members[i].flags & CHAN_MEMBER_OP) == 0u) {
                 continue;
             }
             who_entry(s, c, ch->members[i].c, ch->name, ch->members[i].flags,
