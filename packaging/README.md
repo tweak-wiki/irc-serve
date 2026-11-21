@@ -22,10 +22,9 @@ problem" below for why that is the layout and what it costs.
 ## The build command for each format
 
 ```sh
-# Debian: BINARY-ONLY. See "Why 3.0 (quilt) and not 3.0 (native)" below --
-# `dpkg-buildpackage -b` never
-# looks for the .orig.tar.gz that `3.0 (quilt)` wants and that this project cannot
-# produce. There is no `ln -s` here: `debian` is already a committed symlink.
+# Debian: BINARY-ONLY. See "Why 3.0 (native) and not 3.0 (quilt)" below. Native
+# needs no .orig.tar.gz, and `-b` skips the source package anyway. There is no
+# `ln -s` here: `debian` is already a committed symlink.
 dpkg-buildpackage -b -us -uc
 
 # Arch: from the directory holding the PKGBUILD. NEEDS NETWORK ACCESS, because the
@@ -136,28 +135,23 @@ Why Debian and Homebrew check rather than derive:
   version the formula claims, which is the check with teeth: it runs against what
   `brew` actually installed.
 
-## Why `3.0 (quilt)` and not `3.0 (native)`
+## Why `3.0 (native)` and not `3.0 (quilt)`
 
-`3.0 (quilt)`, and the argument is not a preference:
+`3.0 (native)`, and the argument is not a preference:
 
-* `3.0 (native)` **requires** an upstream version with no Debian revision. The
-  changelog says `0.1.0-1`, and `dpkg-buildpackage` refuses a native package whose
-  version carries one.
-* `3.0 (quilt)` accepts a revision, so `0.1.0-1` stands as written.
-* Dropping the revision to get `0.1.0` is not available. `tests/integration/
-  test_version_truth.c` builds the expected changelog line as `"irc-serve (0.1.0-"`
-  -- with a trailing hyphen -- so a changelog reading `irc-serve (0.1.0)` fails a
-  test that is currently green. The revision is load-bearing for the test suite.
+* This project has no releases and no upstream tarball, so there is no `.orig`
+  for quilt to carry. A quilt source package without one is built from a
+  `git archive` synthesis, which is a release candidate wearing a tarball's
+  name.
+* The changelog therefore carries no Debian revision (`0.1.0`, not `0.1.0-1`),
+  which is exactly what `3.0 (native)` requires -- and what `3.0 (quilt)` has
+  nothing to add to.
+* `tests/integration/test_version_truth.c` expects the bare `irc-serve (X.Y.Z)`
+  line and fails a revision back in, so the pairing is checked, not hoped for.
 
-The cost, stated plainly: `3.0 (quilt)` is a **source** package format and it
-expects an upstream tarball beside the package (`irc-serve_0.1.0.orig.tar.gz`). This
-project has no releases, so there is no checked-in tarball; the documented `-b`
-command never looks for it, and the measured Linux run produced both the source and
-the binary stages. When a release tarball is cut, the fix is one line of
-`debian/watch` and nothing here changes.
-
-What this file prevented: with no `debian/source/format` at all, `dpkg-source` assumes
-`1.0`, which is a **native** format, and the `0.1.0-1` changelog then contradicts it.
+What this file prevented: with no `debian/source/format` at all, `dpkg-source`
+assumes `1.0` (deprecated for new packages), and an explicit `3.0 (native)` says
+what the tree means instead of inheriting a fallback.
 
 ## `debian/source/format` holds exactly one line, and that is not negotiable
 
@@ -166,7 +160,7 @@ against `^(\d+)(?:\.(\d+))?(?:\s+\(([a-z0-9]+)\))?$`. A comment block above the 
 does not parse as a format; it fails with
 `source package format '# ...' is invalid`. So the reasoning for the format lives
 **here**, in a file `dpkg` does not read, and `debian/source/format` holds nothing
-but `3.0 (quilt)`.
+but `3.0 (native)`.
 
 ## The license
 

@@ -23,26 +23,26 @@
 #
 # WHAT IT DOES, IN ORDER, and each step exists because the step after it fails without it:
 #
-#   1. BUILD THE ORIG TARBALL. `debian/source/format` is `3.0 (quilt)`, and a quilt
-#      source package REQUIRES ../irc-serve_0.1.0.orig.tar.gz. A plain `git checkout`
-#      cannot produce one -- there is no release and no tag to unpack. `git archive` is
-#      the answer and it is not a workaround: it is how a release tarball is made, and
-#      it is byte-deterministic from one commit, which is a stronger guarantee than an
-#      uploaded tarball carries. THE COST, STATED RATHER THAN HIDDEN: the tarball is
-#      built from HEAD of whatever tree this runs in, so it is a release candidate and
-#      not a release. Cutting an actual release is a tagging decision, not a build one,
+#   1. SNAPSHOT THE TREE. `debian/source/format` is `3.0 (native)`, and a native
+#      package has no upstream tarball -- there is no release and no tag to
+#      unpack, and none is needed. `git archive` makes the scratch copy the
+#      build runs in, and it is byte-deterministic from one commit. THE COST,
+#      STATED RATHER THAN HIDDEN: the snapshot is built from HEAD of whatever
+#      tree this runs in, so it is a release candidate and not a release.
+#      Cutting an actual release is a tagging decision, not a build one,
 #      and this script does not make it.
 #
 #   2. MATERIALISE debian/ AS A REAL DIRECTORY. The tree carries `debian` as a
 #      committed symlink to `packaging/debian`, which is what lets `dpkg-buildpackage -b`
 #      find the packaging in a checkout. `dpkg-source -b` CHOKES ON THAT SYMLINK:
-#      it walks debian/ to build irc-serve_0.1.0-1.debian.tar.xz and dies with
+#      it walks debian/ to build the source tarball and dies with
 #      "add_directory() only handles directories at .../V2.pm line 590", exit 29.
-#      Measured. So a source package is built from a tree whose `debian` is dereferenced,
-#      and the binary-only build (`-b`) would work with the symlink intact.
+#      Measured. So the source package is built from a tree whose `debian` is
+#      dereferenced, and the binary-only build (`-b`) would work with the
+#      symlink intact.
 #
-#   3. RUN dpkg-buildpackage. Without `-b`, so the source package is built too and the
-#      orig tarball is exercised. `-us -uc` because this is a local build, not an upload.
+#   3. RUN dpkg-buildpackage. Without `-b`, so the source package is built too.
+#      `-us -uc` because this is a local build, not an upload.
 #
 #   4. INSPECT THE .deb, and the three things issue #48 asked to be confirmed. The
 #      assertions are in this script as real checks with real exit codes: the executable
@@ -103,7 +103,7 @@ EOF
 fi
 
 git -C "$root" rev-parse --git-dir >/dev/null 2>&1 \
-    || fail "this must run inside the git tree: step 1 builds the orig tarball with
+    || fail "this must run inside the git tree: step 1 snapshots it with
   \`git archive\`, and a tree with no .git cannot produce one."
 
 # The version and the source name, read from debian/changelog rather than typed here, so
@@ -138,7 +138,6 @@ case "$src_name" in
     *[!a-z0-9.+-]*|"")
         fail "packaging/debian/changelog's first line names no source package. Read as: $first_line" ;;
 esac
-upstream_ver=${changelog_ver%%-*}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/irc-serve-deb.XXXXXX")
 cleanup() {
@@ -165,21 +164,20 @@ echo "  scratch       : $work"
 echo
 
 # ---------------------------------------------------------------------------
-# 1. The orig tarball. See the header: `git archive` IS how a release tarball is made.
+# 1. The tree snapshot. Native needs no .orig tarball, so this is a plain
+#    snapshot, not an upstream release artifact.
 # ---------------------------------------------------------------------------
-# Built OUTSIDE the scratch tree so the tar is at the same level as the unpacked
-# directory, which is where dpkg-source looks for it: `../<name>_<upstream>.orig.tar.*`.
-tarball="$work/${src_name}_${upstream_ver}.orig.tar.gz"
-git -C "$root" archive --format=tar.gz --prefix="${src_name}-${upstream_ver}/" HEAD > "$tarball" \
+tarball="$work/${src_name}_${changelog_ver}.tar.gz"
+git -C "$root" archive --format=tar.gz --prefix="${src_name}-${changelog_ver}/" HEAD > "$tarball" \
     || fail "git archive failed; this is step 1 and everything after it needs the tarball."
-echo "--- 1. orig tarball: $(basename "$tarball") ($(wc -c < "$tarball" | tr -d ' ') bytes)"
+echo "--- 1. tree snapshot: $(basename "$tarball") ($(wc -c < "$tarball" | tr -d ' ') bytes)"
 
 # ---------------------------------------------------------------------------
 # 2. Unpack, then materialise debian/ as a real directory.
 # ---------------------------------------------------------------------------
 tar xzf "$tarball" -C "$work"
-tree="$work/${src_name}-${upstream_ver}"
-[ -d "$tree" ] || fail "the orig tarball did not unpack to $tree"
+tree="$work/${src_name}-${changelog_ver}"
+[ -d "$tree" ] || fail "the snapshot tarball did not unpack to $tree"
 if [ -L "$tree/debian" ]; then
     ( cd "$tree" && rm debian && cp -aL packaging/debian ./debian )
     echo "--- 2. debian/ materialised as a real directory (dpkg-source -b cannot follow the symlink)"
@@ -193,11 +191,11 @@ fi
 # ---------------------------------------------------------------------------
 # 3. The build.
 # ---------------------------------------------------------------------------
-echo "--- 3. dpkg-buildpackage -us -uc (source AND binary: without -b the .orig.tar.gz is exercised)"
+echo "--- 3. dpkg-buildpackage -us -uc (source AND binary)"
 buildlog="$work/build.log"
 if docker run --rm \
         -e DEB_BUILD_JOBS="$JOBS" \
-        -v "$work:/build" -w "/build/${src_name}-${upstream_ver}" \
+        -v "$work:/build" -w "/build/${src_name}-${changelog_ver}" \
         "$IMAGE" \
         dpkg-buildpackage -us -uc > "$buildlog" 2>&1; then
     echo "      build OK"
@@ -214,7 +212,7 @@ fi
 # 4. Inspect the .deb. These are the three things issue #48 asked to be CONFIRMED, and
 #    they are checks with exit codes rather than lines of output to read by eye.
 # ---------------------------------------------------------------------------
-deb=$(ls "$work"/${src_name}_${upstream_ver}-*_*.deb 2>/dev/null | grep -v dbgsym | head -1 || true)
+deb=$(ls "$work"/${src_name}_${changelog_ver}_*.deb 2>/dev/null | grep -v dbgsym | head -1 || true)
 [ -n "$deb" ] || fail "dpkg-buildpackage succeeded but produced no binary package. Full log: $buildlog"
 echo
 echo "--- 4. the .deb: $(basename "$deb")"

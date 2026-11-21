@@ -521,11 +521,10 @@ def check_source_format(changelog_version):
     if fmt == "3.0 (native)" and has_revision:
         fail("debian/source/format",
              "the format is `3.0 (native)` and debian/changelog says %s, which carries "
-             "a Debian revision. Native packages cannot have one. Either drop the "
-             "revision from the changelog -- which also breaks "
-             "tests/integration/test_version_truth.c, whose expected line is "
-             "`irc-serve (%s-` with a trailing hyphen -- or use `3.0 (quilt)`."
-             % (changelog_version, changelog_version.rsplit("-", 1)[0]))
+             "a Debian revision. Native packages cannot have one: drop the revision "
+             "from the changelog (tests/integration/test_version_truth.c expects the "
+             "bare `irc-serve (X.Y.Z)` form and fails a revision back in)."
+             % changelog_version)
     if fmt == "3.0 (quilt)" and not has_revision:
         fail("debian/source/format",
              "the format is `3.0 (quilt)` and debian/changelog says %s, which has no "
@@ -1426,10 +1425,11 @@ def main():
     print()
     print("    * A .deb IS produced, from the source AND binary stages:")
     print("      dpkg-buildpackage -us -uc, and both the source package")
-    print("      (irc-serve_0.1.0-1.dsc/.debian.tar.xz/.orig.tar.gz) and the binary")
-    print("      (irc-serve_0.1.0-1_amd64.deb + -dbgsym) come out.")
+    print("      (irc-serve_0.1.0.dsc/.tar.xz -- no .orig.tar.gz: a native package")
+    print("      has no upstream tarball) and the binary")
+    print("      (irc-serve_0.1.0_amd64.deb + -dbgsym) come out.")
     print("    * The .deb contains /usr/bin/irc-serve, and nothing under /usr/local.")
-    print("    * Version is 0.1.0-1 and Depends: libc6 (>= 2.34) -- ${shlibs:Depends}")
+    print("    * Version is 0.1.0 and Depends: libc6 (>= 2.34) -- ${shlibs:Depends}")
     print("      and ${misc:Depends} were both SUBSTITUTED by dpkg-shlibdeps.")
     print("    * The extracted binary runs: `irc-serve --help` prints irc-serve-0.1.0.")
     print("    * lintian on the .deb: zero tags. The three it raised before this pass")
