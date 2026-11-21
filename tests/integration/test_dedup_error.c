@@ -139,9 +139,7 @@ static void link_rig(server_t *s, conn_t **pc_out)
     l = &s->links[0];
     memcpy(l->name, PEER_NAME, strlen(PEER_NAME) + 1u);
     l->fd = -1;
-    handshake_init(&l->hs);
-    l->hs.state = ESTABLISHED;
-    l->state = (int)l->hs.state;
+    l->state = (int)ESTABLISHED;
 
     pc = conn_new(-1, CONN_SERVER);
     TF_CHECK_MSG(pc != NULL, "conn_new() failed for the peer connection");
