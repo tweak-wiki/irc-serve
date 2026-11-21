@@ -555,12 +555,6 @@ static int b64_value(char c)
     return -1;
 }
 
-static int b64_is_space(char c)
-{
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' ||
-           c == '\v';
-}
-
 long sasl_b64_decode(const char *in, size_t inlen, unsigned char *out, size_t cap)
 {
     unsigned long acc = 0;
@@ -578,7 +572,8 @@ long sasl_b64_decode(const char *in, size_t inlen, unsigned char *out, size_t ca
         /* Whitespace is skipped rather than refused: clients wrap long
          * AUTHENTICATE payloads at 76 columns, and refusing a wrapped payload
          * refuses irssi. */
-        if (b64_is_space(c)) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' ||
+            c == '\v') {
             continue;
         }
         if (c == '=') {
