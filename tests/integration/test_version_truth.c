@@ -214,8 +214,9 @@ static void check_pkgbuild_derives(const char *version)
  * uploaded and when, and computing one would destroy the only thing it is for. What
  * it must not do is describe a version the tree cannot produce, so the top entry is
  * compared. The version line is the first line and the format is fixed --
- * `irc-serve (X.Y.Z-N) <suite>; <urgency=...>` -- so a hand-rolled read of the first
- * two space-delimited fields is enough and no changelog parser is needed. */
+ * `irc-serve (X.Y.Z) <suite>; <urgency=...>` (native: no Debian revision) -- so a
+ * hand-rolled read of the first two space-delimited fields is enough and no
+ * changelog parser is needed. */
 static void check_debian_changelog(const char *version)
 {
     size_t len = 0u;
@@ -242,7 +243,10 @@ static void check_debian_changelog(const char *version)
         i++;
     }
     line[i] = '\0';
-    snprintf(want, sizeof want, "irc-serve (%s-", version);
+    /* Native form, closed paren and all: `irc-serve (0.1.0)` matches and
+     * `irc-serve (0.1.0-1)` does not, so a revision sneaking back in fails
+     * here rather than at dpkg-buildpackage. */
+    snprintf(want, sizeof want, "irc-serve (%s)", version);
     check(has(line, want),
           "the Debian changelog's NEWEST entry is this version, so the package "
           "metadata does not describe a release the tree cannot produce",

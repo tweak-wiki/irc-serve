@@ -7,7 +7,7 @@
 # re-explained every time, which is how a real defect gets filed as noise.
 #
 # Measured with lintian 2.116.3+deb12u1 on debian bookworm, against
-# irc-serve_0.1.0-1_amd64.deb built by dpkg-buildpackage from this source package.
+# irc-serve_0.1.0_amd64.deb built by dpkg-buildpackage from this source package.
 
 # This package is not being uploaded to Debian. lintian reads an initial upload with one
 # changelog entry at revision -1 and no ITP bug closed, because the normal flow for a NEW

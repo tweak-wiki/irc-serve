@@ -1,4 +1,4 @@
-irc-serve (0.1.0-1) unstable; urgency=medium
+irc-serve (0.1.0) unstable; urgency=medium
 
   * Initial release: federated modern-spec IRC server in C.
   * Performance-first, minimal memory footprint (<10MB base per node).
