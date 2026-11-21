@@ -85,6 +85,7 @@
  * not have.
  */
 #include <errno.h>
+#include <grp.h>
 #include <netdb.h>
 #include <pwd.h>
 #include <signal.h>
@@ -1012,7 +1013,8 @@ static int parse_args(int argc, char **argv, node_opts_t *o)
  * Binding is the one step that can need privilege (a low port), and everything
  * after it -- file reads, the handshake, the loop -- does not. So the order is
  * parse -> bind plain -> TLS init -> bind TLS -> drop -> load stores ->
- * fed_open -> loop, and the drop is setgid() then setuid() to --user, with NO
+ * fed_open -> loop, and the drop is setgroups-clear, then setgid(), then
+ * setuid() to --user, with NO
  * daemonize and NO chroot: the node stays in the foreground, in the same
  * filesystem, with fewer privileges.
  *
@@ -1064,10 +1066,22 @@ static int drop_privileges(const node_opts_t *o)
         fprintf(stderr, "irc-serve: --user %s names no local account\n", name);
         return -1;
     }
-    /* Group first: after setuid() the process could no longer change its own
+    /* Primary group next: after setuid() the process could no longer change its own
      * group. A setgid() that succeeded and a setuid() that failed must still
      * refuse -- half-dropped privilege is the state this function exists to
      * prevent, so either failure is fatal. */
+    /* Supplementary groups FIRST (issue #227): setgid()/setuid() leave the
+     * inherited group list untouched, so without this the node keeps root's
+     * group access after the drop. Clearing needs privilege, so it precedes
+     * both -- and like a setid failure, a setgroups failure refuses startup
+     * rather than running half-dropped. */
+    if (setgroups(0, NULL) != 0) {
+        printf("[observable] priv_drop: state=REFUSED reason=setgroups_failed "
+               "user=%s\n", name);
+        fprintf(stderr, "irc-serve: could not clear supplementary groups: %s\n",
+                strerror(errno));
+        return -1;
+    }
     if (setgid(pw->pw_gid) != 0 || setuid(pw->pw_uid) != 0) {
         printf("[observable] priv_drop: state=REFUSED reason=setid_failed "
                "user=%s\n", name);
