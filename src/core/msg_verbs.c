@@ -65,6 +65,13 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
         return;
     }
     text = m->params[1];
+    /* RFC 2812 5.2: an empty trailing parameter is "no text to send", not a
+     * message with an empty body. 412 carries no <command> field, and this
+     * sits before the strip because the strip of nothing is still nothing. */
+    if (text[0] == '\0') {
+        (void)reply_refused(s, c, verb, NULL, "412", NULL, 0, "No text to send");
+        return;
+    }
 
     /* ------------------------------------------------------------------------
      * THE RELAY STRIP, AND WHY IT IS NOT conn_text_strip()
