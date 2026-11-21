@@ -1050,6 +1050,27 @@ static const char *fanout_pick_block(const conn_t *m, const char *account,
     return NULL;
 }
 
+/* The block is always one of the three precomputed values (or NULL), so its
+ * length is SELECTED, not measured: three strlen calls per emission instead
+ * of one per member (#216). Pointer identity is exact here because
+ * fanout_pick_block() returns exactly these pointers. */
+static size_t fanout_block_len(const char *block,
+                               const char *tag_msgid, size_t msgid_len,
+                               const char *tag_acct, size_t acct_len,
+                               const char *tag_both, size_t both_len)
+{
+    if (block == tag_both) {
+        return both_len;
+    }
+    if (block == tag_msgid) {
+        return msgid_len;
+    }
+    if (block == tag_acct) {
+        return acct_len;
+    }
+    return 0;
+}
+
 /* Does this member's line carry per-destination label/batch state, which only
  * the per-member path can render? The three fields are the ones the two hooks
  * read: a live label owed a response (a self-message suppresses it with no
@@ -1168,6 +1189,9 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
     char tag_msgid[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_acct[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_both[FANOUT_TAG_BLOCK_MAX + 1u];
+    size_t tag_msgid_len = 0;
+    size_t tag_acct_len = 0;
+    size_t tag_both_len = 0;
     int tags_ok = 0;
 
     if (t->chan == NULL || nparams < 0 || nparams >= IRC_MAX_PARAMS) {
@@ -1189,6 +1213,10 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
                                          tag_msgid, sizeof tag_msgid,
                                          tag_acct, sizeof tag_acct,
                                          tag_both, sizeof tag_both);
+        /* #216: measured once per emission, selected per member below. */
+        tag_msgid_len = strlen(tag_msgid);
+        tag_acct_len = strlen(tag_acct);
+        tag_both_len = strlen(tag_both);
     }
     for (size_t i = 0; i < t->chan->nmembers; i++) {
         conn_t *m = t->chan->members[i].c;
@@ -1280,7 +1308,10 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
             if (ready != 0) {
                 const char *block = fanout_pick_block(m, account, tag_msgid,
                                                       tag_acct, tag_both);
-                const size_t taglen = (block != NULL) ? strlen(block) : 0u;
+                /* #216: length selected, not measured (see fanout_block_len). */
+                const size_t taglen = fanout_block_len(block, tag_msgid, tag_msgid_len,
+                                                       tag_acct, tag_acct_len,
+                                                       tag_both, tag_both_len);
 
                 /* Unfailable for bytes the hoist produced -- the body fits
                  * IRC_MAX_LINE by render and the block fits its own bound --
@@ -1459,6 +1490,9 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
     char tag_msgid[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_acct[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_both[FANOUT_TAG_BLOCK_MAX + 1u];
+    size_t tag_msgid_len = 0;
+    size_t tag_acct_len = 0;
+    size_t tag_both_len = 0;
     int tags_ok = 0;
     /* #171: the union de-duplication set -- one bit per registrable fd, cleared
      * once per emission below and set channel-by-channel in the walk. */
@@ -1508,6 +1542,10 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
                                          tag_msgid, sizeof tag_msgid,
                                          tag_acct, sizeof tag_acct,
                                          tag_both, sizeof tag_both);
+        /* #216: measured once per emission, selected per member below. */
+        tag_msgid_len = strlen(tag_msgid);
+        tag_acct_len = strlen(tag_acct);
+        tag_both_len = strlen(tag_both);
     }
 
     for (size_t i = 0; i < nchans; i++) {
@@ -1627,7 +1665,10 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
                 if (ready != 0) {
                     const char *block = fanout_pick_block(m, account, tag_msgid,
                                                           tag_acct, tag_both);
-                    const size_t taglen = (block != NULL) ? strlen(block) : 0u;
+                    /* #216: length selected, not measured (see fanout_block_len). */
+                    const size_t taglen = fanout_block_len(block, tag_msgid, tag_msgid_len,
+                                                           tag_acct, tag_acct_len,
+                                                           tag_both, tag_both_len);
 
                     if (taglen <= (size_t)FANOUT_TAG_BLOCK_MAX &&
                         shapelen + taglen + 4u <= sizeof line) {
