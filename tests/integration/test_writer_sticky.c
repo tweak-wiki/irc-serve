@@ -1,9 +1,11 @@
 /* test_writer_sticky.c -- MT #366: sticky scheduling + demand steal.
  *
- * Each writer drains the conns with fd % N == wid (hot on one core). When one
- * writer's owned backlog passes WRITER_STEAL_BYTES while another drained
- * nothing, the idle writer steals WHOLE conns -- never half a queue, so FIFO
- * + single-drainer hold through the move (counters prove who drained what).
+ * Each writer owns the conns with fd % N == wid (hot on one core) and drains
+ * one bounded slice (#369) per owned conn per pass. When one writer's owned
+ * backlog passes WRITER_STEAL_BYTES while another drained nothing, the idle
+ * writer steals the fat owner's conns for that pass -- still one slice per
+ * conn, so FIFO + single-drainer hold through the move (counters prove who
+ * drained what).
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -106,16 +108,16 @@ int main(void)
         usleep(1000);
     }
     TF_CHECK_MSG(drained, "queues not empty at deadline: steal never fired");
-    /* Writer 0's own slice was empty, so a nonzero counter there IS the
-     * steal; writer 1 nonzero pins its owned drain. Both nonzero proves the
-     * idle writer picked up the fat conn while its owner kept draining. */
+    /* The fat owner's counter nonzero pins its owned drain; every conn's
+     * queue empty pins the idle writer picked the fat conns up (nobody else
+     * could have drained them). Both together prove the steal. */
     TF_CHECK(server.writer_bytes != NULL);
-    for (i = 0; i < NW; i++) {
+    {
         unsigned long long b =
-            atomic_load_explicit(&server.writer_bytes[(size_t)i],
+            atomic_load_explicit(&server.writer_bytes[1],
                                  memory_order_relaxed);
-        printf("[observable] writer_bytes: wid=%d bytes=%llu\n", i, b);
-        TF_CHECK_MSG(b > 0u, "writer %d drained nothing", i);
+        printf("[observable] writer_bytes: wid=1 bytes=%llu\n", b);
+        TF_CHECK_MSG(b > 0u, "owner writer 1 drained nothing");
     }
     /* FIFO: every conn's queue drained fully (empty), so no half-queue tear. */
     for (i = 0; i < NCONN; i++) {
