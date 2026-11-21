@@ -1203,27 +1203,28 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
     char store[CHAN_MAX_LIST_ARGS * (CHAN_MAX_NAME + 1u)];
     const char *names[CHAN_MAX_LIST_ARGS];
     const char *reason = (m->nparams > 1) ? m->params[1] : NULL;
-    /* THE REASON IS RELAYED, SO IT IS STRIPPED, and this buffer is why.
+    /* THE REASON IS RELAYED, SO IT IS BOUND AND THEN STRIPPED, in that order.
      *
      * `chan_member_leave()` puts a PART's `<reason>` on the wire to every member of
-     * the channel, and the FORWARD arm above puts the same string on the link to
-     * the origin, so `PART #c :<ESC>[2J` reached every member's terminal. RFC 2812
-     * 3.3.2 gives a PART reason no length limit and this node imposes none, so
-     * unlike the topic and the kick reason there is no field bound to copy: the
-     * largest value that can arrive is the line cap, and the buffer is sized to it.
+     * the channel, and the FORWARD arm below puts the same string on the link to
+     * the origin. With no bound the reason went straight into
+     * `deliver_state_change()` -> `fanout_deliver()` -> `send_line()` ->
+     * `message_format()`, which refuses a line it cannot represent -- and the only
+     * outcome at that depth is a refusal counted on `n_reply_refused`, the counter
+     * `reply.c` holds at zero because a non-zero value is a bug report. So one
+     * client command was a reachable way to put a non-zero on it.
      *
-     * IRC_MAX_LINE + 1 ON THE STACK, 8 KiB, and that is the honest cost of the
-     * honest answer. The alternatives were an 8 KiB heap allocation per PART for a
-     * command a client sends once per channel, or a new length bound on a parameter
-     * the RFC leaves open -- which is a protocol change this pass is not making.
-     * 8 KiB in one non-recursive handler is a cost paid once per PART and nothing
-     * else; the strip can only shorten, so the result always fits.
-     *
-     * IT IS DONE ONCE, BEFORE THE LOOP, and that is the load-bearing part of the
-     * placement rather than an optimisation: the same reason goes to up to
+     * The bound is CHAN_MAX_PART_REASON (255), the same sentence-sized cap as the
+     * kick reason, the topic, the away message and the realname. Refused with 417,
+     * the numeric this node already uses for "that parameter is longer than I
+     * will store". Stripping first would be a regression: a 256-byte reason
+     * stripped into a 255-byte buffer truncates to 255 and the check that follows
+     * accepts the very input the 417 exists to refuse -- the same ordering
+     * `handle_kick()` documents, so the refusal is a function of what the client
+     * sent. IT IS DONE ONCE, BEFORE THE LOOP: the same reason goes to up to
      * CHAN_MAX_LIST_ARGS channels, and a strip inside the loop would mean N
      * separate buffers for one string. */
-    char clean[IRC_MAX_LINE + 1u];
+    char clean[CHAN_MAX_PART_REASON + 1u];
     size_t kept_reason = 0;
     size_t raw_reason_len = 0;
     int n;
@@ -1235,6 +1236,14 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
     }
     if (reason != NULL) {
         raw_reason_len = strlen(reason);
+        if (raw_reason_len > (size_t)CHAN_MAX_PART_REASON) {
+            (void)reply_refused(s, c, "PART", NULL, "417", NULL, 0,
+                                "Part message is too long");
+            printf("[observable] chan_part_refused: nick=%s reason=too_long "
+                   "len=%zu max=%d\n",
+                   c->nick, raw_reason_len, CHAN_MAX_PART_REASON);
+            return;
+        }
         kept_reason = conn_text_strip(clean, sizeof clean, reason);
         reason = (kept_reason != 0u) ? clean : NULL;
     }
