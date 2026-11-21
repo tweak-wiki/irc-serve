@@ -1957,7 +1957,7 @@ int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
      * reaper closes the fd at the next fixed point. */
     s->n_writeq_overflow++;
     printf("[observable] writeq_overflow: fd=%d pending=%zu cap=%zu\n",
-           c->fd, conn_write_pending(c), CONN_WQ_MAX);
+           c->fd, conn_write_pending_locked(c), CONN_WQ_MAX);
     conn_mark_closing(c);
     return -1;
 }
