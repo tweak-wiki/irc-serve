@@ -849,13 +849,19 @@ static void writer_drain_one(server_t *s)
         }
         rc = conn_pump_slice_locked(c);
         after = c->wlen - c->woff;
-        pthread_mutex_unlock(&c->wq_lock);
         if (rc < 0) {
+            /* Everything that touches the conn happens under wq_lock: once
+             * it is released the reaper may detach and free it, so the fd
+             * is copied and the mark applied before the unlock, and the
+             * log below uses only the copy. */
+            int fdcopy = c->fd;
             atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
-            printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
             conn_mark_closing(c);
+            pthread_mutex_unlock(&c->wq_lock);
+            printf("[observable] conn_close: fd=%d reason=write_error\n", fdcopy);
             continue;
         }
+        pthread_mutex_unlock(&c->wq_lock);
         if (before > 0 && after > 0) {
             atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
         }
