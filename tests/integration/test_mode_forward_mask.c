@@ -128,7 +128,7 @@ int main(void)
         TF_CHECK_MSG(have > from, "the client received nothing: no numeric "
                      "was sent for the refused forward");
         for (size_t i = from; i < have && n + 1u < sizeof got; i++) {
-            got[n++] = c->wbuf[c->woff + i];
+            got[n++] = c->wbuf[atomic_load_explicit(&c->woff, memory_order_acquire) + i];
         }
         got[n] = '\0';
         TF_CHECK_MSG(strstr(got, " 417 bob :Input line was too long\r\n") != NULL,

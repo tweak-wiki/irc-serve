@@ -88,7 +88,7 @@ static void bug_report(const char *what, const conn_t *c)
 {
     printf("[fixture] BUG %s fd=%d state=%d woff=%zu wlen=%zu rlen=%zu "
            "kind=%d nick=%s\n",
-           what, c->fd, atomic_load_explicit(&c->state, memory_order_acquire), c->woff, c->wlen, c->rlen, c->kind, c->nick);
+           what, c->fd, atomic_load_explicit(&c->state, memory_order_acquire), atomic_load_explicit(&c->woff, memory_order_acquire), atomic_load_explicit(&c->wlen, memory_order_acquire), c->rlen, c->kind, c->nick);
     fflush(stdout);
 }
 
@@ -123,7 +123,7 @@ static void audit_tick(server_t *s, uint64_t now_ms)
          * empty queue (writer failed to drain). */
         if (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING) {
             uint64_t dl = (c->fd >= 0 && c->fd < FD_SETSIZE) ? s->wq_close_at[c->fd] : 0;
-            int pending = (c->wlen > c->woff) ? 1 : 0;
+            int pending = (atomic_load_explicit(&c->wlen, memory_order_acquire) > atomic_load_explicit(&c->woff, memory_order_acquire)) ? 1 : 0;
 
             if (s->writer_threads <= 0 || !pending) {
                 BUG("closing_survived_reap", c);
@@ -144,7 +144,7 @@ static void audit_tick(server_t *s, uint64_t now_ms)
              * parent's rstate=0 needle matches. */
             if (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING) {
                 uint64_t ddl = (c->fd >= 0 && c->fd < FD_SETSIZE) ? s->wq_close_at[c->fd] : 0;
-                int dpending = (c->wlen > c->woff) ? 1 : 0;
+                int dpending = (atomic_load_explicit(&c->wlen, memory_order_acquire) > atomic_load_explicit(&c->woff, memory_order_acquire)) ? 1 : 0;
 
                 if (s->writer_threads <= 0 || !dpending) {
                     BUG("reuse_dirty", c);
@@ -159,10 +159,10 @@ static void audit_tick(server_t *s, uint64_t now_ms)
                     g_reported[c->fd] |= 2u;
                     printf("[fixture] reuse fd=%d rstate=%d roff=%zu rlen=%zu "
                            "rkind=%d rnick=%s\n",
-                           c->fd, atomic_load_explicit(&c->state, memory_order_acquire), c->woff, c->rlen, c->kind, c->nick);
+                           c->fd, atomic_load_explicit(&c->state, memory_order_acquire), atomic_load_explicit(&c->woff, memory_order_acquire), c->rlen, c->kind, c->nick);
                     fflush(stdout);
                 }
-                if (atomic_load_explicit(&c->state, memory_order_acquire) != CONN_REG_PASS || c->woff != 0u || c->wlen != 0u ||
+                if (atomic_load_explicit(&c->state, memory_order_acquire) != CONN_REG_PASS || atomic_load_explicit(&c->woff, memory_order_acquire) != 0u || atomic_load_explicit(&c->wlen, memory_order_acquire) != 0u ||
                     c->rlen != 0u || c->kind != CONN_CLIENT || c->nick[0] != '\0') {
                     BUG("reuse_dirty", c);
                 }
