@@ -3279,6 +3279,10 @@ static void case_big_burst_resyncs_in_chunks(void)
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_close: shadow=NONE", 1000) == 0,
                  "node B reported an open shadow at shutdown: %s", b.out);
 
+    tc_close(&c0);
+    tc_close(&c1);
+    tc_close(&c2);
+    tc_close(&c3);
     nf_free(&a);
     nf_free(&b);
     g_big_resync = 0;
