@@ -1327,7 +1327,10 @@ int conn_pump_locked(conn_t *c);
  * are distinguishable. */
 void conn_want(conn_t *c, int read, int write);
 
-/* Bytes still unsent: wlen - woff. */
+/* Bytes still unsent: wlen - woff. CALLER HOLDS wq_lock: every transport and
+ * pump path calls this with the lock held (its publish runs inside), so this
+ * never takes it -- taking it would deadlock. Cross-thread readers without
+ * the lock use conn_write_pending_locked() instead (#293). */
 size_t conn_write_pending(const conn_t *c);
 
 /* MT 2.2 (#241): locked pending read; takes wq_lock. For cross-thread
