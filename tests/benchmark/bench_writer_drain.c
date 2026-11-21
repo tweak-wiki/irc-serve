@@ -9,9 +9,15 @@
  * Prints one `writer_drain:` line per N (elapsed ms, MiB/s) plus one
  * `writer_rss:` line (getrusage peak, like bench_mem). Fails (nonzero) if any
  * conn still holds bytes at the deadline -- a stalled writer pool is a
- * finding, not a slow number. No thresholds: CI runs it advisory-only and the
- * numbers go into the #248 results note for the future default decision.
- * The default is NOT flipped here.
+ * finding, not a slow number. The N=4 case carries an enforced oracle: peak
+ * RSS must stay under WRITER_RSS_MB_MAX (default 32 MiB) and the N=4 drain
+ * must finish within WRITER_DRAIN_N4_MAX_MS (default 5000 ms), or the
+ * benchmark fails. Both caps have wide headroom over the measured baseline
+ * (N=4 drains ~15-40 ms at ~4-6 MiB peak) so a loaded runner still passes
+ * while a real blowup -- e.g. per-writer buffer duplication under reg_mu
+ * (#279) -- trips it. Either cap set to 0 disables that check (sanitizer
+ * builds inflate both numbers and should be evaluated separately).
+ * The default writer count is NOT flipped here.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -70,8 +76,9 @@ static void drain_peers(int *peers, int n)
 }
 
 /* One drain measurement at `writers` threads. Owns its server_t, conns, and
- * peer ends end to end; returns 0 on full drain, 1 on stall/failure. */
-static int run_case(int writers)
+ * peer ends end to end; returns 0 on full drain, 1 on stall/failure, and
+ * reports the drain latency through `elapsed_ms_out` on success. */
+static int run_case(int writers, double *elapsed_ms_out)
 {
     server_t server;
     conn_t *conns[NCONN];
@@ -184,6 +191,7 @@ static int run_case(int writers)
     mib_s = elapsed_ms > 0.0 ? ((double)total / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0) : 0.0;
     printf("writer_drain: writers=%d conns=%d bytes_per_conn=%u total_bytes=%zu elapsed_ms=%.2f mib_per_s=%.2f\n",
            writers, NCONN, PAYLOAD, total, elapsed_ms, mib_s);
+    *elapsed_ms_out = elapsed_ms;
     server_shutdown(&server);
 close_peers:
     for (i = 0; i < NCONN; i++) {
@@ -194,21 +202,53 @@ close_peers:
     return rc;
 }
 
+/* Env cap in the given units; unset/empty means `def`, 0 disables. */
+static double env_cap(const char *name, double def)
+{
+    const char *v = getenv(name);
+    if (v == NULL || *v == '\0') {
+        return def;
+    }
+    return atof(v);
+}
+
 int main(void)
 {
     const int cases[] = { 0, 2, 4 };
     size_t k;
     int rc = 0;
+    double elapsed_ms = 0.0;
+    double elapsed_n4_ms = 0.0;
+    double rss;
+    double rss_max;
+    double n4_max_ms;
 
     memset(g_payload, 'B', sizeof g_payload);
     /* CRLF-free fill: never framed, only pumped, so content is irrelevant. */
     for (k = 0; k < sizeof cases / sizeof cases[0]; k++) {
-        if (run_case(cases[k]) != 0) {
+        if (run_case(cases[k], &elapsed_ms) != 0) {
             rc = 1;
             break;
         }
+        if (cases[k] == 4) {
+            elapsed_n4_ms = elapsed_ms;
+        }
     }
-    printf("writer_rss: rss=%.2f MiB\n", rss_mb());
+    rss = rss_mb();
+    printf("writer_rss: rss=%.2f MiB\n", rss);
+    if (rc == 0) {
+        rss_max = env_cap("WRITER_RSS_MB_MAX", 32.0);
+        n4_max_ms = env_cap("WRITER_DRAIN_N4_MAX_MS", 5000.0);
+        if (rss_max > 0.0 && rss > rss_max) {
+            printf("writer_oracle: FAIL rss %.2f MiB exceeds %.2f MiB\n", rss, rss_max);
+            rc = 1;
+        }
+        if (rc == 0 && n4_max_ms > 0.0 && elapsed_n4_ms > n4_max_ms) {
+            printf("writer_oracle: FAIL writers=4 drain %.2f ms exceeds %.2f ms\n",
+                   elapsed_n4_ms, n4_max_ms);
+            rc = 1;
+        }
+    }
     if (rc == 0) {
         printf("writer_drain: PASS all writers cases drained\n");
     }
