@@ -168,11 +168,6 @@ int batch_line_tag(conn_t *dst, char *out, size_t cap);
  * one answer, and the answer lives in the handler that needs it. */
 int batch_line_tagged_inbound(const message_t *m);
 
-/* The reference tag of the batch this connection has open, or `""` for none. Read
- * only, and exposed for `server.c`'s teardown reporting and for the log line the
- * `BATCH` handler prints — nothing branches on it. */
-const char *batch_open_ref(const conn_t *c);
-
 /* ---------------------------------------------------------------------------
  * THE VERB
  * ---------------------------------------------------------------------------

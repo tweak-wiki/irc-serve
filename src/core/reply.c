@@ -343,7 +343,7 @@ static int emit_numeric_ex(server_t *s, conn_t *c, const char *code,
         if (room < 2u) {
             return refuse(s, c, code, "unrepresentable");
         }
-        kept = conn_text_strip_wire(arena + used, room, v);
+        kept = conn_text_strip(arena + used, room, v);
         if (kept + 1u > room) {
             return refuse(s, c, code, "unrepresentable");
         }
@@ -789,7 +789,7 @@ int reply_refused(server_t *s, conn_t *src, const char *command, const char *fai
     }
 
     code = std_fail_code(legacy, fail_code);
-    if (cap_standard_replies_enabled(src) == 0 || code == NULL) {
+    if (cap_enabled(src, CAP_STANDARD_REPLIES) == 0 || code == NULL) {
         /* RFC 2812 5.2: 461 ERR_NEEDMOREPARAMS is
          *     "<client> <command> :Not enough parameters"
          * and the <command> is a FIELD, not decoration. Every one of this node's 29

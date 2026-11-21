@@ -223,7 +223,7 @@ int label_line_tag(server_t *s, conn_t *c, const char *code, const char *prefix,
          *
          * `label_batch_open` IS SET BEFORE THE EMISSION, so the recursive
          * `emit_built_ex()` the `BATCH +` line causes takes the other arm. */
-        if (cap_labeled_response_enabled(c) != 0) {
+        if (cap_enabled(c, CAP_LABELED_RESPONSE) != 0) {
             mint_batch_ref(c, c->label_batch, sizeof c->label_batch);
             {
                 const char *open[2];
@@ -336,7 +336,7 @@ void label_finish_command(server_t *s, conn_t *c)
         printf("[observable] label: fd=%d closed=1\n", c->fd);
         return;
     }
-    if (cap_labeled_response_enabled(c) != 0) {
+    if (cap_enabled(c, CAP_LABELED_RESPONSE) != 0) {
         const char *none[1];
 
         none[0] = NULL;
