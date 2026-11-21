@@ -182,7 +182,30 @@ int main(void)
         TF_CHECK_MSG(unlock != NULL,
                      "the shutdown drain takes c->wq_lock and never releases "
                      "it: the next line on that conn would deadlock");
-    }
+        { /* #308: NO BYTE CAP on the drain. The old FED_SHUTDOWN_DRAIN_MAX
+            * (8 KiB) stopped the drain early when a peer had more pending --
+            * one TLS record alone is 16 KiB -- and the close() that followed
+            * sent RST instead of FIN, eating the SHUTDOWN. The loop must run
+            * until RETRY/EOF whatever the byte count, with `drained` kept
+            * only for the log line. */
+            TF_CHECK_MSG(strstr(code, "DRAIN_MAX") == NULL,
+                         "the shutdown drain still has a byte cap: more than "
+                         "8 KiB pending stops the drain early and the close "
+                         "RSTs the SHUTDOWN away (#308)");
+            /* AND IT STILL STOPS ON IDLE: the RETRY break after the drain's
+             * transport_recv is what keeps an idle peer link from spinning
+             * here forever (the six-hung-tests lesson). Uncapped does not
+             * mean unbroken. The reader strips comments, so this is code
+             * only: a `continue` on data with a `break` after it. */
+            {
+                const char *cont = strstr(drain, "continue;");
+                TF_CHECK_MSG(cont != NULL && strstr(cont, "break;") != NULL,
+                             "the shutdown drain lost its RETRY/EOF stop: an "
+                             "uncapped loop that never breaks on an empty "
+                             "queue spins teardown forever (#308)");
+            }
+        }
+        }
 
     /* Shutdown while the peer is streaming: A's fed_send_shutdown() drains
      * the link under wq_lock while its 4 writers may be pumping the same
