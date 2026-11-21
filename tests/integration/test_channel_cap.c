@@ -150,6 +150,22 @@ static void case_cap_refuses_the_next_join(void)
                  "`held=%d cap=%d` is what says this was the edge rather than "
                  "some earlier number.\n  node said: %s", SW_MAX_JOIN,
                  SW_MAX_JOIN, node.out);
+    /* AND NOTHING WAS CREATED (issue #274): the 405 above fires BEFORE
+     * chan_new(), so the node log must hold no `chan_create` line for the
+     * refused name. A zero-member object left behind here would be a ghost
+     * the per-connection cap never bounds, and enough of them would fill
+     * SERVER_MAX_CHANNELS until legitimate JOINs fail with 437 for
+     * channels nobody is on. */
+    {
+        char nocreate[64];
+
+        (void)snprintf(nocreate, sizeof nocreate, "chan_create: channel=%s",
+                       chan);
+        TF_CHECK_MSG(strstr(node.out, nocreate) == NULL,
+                     "a JOIN refused at the per-connection cap left a channel "
+                     "object behind: the refusal created the channel it "
+                     "refused.\n  node said: %s", node.out);
+    }
     /* AND THE CLIENT IS STILL SERVED, which is the difference between a cap and
      * a disconnect: 1024 channels is a fact about the client, not an attack on
      * anybody else, and a node that closed the connection would be refusing to
