@@ -880,6 +880,9 @@ size_t conn_text_logsafe(char *out, size_t cap, const char *s);
  * to be able to tell them apart without inspecting errno, which may be stale. */
 #define CONN_FILL_EOF 1
 
+/* #368: assumed cache-line width for the handoff layout at the end of conn_t. */
+#define CONN_CACHE_LINE 64
+
 /* The connection. Layout is 2.1 (identity) plus 3.3 (buffers), in that order.
  *
  * The three fields Phase 5 adds sit inside the identity block, beside the
@@ -918,7 +921,6 @@ typedef struct conn {
     char        user[64];
     char        host[128];
     char        realname[256];
-    atomic_int  state;             /* CONN_REG_* | CONN_CLOSING; release/acquire */
     /* THE "A USER ARRIVED" FLAG, AND WHY IT EXISTS NOW WHEN IT DID NOT BEFORE.
      * `have_user()` used to be `c->user[0] != '\0'`, and that was sound for as
      * long as an empty ident was the ONLY way `c->user` could be empty: a
@@ -1093,8 +1095,8 @@ typedef struct conn {
      * entry whose mask is zero, so including it would only spend a slot. It is
      * reachable only for a transport that has said it wants nothing, and the
      * plaintext transport never says it (want_read is always 1). */
-    atomic_int  want_read;         /* poll() must include POLLIN; release/acquire */
-    atomic_int  want_write;        /* poll() must include POLLOUT; release/acquire */
+    /* want_read/want_write live in the #368 handoff block at the end of this
+     * struct, beside the lock and queue they are shared with. */
     /* PHASE 12: THE TRANSPORT this connection's bytes go through. `t_ops` is
      * NULL until conn_new() installs the plaintext ops, and `t_ctx` is the
      * transport's own state -- NULL for plaintext, the SSL* for TLS. The ops
@@ -1165,7 +1167,30 @@ typedef struct conn {
     size_t      rcap;
     /* MT 2.1 (#240): guards wbuf/wlen/woff/wcap + want_write ONLY. Single-threaded
      * loop calls conn_queue()/conn_pump() exactly as before, so no behavior change. */
+    /* -----------------------------------------------------------------------
+     * #368 HANDOFF: THE FIELDS THE LOOP SHARES WITH WRITER THREADS.
+     * -----------------------------------------------------------------------
+     * The loop appends to the write queue while a writer drains it, so these
+     * sit together on cache lines of their own: wq_lock opens the group on a
+     * line boundary, and the layout test fails if any of them -- or any
+     * dispatch-only field -- migrates onto the other's lines (a header assert
+     * is not available: -Wpre-c11-compat objects to _Static_assert, and this
+     * project never narrows the warning set; see dedup.h). Layout only; the
+     * access rules are unchanged (wq_lock guards the queue and want_write,
+     * per MT 2.1 #240). want_read joins want_write so both readiness atoms
+     * share lines the loop already pulls for the poll set (see PHASE 12).
+     *
+     * wq_pad is dead space on purpose: without _Alignas it is the only
+     * warning-clean way to open the group on a line boundary, and its width
+     * is whatever the fields above it need -- the layout test pins the sum.
+     */
+    /* Width is arithmetic, not a second copy of 64: the fields above end 40
+     * bytes into a line, so 24 opens wq_lock on the next one. */
+    char            _handoff_pad[24];
     pthread_mutex_t wq_lock;
+    atomic_int  state;             /* CONN_REG_* | CONN_CLOSING; release/acquire */
+    atomic_int  want_read;         /* poll() must include POLLIN; release/acquire */
+    atomic_int  want_write;        /* poll() must include POLLOUT; release/acquire */
     char       *wbuf;              /* write queue; wbuf[woff..wlen) is unsent */
     size_t      woff;
     size_t      wlen;
