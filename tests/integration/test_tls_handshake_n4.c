@@ -26,6 +26,13 @@
 #include "harness/test_util.h"
 #include "harness/tls_fixture.h"
 
+/* Sized the way test_tls.c sizes them: the directory is bounded at T_DIR_MAX
+ * and the certificate paths get T_DIR_MAX + 128, which is what keeps gcc's
+ * -Wformat-truncation quiet about "%s/srv.crt" (a 1024-into-1024 snprintf is
+ * a truncation warning under -Werror on the CI build). */
+#define T_DIR_MAX 512
+#define T_PATH (T_DIR_MAX + 128)
+
 #define T_IO_MS 15000
 
 static int fails = 0;
@@ -114,9 +121,9 @@ static void starttls_leg(int port, const char *cert)
 
 int main(void)
 {
-    char dir[1024];
-    char cert[1024];
-    char key[1024];
+    char dir[T_DIR_MAX];
+    char cert[T_PATH];
+    char key[T_PATH];
     nf_node_t n;
     char a0[] = "irc-serve";
     char a1[] = "0";
