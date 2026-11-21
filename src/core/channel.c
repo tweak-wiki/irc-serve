@@ -510,7 +510,12 @@ int chan_server_add(chan_t *ch, const char *name)
     }
     if (ch->nservers == ch->scap) {
         size_t want = (ch->scap == 0) ? 4u : ch->scap * 2u;
-        struct chan_server *grown =
+        struct chan_server *grown;
+        /* Same guard as chan_remote_add: peer-reported names must not grow the set past CHAN_MAX_MEMBER_SERVERS. */
+        if (ch->nservers >= (size_t)CHAN_MAX_MEMBER_SERVERS) {
+            return -1;
+        }
+        grown =
             (struct chan_server *)realloc(ch->servers, want * sizeof *grown);
 
         if (grown == NULL) {
