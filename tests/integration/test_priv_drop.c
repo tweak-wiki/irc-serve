@@ -196,5 +196,44 @@ int main(void)
                "reachable here\n");
     }
 
+    /* ---- the drop clears supplementary groups (#227) ---- */
+    /* setgid()/setuid() leave the inherited group list untouched, so the
+     * drop must call setgroups(0, NULL) first -- and refuse startup if it
+     * fails, the same fail-closed rule as a setid failure. A uid change is
+     * invisible from outside, so like the lock hold in test_shutdown_drain,
+     * looking is the check: require the call, before setgid(), with its
+     * refusal observable. Runs everywhere, root or not. */
+    {
+        char code[TF_SRC_MAX];
+        size_t len = 0;
+        long got = tf_read_code_into(code, sizeof code, "src/node_main.c",
+                                     &len);
+        const char *fn;
+        const char *sg;
+        const char *gid;
+
+        TF_CHECK_MSG(got >= 0,
+                     "could not read src/node_main.c (is IRCSERVE_SRC_DIR "
+                     "set?)");
+        fn = strstr(code, "drop_privileges(const node_opts_t");
+        TF_CHECK_MSG(fn != NULL,
+                     "could not find drop_privileges() in node_main.c");
+        sg = strstr(fn, "setgroups(0, NULL)");
+        gid = strstr(fn, "setgid(");
+        TF_CHECK_MSG(sg != NULL && gid != NULL && sg < gid,
+                     "the privilege drop does not clear supplementary groups "
+                     "before setgid: the daemon keeps root's group access "
+                     "(#227)");
+        /* The reader strips string literals too, so the refusal observable
+         * itself is unseeable: pin the fail-closed SHAPE instead -- a
+         * `return -1` between the setgroups call and setgid(). */
+        {
+            const char *refuse = strstr(sg, "return -1");
+            TF_CHECK_MSG(refuse != NULL && refuse < gid,
+                         "a setgroups failure does not refuse startup: a "
+                         "half-dropped daemon runs on (#227)");
+        }
+        }
+
     return 0;
 }
