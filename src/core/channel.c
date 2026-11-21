@@ -33,22 +33,28 @@
  * Small helpers
  * ------------------------------------------------------------------------- */
 
-/* Copy at most `cap - 1` bytes and NUL-terminate. Returns 1 if the whole value
- * fitted, 0 if it was truncated -- so a caller storing into a fixed field can
- * REPORT the truncation instead of silently keeping a prefix, which is 3.2's
- * rule about not delivering a shortened value. */
-static int copy_bounded(char *dst, size_t cap, const char *src)
+/* THE ONE BOUNDED COPY (issue #212): copy-or-refuse, never truncate. Returns
+ * 1 when the whole value fitted, 0 when it was refused -- and a refusal
+ * leaves `dst` EMPTY, so a caller that ignores the return still cannot hold
+ * a silently shortened value (3.2's rule against delivering one). A NULL
+ * source is "not told", stored as empty. The truncating copies in
+ * commands.c's copy_field() (registration fields, reports the truncation)
+ * and the snprintf shadow fields in federation/burst.c are deliberate
+ * compromises with their own comments, not this contract. */
+int copy_bounded(char *dst, size_t cap, const char *src)
 {
     size_t n;
 
-    if (dst == NULL || src == NULL || cap == 0) {
+    if (dst == NULL || cap == 0) {
         return 0;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return 1;
     }
     n = strlen(src);
     if (n >= cap) {
-        n = cap - 1u;
-        memcpy(dst, src, n);
-        dst[n] = '\0';
+        dst[0] = '\0';
         return 0;
     }
     memcpy(dst, src, n + 1u);
