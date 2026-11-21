@@ -98,7 +98,6 @@ static const hostile_t k_corpus[] = {
     { "a=b",              NULL, "'=' is not special inside a value" },
     { "@home",            NULL, "'@' is only special as the block marker" },
     { "k=v",              NULL, "an '='-pair written inside a value" },
-    { "\t",               NULL, "a raw HTAB" },
 
     /* --- multi-byte UTF-8: escaping is defined over BYTES --- */
     { "\xc3\xa9",                    NULL, "two-byte UTF-8 (e acute)" },
@@ -259,6 +258,12 @@ static void check_noncanonical(void)
     /* And a block with no block marker round-trips without one gaining one. */
     assert(ircv3_tags_parse("a=1;b=2", &t) == 0);
     assert(t.has_at == 0);
+    /* Raw SP, TAB, CR, LF never survive the wire: a raw TAB in a value ends
+     * the block at the message layer (SP/HTAB split), so the block grammar
+     * refuses it rather than decoding a value the sender did not write. The
+     * refusal zeroes the list, so this runs before the serialize check. */
+    { ircv3_tags_t bad; assert(ircv3_tags_parse("@v=a\tb", &bad) != 0); }
+    assert(ircv3_tags_parse("a=1;b=2", &t) == 0);
     {
         char blk[64];
         assert(ircv3_tags_serialize(&t, blk, sizeof blk) ==
