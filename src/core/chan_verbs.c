@@ -1533,17 +1533,31 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
         send_end_of_names(s, c, NAMES_NO_CHANNEL);
         return;
     }
-    for (size_t i = 0; i < server_chan_count(s); i++) {
-        chan_t *ch = server_chan_at(s, i);
+    {
+        size_t sent = 0u;
+        size_t truncated = 0u;
 
-        if (ch == NULL) {
-            continue;
+        for (size_t i = 0; i < server_chan_count(s); i++) {
+            chan_t *ch = server_chan_at(s, i);
+
+            if (ch == NULL) {
+                continue;
+            }
+            if (sent >= (size_t)CHAN_ENUM_MAX) {
+                truncated++;
+                continue;
+            }
+            (void)authority_ok(s, c, ch, "NAMES", 0);
+            printf("[observable] chan_names: channel=%s local=%zu servers=%zu\n",
+                   ch->name, ch->nmembers, ch->nservers);
+            send_names_list(s, c, ch);
+            send_end_of_names(s, c, ch->name);
+            sent++;
         }
-        (void)authority_ok(s, c, ch, "NAMES", 0);
-        printf("[observable] chan_names: channel=%s local=%zu servers=%zu\n",
-               ch->name, ch->nmembers, ch->nservers);
-        send_names_list(s, c, ch);
-        send_end_of_names(s, c, ch->name);
+        if (truncated != 0u) {
+            printf("[observable] names_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
+                   c->nick, sent, truncated, CHAN_ENUM_MAX);
+        }
     }
 }
 
@@ -1594,17 +1608,31 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
     }
 
     (void)reply(s, c, "321", (const char *const[]){ "Channel" }, 1, "Users  Name");
-    for (size_t i = 0; i < server_chan_count(s); i++) {
-        chan_t *ch = server_chan_at(s, i);
+    {
+        size_t sent = 0u;
+        size_t truncated = 0u;
 
-        if (ch == NULL) {
-            continue;
+        for (size_t i = 0; i < server_chan_count(s); i++) {
+            chan_t *ch = server_chan_at(s, i);
+
+            if (ch == NULL) {
+                continue;
+            }
+            if (sent >= (size_t)CHAN_ENUM_MAX) {
+                truncated++;
+                continue;
+            }
+            (void)snprintf(count, sizeof count, "%zu", ch->nmembers);
+            (void)reply(s, c, "322", (const char *const[]){ ch->name, count }, 2, "%s",
+                        ch->topic);
+            printf("[observable] chan_list: channel=%s local=%zu servers=%zu\n",
+                   ch->name, ch->nmembers, ch->nservers);
+            sent++;
         }
-        (void)snprintf(count, sizeof count, "%zu", ch->nmembers);
-        (void)reply(s, c, "322", (const char *const[]){ ch->name, count }, 2, "%s",
-                    ch->topic);
-        printf("[observable] chan_list: channel=%s local=%zu servers=%zu\n",
-               ch->name, ch->nmembers, ch->nservers);
+        if (truncated != 0u) {
+            printf("[observable] list_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
+                   c->nick, sent, truncated, CHAN_ENUM_MAX);
+        }
     }
     (void)reply(s, c, "323", NULL, 0, "End of LIST");
 }
