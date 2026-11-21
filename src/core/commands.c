@@ -563,18 +563,25 @@ static void handle_nick(server_t *s, conn_t *c, const message_t *m)
     }
 
     /* Re-asserting the nickname you already hold is silent: RFC 2812 3.2 says a
-     * NICK to the name you already have changes nothing and generates no error.
-     *
-     * Asked as a REGISTRY question rather than as `strcmp(want, c->nick) == 0`,
-     * and the difference is the whole of issue #100. The registry folds case, so
-     * `NICK BOB` from the client registered as `bob` is the same name -- and a
-     * string comparison here would miss that, fall through to the claim, find
-     * the name already held by this very connection, and answer 433 to a client
-     * for the nickname it already holds. Asking the registry also keeps this
-     * correct for the same reason the fix lives there: the definition of "the
-     * same nickname" is a property of the table, so there is no second copy of
-     * the rule here to fall out of step with it. */
+    * NICK to the name you already have changes nothing and generates no error.
+    *
+    * Asked as a REGISTRY question rather than as `strcmp(want, c->nick) == 0`,
+    * and the difference is the whole of issue #100. The registry folds case, so
+    * `NICK BOB` from the client registered as `bob` is the same name -- and a
+    * string comparison here would miss that, fall through to the claim, find
+    * the name already held by this very connection, and answer 433 to a client
+    * for the nickname it already holds. Asking the registry also keeps this
+    * correct for the same reason the fix lives there: the definition of "the
+    * same nickname" is a property of the table, so there is no second copy of
+    * the rule here to fall out of step with it.
+    *
+    * A case-only change adopts the new spelling (issue #215): the registry key
+    * already folds, so no release/re-claim is needed -- and a re-claim would
+    * fail, because server_nick_claim() refuses any name the table already
+    * holds, including one held by this very connection. Only the display
+    * bytes in conn_t::nick move. */
     if (server_nick_lookup(s, want) == c) {
+        memcpy(c->nick, want, strlen(want) + 1u);
         return;
     }
     if (server_nick_claim(s, want, c) != 0) {
