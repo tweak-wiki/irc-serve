@@ -1462,6 +1462,68 @@ static void case_secret_and_file_refused(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Case 11: a symlinked --secret-file is refused (issue #306)
+ * ---------------------------------------------------------------------------
+ * load_secret_file() opens through the shared secret_file_open(), so a
+ * symlink at the final component fails the open the way a symlinked
+ * credential store does -- the node exits 1 instead of starting with the
+ * target's secret. fork()+execv()+waitpid() directly, for the reason case 10
+ * gives: a refused node never prints the readiness line. */
+static void case_secret_file_symlink_refused(void)
+{
+    char target[] = "/tmp/irc_serve_fed_secret_symt.XXXXXX";
+    char link[] = "/tmp/irc_serve_fed_secret_link.XXXXXX";
+    char *argv[5];
+    pid_t pid;
+    int status = 0;
+    int fd = mkstemp(target);
+
+    TF_CHECK_MSG(fd >= 0, "could not create the secret target file");
+    if (fd < 0) {
+        return;
+    }
+    TF_CHECK_MSG(write(fd, SECRET_OK, strlen(SECRET_OK)) == (ssize_t)strlen(SECRET_OK),
+                 "could not write the secret to the target file");
+    TF_CHECK_MSG(close(fd) == 0, "could not close the secret target file");
+    TF_CHECK_MSG(chmod(target, S_IRUSR | S_IWUSR) == 0,
+                 "could not restrict the secret target file to 0600");
+    fd = mkstemp(link);
+    TF_CHECK_MSG(fd >= 0, "could not reserve the symlink path");
+    if (fd < 0) {
+        (void)unlink(target);
+        return;
+    }
+    (void)close(fd);
+    (void)unlink(link);
+    TF_CHECK_MSG(symlink(target, link) == 0, "could not create the symlink");
+    argv[0] = (char *)"irc-serve";
+    argv[1] = (char *)"--secret-file";
+    argv[2] = link;
+    argv[3] = (char *)"0";
+    argv[4] = NULL;
+    pid = fork();
+    TF_CHECK_MSG(pid >= 0, "could not fork to run the refused command line");
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+
+        if (devnull >= 0) {
+            (void)dup2(devnull, STDOUT_FILENO);
+            (void)dup2(devnull, STDERR_FILENO);
+            (void)close(devnull);
+        }
+        execv(NF_SERVER_BIN, argv);
+        _exit(127);
+    }
+    TF_CHECK_MSG(waitpid(pid, &status, 0) == pid,
+                 "could not reap the refused node");
+    TF_CHECK_MSG(WIFEXITED(status) && WEXITSTATUS(status) == 1,
+                 "a node given a symlinked --secret-file must exit 1 rather "
+                 "than start with the target's secret");
+    (void)unlink(link);
+    (void)unlink(target);
+}
+
+/* ---------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------------
  * The cases run in the order they are listed in the header, and the ordering is
@@ -1483,6 +1545,7 @@ int main(void)
     case_happy_path_binary();
     case_secret_file_binary();
     case_secret_and_file_refused();
+    case_secret_file_symlink_refused();
     tf_done("fed_handshake");
     return 0;
 }
