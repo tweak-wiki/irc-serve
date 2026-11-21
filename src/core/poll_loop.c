@@ -190,7 +190,7 @@ static void conn_readable(server_t *s, conn_t *c)
                         conn_mark_closing(c);
                     }
                 } else {
-                    server_writers_kick(s);
+                    server_writers_kick_conn(s, c);
                 }
                 conn_mark_closing(c);
                 return;
@@ -388,7 +388,7 @@ static void conn_on_writable(server_t *s, int fd)
          * conn_queue() directly, and POLLOUT arriving IS the demand signal
          * the loop would otherwise serve. Without this a queued conn whose
          * producers bypass server_queue() sleeps while writers wait. */
-        server_writers_kick(s);
+        server_writers_kick_conn(s, c);
         return;
     }
     before = conn_write_pending_locked(c);

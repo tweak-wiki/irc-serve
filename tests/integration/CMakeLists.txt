@@ -198,6 +198,8 @@ irc_add_integration_test(test_writer_drain test_writer_drain.c)
 # MT 2.4 (#243): writer wakeup latency -- queued burst on an idle conn must
 # drain within one tick at N > 0, or the kick -> wakeup path lost a kick.
 irc_add_integration_test(test_writer_wakeup test_writer_wakeup.c)
+# Issue #367: targeted wakeup -- one queued conn wakes exactly its owner.
+irc_add_integration_test(test_writer_targeted test_writer_targeted.c)
 # MT 4.1 (#246): per-conn FIFO under N=4 with cross-conn burst contention --
 # A-then-B pipelined on one conn, 100 in-test iterations.
 irc_add_integration_test(test_writer_order test_writer_order.c)
