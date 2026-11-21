@@ -2,15 +2,15 @@
 
 # Project status
 
-Generated `2026-11-21T16:30:53Z` from commit `e271445` by
+Generated `2026-11-21T17:01:27Z` from commit `03057e4` by
 [stats.yml](../../blob/main/.github/workflows/stats.yml).
 
 ## Test suite
 
 | | count |
 |---|---|
-| Total | 123 |
-| Passing | 123 |
+| Total | 124 |
+| Passing | 124 |
 | **Skipped** | **0** |
 | Failed | 0 |
 
@@ -27,8 +27,8 @@ Generated `2026-11-21T16:30:53Z` from commit `e271445` by
 
 | | lines |
 |---|---|
-| `src/` | 49565 |
-| `tests/` | 75808 |
+| `src/` | 49590 |
+| `tests/` | 75858 |
 
 ## Build phases
 
