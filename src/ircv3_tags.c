@@ -159,12 +159,13 @@ static int key_byte_forbidden(char c)
 }
 
 /* Bytes that may not appear RAW in a value. SP and ';' have escaped forms
- * (`\s`, `\:`), CR and LF have escaped forms (`\r`, `\n`), and a raw one of
- * either four is a sender that has broken the block grammar rather than one
- * using it. */
+ * (`\s`, `\:`), CR and LF have escaped forms (`\r`, `\n`), and a raw TAB
+ * would end the block at the message layer (SP/HTAB split) rather than
+ * survive it -- so a raw one of any of the five is a sender that has broken
+ * the block grammar rather than one using it. */
 static int value_byte_forbidden(char c)
 {
-    return c == ' ' || c == ';' || c == '\r' || c == '\n';
+    return c == ' ' || c == '\t' || c == ';' || c == '\r' || c == '\n';
 }
 
 int ircv3_tags_parse(const char *block, ircv3_tags_t *out)
