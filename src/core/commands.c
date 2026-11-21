@@ -53,7 +53,7 @@
  * PASS does not appear in the table because it is neither fact. It is
  * recorded, not remembered: see handle_pass().
  *
- * AND `have_user()` ASKS A FLAG RATHER THAN THE FIELD, which is a change to the
+ * AND the user check ASKS A FLAG RATHER THAN THE FIELD, which is a change to the
  * two-facts shape and the reason is above: an ident can now be REFUSED at
  * ingest (nickreg_ident_ok(), the hostmask-component rule), and a client whose
  * ident was refused registers with an EMPTY one. Reading `c->user[0]` for "a
@@ -62,16 +62,6 @@
  * mid-registration. `c->user_seen` is set on the same path that stores the
  * ident, in handle_user(), so the flag and the field are written together and
  * cannot disagree. */
-static int have_user(const conn_t *c)
-{
-    return c->user_seen != 0;
-}
-
-static int have_nick(const conn_t *c)
-{
-    return c->nick[0] != '\0';
-}
-
 int commands_registered(const conn_t *c)
 {
     return c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) == CONN_REG_READY;
@@ -366,11 +356,11 @@ void commands_state_update(server_t *s, conn_t *c)
 {
     int state;
 
-    if (have_nick(c) && have_user(c)) {
+    if (c->nick[0] != '\0' && c->user_seen != 0) {
         state = CONN_REG_READY;
-    } else if (have_nick(c)) {
+    } else if (c->nick[0] != '\0') {
         state = CONN_REG_NICK;
-    } else if (have_user(c)) {
+    } else if (c->user_seen != 0) {
         state = CONN_REG_USER;
     } else {
         state = CONN_REG_PASS;
@@ -441,11 +431,6 @@ void commands_state_update(server_t *s, conn_t *c)
          * costs one pointer comparison when there is no table. */
         (void)resume_apply(s, c, server_now_ms());
     }
-}
-
-static void update_state(server_t *s, conn_t *c)
-{
-    commands_state_update(s, c);
 }
 
 /* ---------------------------------------------------------------------------
@@ -630,7 +615,7 @@ static void handle_nick(server_t *s, conn_t *c, const message_t *m)
      * otherwise, and making it true is a separate piece of work from 2.1's
      * duplicate policy -- which is a statement about DUPLICATES and does not
      * need a general rename broadcast to be correct. */
-    if (have_nick(c)) {
+    if (c->nick[0] != '\0') {
         char previous[sizeof c->nick];
 
         memcpy(previous, c->nick, sizeof previous);
@@ -648,7 +633,7 @@ static void handle_nick(server_t *s, conn_t *c, const message_t *m)
      * `want` -- the divergence 2.1's policy exists to end. */
     memcpy(c->nick, want, strlen(want) + 1u);
     (void)fed_nickreg_resolve_local(s, want, server_now_ms());
-    update_state(s, c);
+    commands_state_update(s, c);
 }
 
 /* USER: USER <user> <mode> <unused> :<realname> (RFC 1459 2.4 / RFC 2812 3.1).
@@ -865,7 +850,7 @@ static void handle_user(server_t *s, conn_t *c, const message_t *m)
      *
      * `user_seen` IS SET ON EVERY PATH BELOW, including the refusal, because the
      * state projection asks "did a USER arrive" and not "is the ident non-empty":
-     * see have_user() at the top of this file for why the two came apart and what
+     * see the top of this file for why the two came apart and what
      * a client whose ident was refused would otherwise have lost. */
     c->user_seen = 1;
     if (m->params[0][0] != '\0' &&
@@ -1050,7 +1035,7 @@ static void handle_user(server_t *s, conn_t *c, const message_t *m)
                "detail=SUMMARISED_ONLY\n",
                c->fd, asserted_bad);
     }
-    update_state(s, c);
+    commands_state_update(s, c);
 }
 
 /* ---------------------------------------------------------------------------
