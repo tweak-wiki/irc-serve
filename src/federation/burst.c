@@ -1778,6 +1778,57 @@ static int member_known(const server_t *s, const chan_t *ch, const char *nick)
     return 0;
 }
 
+/* TWO-PASS COMMIT (#209): whether this channel's record fits before the purge
+ * runs. The purge below removes the origin's entries and the re-add can then
+ * refuse (the CHAN_MAX_REMOTE_MEMBERS cap), which used to leave the channel
+ * with a silently shrunk roster. Staged records passed the charset/account
+ * checks at ingest, so capacity is what is predicted: entries from other
+ * servers survive the purge, and a staged nick re-adds only when nothing but
+ * the origin's soon-purged entry knows it. A channel that does not fit keeps
+ * its existing roster; the caller discards the whole record. */
+static int burst_chan_fits(const server_t *s, const chan_t *ch,
+                           const burst_chan_t *sc, const char *origin)
+{
+    size_t keep = 0u;
+    size_t need = 0u;
+    size_t i;
+    size_t k;
+
+    for (i = 0u; i < ch->nremotes; i++) {
+        if (!chan_same_name(ch->remotes[i].server, origin)) {
+            keep++;
+        }
+    }
+    for (k = 0u; k < sc->nmembers; k++) {
+        int known = member_known(s, ch, sc->members[k].nick);
+
+        if (known != 0) {
+            size_t j;
+            int elsewhere = 0;
+
+            /* Known only through the origin's entry, which the purge removes,
+             * still needs a slot. */
+            for (j = 0u; j < ch->nremotes && elsewhere == 0; j++) {
+                if (!chan_same_name(ch->remotes[j].server, origin) &&
+                    chan_same_name(ch->remotes[j].nick, sc->members[k].nick)) {
+                    elsewhere = 1;
+                }
+            }
+            if (elsewhere == 0) {
+                conn_t *local = (s != NULL)
+                    ? server_nick_lookup(s, sc->members[k].nick) : NULL;
+
+                if (local == NULL || chan_find_member(ch, local) == NULL) {
+                    need++;
+                }
+            }
+            continue;
+        }
+        need++;
+    }
+    return keep + need <= (size_t)CHAN_MAX_REMOTE_MEMBERS;
+}
+
 /* Replace the mode set wholesale. Clearing through a COPY of the old value,
  * because chan_mode_set() compacts modes[] as it removes a letter and reading
  * ch->modes[i] out of the same string it is editing would skip letters. */
@@ -2029,6 +2080,24 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 
         if (ch == NULL) {
             dropped++;
+            continue;
+        }
+        /* THE PRE-FLIGHT (#209). The purge below is destructive and the re-add
+         * can refuse it, so a record that does not fit is discarded WHOLE --
+         * the existing roster stays, and the loss is counted as dropped
+         * members rather than left to show up as a shrunken 353. A channel the
+         * record itself created holds nothing yet and is offered for disposal,
+         * but only when it holds no remote entries either: dispose-if-empty
+         * does not look at those, and freeing other servers' entries to avoid
+         * a husk would be the same bug in the other direction. */
+        if (burst_chan_fits(s, ch, sc, origin) == 0) {
+            dropped += sc->nmembers;
+            printf("[observable] fed_burst_chan_discarded: channel=%s peer=%s "
+                   "members=%zu reason=ROSTER_OVERFLOW\n",
+                   ch->name, origin, sc->nmembers);
+            if (ch->nremotes == 0u) {
+                (void)chan_dispose_if_empty(s, ch);
+            }
             continue;
         }
         /* THE REPLACEMENT. Everything the origin contributed to this channel
