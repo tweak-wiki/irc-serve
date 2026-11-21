@@ -45,6 +45,8 @@ int main(void) {
     assert(tags_parse("@;b", buf, sizeof buf) == -1);      /* empty key */
     assert(tags_parse("@a b", buf, sizeof buf) == -1);     /* space in key/value */
     assert(tags_parse("@a x=y", buf, sizeof buf) == -1);   /* space separates pairs => stray token */
+    /* lone trailing backslash is malformed, not silent truncation (#278) */
+    assert(tags_parse("@a=foo\\", buf, sizeof buf) == -1);
 
     /* NULL arguments rejected */
     assert(tags_parse(NULL, buf, sizeof buf) == -1);
