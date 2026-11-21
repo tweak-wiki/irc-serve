@@ -539,11 +539,14 @@ int fanout_line_fits_n(const char *prefix, const char *verb, size_t target_len,
      *           = 1 + prefix_len + 1 + verb_len + 1 + target_len + 1 + params
      *
      * so the test is the same subtraction, with 3.2's IRC_MAX_RELAY_LINE as the
-     * cap. prefix and target are charged at their MAXIMUM and written from the
-     * struct widths their values come from, so raising conn_t::nick or
-     * chan_t::name cannot leave the arithmetic short of a line that no longer
-     * fits. VERB is measured: it is a fixed short list in this node, and
-     * guessing at it would be a second opinion about code that already exists.
+     * cap. prefix and target are charged at their REAL lengths: the line that
+     * renders is built from these same strings, so measuring them cannot leave
+     * the arithmetic short of a line that no longer fits. The struct widths
+     * (CONN_HOSTMASK_MAX, CHAN_MAX_NAME + 1) survive only as the fallback for
+     * a NULL prefix, where there is no string to measure and the relay
+     * envelope still needs a worst-case bound. VERB is measured: it is a
+     * fixed short list in this node, and guessing at it would be a second
+     * opinion about code that already exists.
      *
      * `params_bytes` is the SUM of every parameter's length, separators
      * included by the fixed 1s above, and summing rather than charging only the
@@ -552,14 +555,17 @@ int fanout_line_fits_n(const char *prefix, const char *verb, size_t target_len,
      * 4.3 freezes for it -- come out the same size here as it would render. The
      * sum is a LOWER bound on the rendered size, never an over-estimate of it,
      * so the cap is approached from the conservative side. */
-    const size_t charge = 1u /* ':' */ + 1u /* ' ' */ + 1u /* ' ' */ + 1u /* ' ' */
-                          + CONN_HOSTMASK_MAX + (CHAN_MAX_NAME + 1u);
+    size_t prefix_len;
+    size_t charge;
 
-    (void)target_len;
     if (verb == NULL) {
         return 0;
     }
-    (void)prefix;
+    /* No string to measure, so assume the widest envelope the relay path can
+     * carry rather than the narrowest. */
+    prefix_len = (prefix != NULL) ? strlen(prefix) : (size_t)CONN_HOSTMASK_MAX;
+    charge = 1u /* ':' */ + 1u /* ' ' */ + 1u /* ' ' */ + 1u /* ' ' */
+             + prefix_len + target_len;
     return (params_bytes + charge + strlen(verb)) <= (size_t)IRC_MAX_RELAY_LINE;
 }
 
