@@ -1560,26 +1560,30 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
     /* THE SLOT IS ZEROED BEFORE IT IS WRITTEN, and this is the third of the three
      * record functions in this file that does it -- apply_nick() memsets, and
      * apply_chan() zeroes the region it grows into. It is here because
-     * realloc() does not, and because the three burst_copy() calls below are all
-     * `(void)`: <nick> and <server> are bounded by their own validators, so those
-     * two always land, but the pattern of "a copy whose failure is discarded
-     * writes into a field nothing has initialised" is exactly the one that turns a
-     * refusal into an uninitialised READ rather than into an absent value.
-     *
-     * The two siblings say the same thing in their own words at their own lines:
-     * a RECYCLED element carrying the previous member's field is impersonation
-     * wearing a memory bug's clothes. `account` is the field that can be left
-     * unwritten, and channel.c's chan_remote_add() is where a garbage value read
-     * out of here becomes a roster entry. */
+     * realloc() does not, and a recycled element carrying the previous member's
+     * field is impersonation wearing a memory bug's clothes. The checked copies
+     * below are what keep a refusal explicit: without the check a refused copy
+     * would silently keep the zeroed field, and the two nodes would disagree
+     * with no malformed count to show for it. */
     slot = &sc->members[sc->nmembers++];
     memset(slot, 0, sizeof *slot);
-    (void)burst_copy(slot->nick, sizeof slot->nick, m->params[2]);
-    (void)burst_copy(slot->server, sizeof slot->server, m->params[1]);
-    /* `*` BECOMES "" on the way in, for the reason channel.h's chan_remote_add()
-     * gives: `*` is a rendering of the absence, and storing it would make an
-     * account named "*" representable in a roster. */
-    (void)burst_copy(slot->account, sizeof slot->account,
-                     (m->params[4][0] == '*') ? "" : m->params[4]);
+    /* THE COPIES ARE CHECKED, and a refusal discards the transaction rather
+     * than installing a member with a missing field: the validators above
+     * bound every value to its field, so a refusal here is unreachable, but
+     * an unchecked one would silently keep "" and leave the two nodes
+     * disagreeing about the roster with no malformed count to show for it. */
+    if (!burst_copy(slot->nick, sizeof slot->nick, m->params[2]) ||
+        !burst_copy(slot->server, sizeof slot->server, m->params[1]) ||
+        /* `*` BECOMES "" on the way in, for the reason channel.h's
+         * chan_remote_add() gives: `*` is a rendering of the absence, and
+         * storing it would make an account named "*" representable. */
+        !burst_copy(slot->account, sizeof slot->account,
+                    (m->params[4][0] == '*') ? "" : m->params[4])) {
+        s->n_fed_malformed++;
+        shadow_discard(s, "BAD_MEMBER_RECORD", sh->origin, sh->nnicks,
+                       sh->nchans, sh->nmembers);
+        return -1;
+    }
     slot->flags = flags;
     sh->nmembers++;
     return 0;
