@@ -82,6 +82,7 @@ int main(void)
     eof = 0;
     TF_CHECK_MSG(tc_drain(&c, T_QUIET_MS, &eof) == 0 && eof == 0,
                  "a second line arrived after the NOTICE: %s", tc_buffer(&c));
+    tc_close(&c);
     TF_CHECK_MSG(nf_stop(&node) == 0, "node did not exit cleanly");
     nf_free(&node);
     tf_done("writer_kick_connqueue");
