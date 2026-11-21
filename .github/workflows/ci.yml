@@ -189,7 +189,7 @@ jobs:
       - name: runner pin gate
         run: |
           set -euo pipefail
-          if grep -rn 'runs-on: ubuntu' .github/workflows/; then
+          if grep -rnE '^\s*runs-on: ubuntu' .github/workflows/; then
             echo '::error::hosted Ubuntu runner reintroduced; use [self-hosted, tweak-ci] (macos-latest exempt)'
             exit 1
           fi
@@ -531,12 +531,17 @@ jobs:
       # development package at all -- which is the dependency decision Phase 12 was
       # built around, and a step that installed OpenSSL unconditionally would stop
       # that from being checked by this job.
-      - name: Install OpenSSL headers (WITH_TLS=ON only)
+      - name: Install OpenSSL headers (WITH_TLS=ON, apt systems only)
         if: matrix.with_tls == 'ON'
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libssl-dev
+          # The self-hosted fleet (Arch) already carries OpenSSL headers; only
+          # apt-based images need the install, and only passwordless sudo can
+          # provide it non-interactively.
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y --no-install-recommends libssl-dev
+          fi
           openssl version
       - name: Toolchain
         run: |
