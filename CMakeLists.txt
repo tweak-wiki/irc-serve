@@ -99,7 +99,7 @@ if(APPLE)
 endif()
 
 option(BUILD_TESTING "Build tests" ON)
-option(BUILD_BENCHMARK "Build benchmarks" ON)
+option(BUILD_BENCHMARK "Build benchmarks" OFF)
 
 # ---------------------------------------------------------------------------
 # IRC_LSAN_PROBE: build the tests that prove the sanitizers are working at all
