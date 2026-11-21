@@ -1015,6 +1015,59 @@ static void test_part(nf_node_t *node)
         expect_line(&b.c, "323 closing the LIST",
                     ":irc.test 323 pab :End of LIST\r\n");
     }
+    /* An 8100-byte PART reason is refused with a single 417 and nothing is
+     * delivered: without the bound the reason reaches message_format(), which
+     * refuses rather than reshapes, and the only outcome there is a refusal
+     * counted on n_reply_refused -- the counter main() holds at zero below.
+     * The roster is untouched, so a normal PART afterwards still works. */
+    client_send(&a, "JOIN #pz");
+    (void)send_and_drain(&a, "p-z-join-a");
+    client_send(&b, "JOIN #pz");
+    (void)send_and_drain(&b, "p-z-join-b");
+    {
+        char big[8101];
+        char *cmd;
+        size_t ma;
+        size_t mb;
+        unsigned found;
+        const char *p;
+
+        memset(big, 'x', sizeof big - 1u);
+        big[sizeof big - 1u] = '\0';
+        cmd = (char *)malloc(sizeof big + 16u);
+        TF_CHECK_MSG(cmd != NULL, "out of memory for the over-long PART");
+        (void)snprintf(cmd, sizeof big + 16u, "PART #pz :%s", big);
+        ma = tc_received(&a.c);
+        mb = tc_received(&b.c);
+        client_send(&a, cmd);
+        free(cmd);
+        (void)send_and_drain(&a, "p-z-long");
+        (void)send_and_drain(&b, "p-z-long-b");
+        expect_line(&a.c, "417 for the over-long PART reason",
+                    ":irc.test 417 paa :Part message is too long\r\n");
+        /* Exactly one 417 in the window: the PONG drain bounds it above, so a
+         * node that answered per-channel would fail the count. */
+        found = 0;
+        for (p = strstr(tc_buffer(&a.c) + ma, " 417 "); p != NULL;
+             p = strstr(p + 1, " 417 ")) {
+            found++;
+        }
+        TF_CHECK_MSG(found == 1u,
+                     "the over-long PART drew %u 417s and must draw exactly one",
+                     found);
+        expect_absent_from(tc_buffer(&a.c), ma, "the refused PART echo",
+                           "PART #");
+        expect_absent_from(tc_buffer(&b.c), mb, "the refused PART relay",
+                           "PART #");
+        /* Still members: an ordinary PART afterwards reaches both. */
+        client_send(&a, "PART #pz :bye");
+        (void)send_and_drain(&a, "p-z-real");
+        (void)send_and_drain(&b, "p-z-real-b");
+        expect_line(&a.c, "the parting client sees its own PART after a refusal",
+                    ":paa!paa@127.0.0.1 PART #PZ bye\r\n");
+        expect_line(&b.c, "the remaining member sees the PART after a refusal",
+                    ":paa!paa@127.0.0.1 PART #PZ bye\r\n");
+    }
 
     tc_close(&a.c);
     tc_close(&b.c);
