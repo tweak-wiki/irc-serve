@@ -88,7 +88,6 @@
 #include <netdb.h>
 #include <pwd.h>
 #include <signal.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -541,42 +540,39 @@ static int key_file_is_private(const char *path)
 
 /* Read the federation secret from a file (--secret-file), because a command
  * line is visible to every local user in `ps` and a secret is not a thing to
- * show them (issue #165). OPEN-THEN-fstat in the same order and for the same
- * reason as key_file_is_private() above, with the same mode rule: a secret a
- * group account can read has been shared. At most cap-1 bytes; one trailing
- * newline is stripped because operators write the file with echo. Returns 0
- * with buf NUL-terminated, -1 with the refusal already reported. */
+ * show them (issue #165). Opens through the shared secret_file_open(), so a
+ * FIFO at the path is refused instead of wedging startup and the mode rule
+ * matches key_file_is_private(): a secret a group account can read has been
+ * shared. At most cap-1 bytes; one trailing newline is stripped because
+ * operators write the file with echo. Returns 0 with buf NUL-terminated, -1
+ * with the refusal already reported. */
 static int load_secret_file(const char *path, char *buf, size_t cap)
 {
-    struct stat sb;
+    secret_open_status_t open_status = SECRET_OPEN_FAIL_OPEN;
+    unsigned open_mode = 0u;
     FILE *f;
     size_t len;
 
     if (path == NULL || path[0] == '\0' || buf == NULL || cap < 2u) {
         return -1;
     }
-    f = fopen(path, "re");
+    /* Same shared open as key_file_is_private(): O_NONBLOCK keeps a FIFO at
+     * this path from wedging startup; the S_ISREG check inside refuses it. */
+    f = secret_file_open(path, &open_status, &open_mode);
     if (f == NULL) {
-        printf("[observable] secret_file: state=REFUSED path=%s reason=open\n",
-               path);
-        return -1;
-    }
-    if (fstat(fileno(f), &sb) != 0) {
-        printf("[observable] secret_file: state=REFUSED path=%s reason=fstat\n",
-               path);
-        (void)fclose(f);
-        return -1;
-    }
-    if (!S_ISREG(sb.st_mode)) {
-        printf("[observable] secret_file: state=REFUSED path=%s "
-               "reason=not_regular\n", path);
-        (void)fclose(f);
-        return -1;
-    }
-    if ((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
-        printf("[observable] secret_file: state=REFUSED path=%s reason=mode_%03o\n",
-               path, (unsigned)(sb.st_mode & 0777));
-        (void)fclose(f);
+        if (open_status == SECRET_OPEN_FAIL_FSTAT) {
+            printf("[observable] secret_file: state=REFUSED path=%s reason=fstat\n",
+                   path);
+        } else if (open_status == SECRET_OPEN_NOT_REGULAR) {
+            printf("[observable] secret_file: state=REFUSED path=%s "
+                   "reason=not_regular\n", path);
+        } else if (open_status == SECRET_OPEN_BAD_MODE) {
+            printf("[observable] secret_file: state=REFUSED path=%s reason=mode_%03o\n",
+                   path, open_mode);
+        } else {
+            printf("[observable] secret_file: state=REFUSED path=%s reason=open\n",
+                   path);
+        }
         return -1;
     }
     len = fread(buf, 1, cap - 1u, f);
