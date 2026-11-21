@@ -1171,10 +1171,90 @@ static void case_clean_leave_is_not_a_failure(void)
     nf_free(&d);
 }
 
+/* ---------------------------------------------------------------------------
+ * CASE 3 -- ISSUE #329: A MALFORMED DEPARTURE TEARS THE LINK DOWN
+ * ---------------------------------------------------------------------------
+ * A SHUTDOWN or SQUIT with the wrong arity is counted AND the link goes down
+ * with it. The line is unusable -- there is no departure to act on -- but the
+ * link carried it, so leaving it ESTABLISHED would keep a departed peer in the
+ * roster until T4. The two verbs share one helper because the assertion is one
+ * assertion: the refusal is printed, then the socket ends. What is NOT
+ * asserted is a purge or a relay: a line this node cannot parse names nothing
+ * to purge and nothing to forward.
+ *
+ * The test keeps its end open after sending, for the reason case 2 gives at
+ * length: a line sent in the same breath as a close is buffered with the EOF
+ * and never dispatched, so the node must be the one to hang up. */
+static void run_malformed_departure(const char *verb, const char *tail,
+                                    const char *refusal)
+{
+    nf_node_t a;
+    peer_t p;
+    int listen_fd;
+    int b_port = 0;
+    int rc = 0;
+
+    listen_fd = listen_loopback(&b_port);
+    TF_CHECK_MSG(listen_fd >= 0, "the test could not open a listening socket");
+
+    memset(&g_cfg, 0, sizeof g_cfg);
+    g_cfg.peers[0].name = NAME_B;
+    g_cfg.peers[0].port = b_port;
+    g_cfg.dial_ms = 1000;
+    g_cfg.hs_ms = 5000;
+    g_cfg.keepalive_ms = 5000;
+    g_cfg.dead_ms = DEAD_MS;
+    g_cfg.retry_base_ms = RETRY_BASE_MS;
+    g_cfg.retry_max_ms = RETRY_MAX_MS;
+    g_cfg.retry_budget = 3;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node " NAME_A);
+
+    p.fd = accept_deadline(listen_fd, T_IO_MS);
+    close(listen_fd);
+    TF_CHECK_MSG(p.fd >= 0, "irc.a never dialled the socket this test owns");
+    p.used = 0u;
+    p.seen[0] = '\0';
+    peer_expect_claim(&p);
+    peer_answer_claim(&p);
+
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "irc.a never established its link to " NAME_B ", so nothing below "
+                 "could mean anything: %s",
+                 a.out);
+
+    /* --- the malformed goodbye ------------------------------------------- */
+    peer_send(&p, verb, tail);
+
+    TF_CHECK_MSG(nf_expect(&a, refusal, T_IO_MS) == 0,
+                 "a malformed %s was not refused as %s: %s", verb, refusal, a.out);
+
+    while ((rc = peer_fill(&p, T_IO_MS)) == 0) {
+        /* drain irc.a's own traffic; the node's close is what ends this */
+    }
+    TF_CHECK_MSG(rc < 0,
+                 "the node kept the peer socket open after a malformed %s, so a "
+                 "departed peer haunts the roster until T4: %s",
+                 verb, a.out);
+    close(p.fd);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node " NAME_A " did not exit cleanly");
+    nf_free(&a);
+}
+
+static void case_malformed_departure_tears_down_link(void)
+{
+    /* Two params is not a SHUTDOWN; three params is not a SQUIT. Either way
+     * the peer is speaking a departure shape this node cannot act on. */
+    run_malformed_departure("SHUTDOWN", "a b", "fed_shutdown_refused");
+    run_malformed_departure("SQUIT", NAME_B " x y", "fed_malformed: command=SQUIT");
+}
+
 int main(void)
 {
     case_a_hint_is_recorded_and_never_dialled();
     case_clean_leave_is_not_a_failure();
+    case_malformed_departure_tears_down_link();
     tf_done("peer_discovery");
     return 0;
 }
