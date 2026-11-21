@@ -9,12 +9,12 @@ second site would look like from the outside: present, reviewed, and not on this
 It goes through a wrong-name rather than removing the call so that the function stays
 used and the build stays clean; a fault that does not compile proves nothing.
 """
+from util import apply_fault
+
 p = "src/federation/verbs.c"
-s = open(p).read()
 old = """    filter_rc = fed_relay_clean(verb, params, nparams, arena, sizeof arena,
                                 cleaned, &src_len, &kept_len);"""
 new = """    /* FAULT: the verb no row matches, so nothing is filtered. */
     filter_rc = fed_relay_clean("SSPRIVMSG", params, nparams, arena, sizeof arena,
                                 cleaned, &src_len, &kept_len);"""
-assert old in s, "the relay filter call not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the relay filter call")
