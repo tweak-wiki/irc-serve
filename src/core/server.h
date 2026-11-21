@@ -501,6 +501,21 @@ typedef struct server_link {
  * next connection is fine, and the drain must continue. */
 #define SERVER_ACCEPT_REJECTED (-2)
 
+/* MT #366: demand-steal bound. A writer whose owned scan found no work steals
+ * whole conns off the most-backlogged other owner once that owner's aggregate
+ * unsent bytes exceed this. Twice the per-conn cap (CONN_WQ_MAX): a single
+ * conn can never hold more than its cap, so one full conn alone never trips
+ * the steal and owned queues stay sticky until there is real imbalance. */
+#define WRITER_STEAL_BYTES ((size_t)2u * CONN_WQ_MAX)
+
+/* MT #366: one per pool thread; writer_main's argument, carrying the server
+ * and the thread's owner index (fd % N == wid is sticky-owned). Allocated
+ * with writers[] in server_writers_start(), freed in server_writers_stop(). */
+typedef struct writer_slot {
+    server_t *s;
+    int wid;
+} writer_slot_t;
+
 struct server {
     char      name[IRC_MAX_SERVER_NAME + 1];
     int       listen_fd;
@@ -1292,6 +1307,13 @@ struct server {
     atomic_ullong *wq_wakes;      /* N consumed-wakeup counters, one per writer */
     int       wq_stop;            /* 1: writers exit after draining what they hold */
     int       writers_started;    /* 1: wq_mu/slots/writers are live */
+    /* MT #366: per-writer slot args + drained-byte totals, parallel to
+     * writers[] (N entries, or NULL). The pass writes its own total under
+     * reg_mu, which every pass already holds -- so no lock order change
+     * (reg_mu -> wq_lock still holds). */
+    writer_slot_t *slots;          /* N slot args, or NULL */
+    atomic_ullong *writer_bytes; /* per-writer drained-byte totals */
+
     /* MT 2.2 (#241): registry mutex. The loop thread is the only mutator
      * (server_add_conn / the detach half of server_close_conn), but writers
      * resolve conns through the same by_fd/active structures -- without this
@@ -1708,11 +1730,16 @@ void server_set_writer_threads(server_t *s, int n);
 int server_writers_start(server_t *s);
 void server_writers_kick(server_t *s);
 /* Issue #367: targeted wakeup. Queueing bytes on one conn signals exactly
- * its owning writer (fd % N); other writers stay parked. NULL conn (or a
- * conn with no usable fd) falls back to slot 0, which always exists at
- * N > 0 -- never a broadcast. */
+ * its owning writer (fd % N); other writers stay parked -- never a
+ * broadcast. NULL server or conn is a no-op. */
 void server_writers_kick_conn(server_t *s, const conn_t *c);
 void server_writers_stop(server_t *s);
+/* MT #366: deterministic single-pass seam for tests. Runs one owned-slice
+ * pass for writer `wid` (plus steal when idle) without threads; the test
+ * pins thread-less accounting via server_writers_start_pool(), so no worker
+ * can drain the fixture backlog before the asserted pass runs. */
+void server_writer_pass(server_t *s, int wid);
+int server_writers_start_pool(server_t *s);
 
 /* The tick hook and the clock, called by the loop. server_tick() stamps the
  * clock, counts the invocation and forwards to s->on_tick when set. */
