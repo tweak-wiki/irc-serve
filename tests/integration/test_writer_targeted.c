@@ -102,7 +102,7 @@ int main(void)
 
         while (read(peers[0], sink, sizeof sink) > 0) {
         }
-        if (conn_write_pending(conns[0]) == 0u) {
+        if (conn_write_pending_locked(conns[0]) == 0u) {
             break;
         }
         TF_CHECK_MSG(now_us() < deadline, "stall: owner never drained");
