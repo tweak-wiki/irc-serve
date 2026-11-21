@@ -110,6 +110,7 @@
  * before the loop, in the same place and for the same reason (3.4 forbids a
  * blocking call inside it). Two files, two questions -- see account_store.h. */
 #include "account_store.h"
+#include "core/secret_util.h"
 #include "sasl_framework.h"
 /* Phase 12: the TLS backend seam. The only two things this file asks of it are
  * "load a certificate" and nothing else; everything about TLS itself is behind
@@ -499,42 +500,39 @@ static void usage(FILE *out, const char *argv0)
  * OPEN-THEN-fstat, for account_store.c's reason and in the same order: stat() then
  * open() leaves a window in which the file judged is not the file read, and this
  * file's content is the ability to impersonate a server. fstat() on the descriptor
- * cannot race. A symlink is followed and not special-cased, because fstat() judges
- * the TARGET, which is the file whose bytes would be read -- the same decision
- * those two loaders make, for the same reason.
+ * cannot race. The open itself is the shared secret_file_open(), so a FIFO at this
+ * path is refused instead of wedging startup, and a symlink is refused at open
+ * rather than followed -- the same decision those two loaders make.
  *
  * OpenSSL will not do this for us: the file's mode is not part of the PEM format
  * and there is nowhere in the library to report it.
  */
 static int key_file_is_private(const char *path)
 {
-    struct stat sb;
+    secret_open_status_t open_status = SECRET_OPEN_FAIL_OPEN;
+    unsigned open_mode = 0u;
     FILE *f;
 
     if (path == NULL || path[0] == '\0') {
         return -1;
     }
-    f = fopen(path, "re");
+    /* Same shared open as the two store loaders: O_NONBLOCK keeps a FIFO at
+     * this path from wedging startup; the S_ISREG check inside refuses it. */
+    f = secret_file_open(path, &open_status, &open_mode);
     if (f == NULL) {
-        printf("[observable] tls_key: state=REFUSED path=%s reason=open\n", path);
-        return -1;
-    }
-    if (fstat(fileno(f), &sb) != 0) {
-        printf("[observable] tls_key: state=REFUSED path=%s reason=fstat\n", path);
-        (void)fclose(f);
-        return -1;
-    }
-    if (!S_ISREG(sb.st_mode)) {
-        printf("[observable] tls_key: state=REFUSED path=%s reason=not_regular\n",
-               path);
-        (void)fclose(f);
-        return -1;
-    }
-    if ((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
-        printf("[observable] tls_key: state=REFUSED path=%s reason=mode_%03o "
-               "(a private key readable by group or other has been shared)\n",
-               path, (unsigned)(sb.st_mode & 0777));
-        (void)fclose(f);
+        if (open_status == SECRET_OPEN_FAIL_FSTAT) {
+            printf("[observable] tls_key: state=REFUSED path=%s reason=fstat\n",
+                   path);
+        } else if (open_status == SECRET_OPEN_NOT_REGULAR) {
+            printf("[observable] tls_key: state=REFUSED path=%s reason=not_regular\n",
+                   path);
+        } else if (open_status == SECRET_OPEN_BAD_MODE) {
+            printf("[observable] tls_key: state=REFUSED path=%s reason=mode_%03o "
+                   "(a private key readable by group or other has been shared)\n",
+                   path, open_mode);
+        } else {
+            printf("[observable] tls_key: state=REFUSED path=%s reason=open\n", path);
+        }
         return -1;
     }
     (void)fclose(f);
