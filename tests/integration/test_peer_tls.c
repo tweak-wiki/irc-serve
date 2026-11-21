@@ -318,7 +318,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -505,7 +505,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -590,7 +590,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const cert_opt = "--tls-cert";
         static const char *const key_opt = "--tls-key";
@@ -695,7 +695,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -778,7 +778,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";

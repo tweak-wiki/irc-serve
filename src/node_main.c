@@ -273,8 +273,10 @@ static void usage(FILE *out, const char *argv0)
                  "         REFUSES inbound peers -- it federates with nobody,\n"
                  "         and a claim is rejected as reason=NO_SECRET rather\n"
                  "         than as a wrong secret. Set one to federate at all.\n"
-                 "         At most %d bytes. A command line is visible to every\n"
-                 "         local user in `ps`: prefer --secret-file. --secret\n"
+                 "         At least 16 bytes (shorter is refused; set\n"
+                 "         IRC_SERVE_ALLOW_SHORT_SECRET=1 to keep a legacy one)\n"
+                 "         and at most %d bytes. A command line is visible to\n"
+                 "         every local user in `ps`: prefer --secret-file. --secret\n"
                  "         stays for compatibility and is reported as\n"
                  "         secret_source=argv_warn.\n",
             IRC_FED_MAX_SECRET - 1);
