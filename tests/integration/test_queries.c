@@ -998,6 +998,41 @@ int main(void)
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO #Q terminates",
                      ":" BIN_NAME " 315 alice #Q :End of WHO list\r\n");
+    /* =======================================================================
+     * 8. #353: WHO #chan o -> only operators; bad flag -> 461
+     * ==================================================================== */
+    /* alice created #q, so she is its only operator: one 352, then 315. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHO #Q o") == 0, "tc_send failed");
+    end = drain(&alice);
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 1,
+                 "WHO #Q o produced %zu 352 lines, expected exactly 1 (ops only)",
+                 count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+    expect_who_entry(&alice, from, end, "alice", "#Q", "H@",
+                     "WHO #Q o names the operator");
+    expect_absent_in_window(&alice, from, end, "WHO #Q o hides plain members",
+                            ":" BIN_NAME " 352 alice #Q bob ");
+    expect_absent_in_window(&alice, from, end, "WHO #Q o hides plain members",
+                            ":" BIN_NAME " 352 alice #Q carol ");
+    expect_in_window(&alice, from, end, "WHO #Q o terminates",
+                     ":" BIN_NAME " 315 alice #Q :End of WHO list\r\n");
+    /* The flag folds case: 'O' selects operators too. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHO #Q O") == 0, "tc_send failed");
+    end = drain(&alice);
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 1,
+                 "WHO #Q O produced %zu 352 lines, expected exactly 1",
+                 count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+    /* Anything but 'o' in second position is refused like any bad arity. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHO #Q x") == 0, "tc_send failed");
+    end = drain(&alice);
+    expect_in_window(&alice, from, end, "WHO #Q x is refused",
+                     ":" BIN_NAME " 461 alice WHO :Not enough parameters\r\n");
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
+                 "WHO #Q x produced %zu 352 lines, expected none",
+                 count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+
 
     /* =======================================================================
      * The node's own accounting
