@@ -34,20 +34,20 @@
 
 ## 4. Hardening and proof
 
-- [ ] 4.1 Ordering test: pipelined A-then-B arrives in order per connection
+- [x] 4.1 Ordering test: pipelined A-then-B arrives in order per connection
   under N=4 with concurrent bursts; verify deterministic in 100 runs.
-- [ ] 4.2 Fault test: fatal send error on one conn closes only it; verify loop
+- [x] 4.2 Fault test: fatal send error on one conn closes only it; verify loop
   + all other conns proceed (TSan clean).
-- [ ] 4.3 Benchmark writers on/off (throughput + footprint) on Linux cell;
+- [x] 4.3 Benchmark writers on/off (throughput + footprint) on Linux cell;
   verify no regression at N=0, record scaling at N=2/4 for the default decision.
-- [ ] 4.4 Full gate: `-Weverything` × 3 compilers × Release/Debug × TLS
+- [x] 4.4 Full gate: `-Weverything` × 3 compilers × Release/Debug × TLS
   on/off × ASan/TSan cells, 0 warnings, 0 failures.
 
 ## 5. Spec and rollout
 
 - [x] 5.1 Update `openspec/config.yaml` context (`no threads` → loop-single-
   writer + writers-only); verify `openspec validate --specs` green.
-- [ ] 5.2 Document `--writers` in README/DEVELOPMENT (`--help`, default,
+- [x] 5.2 Document `--writers` in README/DEVELOPMENT (`--help`, default,
   tuning); verify docs-truth check passes.
 
 ## 6. Cache scheduling (new 2026-11-21, from `openspec/specs/threading/spec.md`)
