@@ -114,6 +114,14 @@
  * one. That state is the honest one, and it is the same state as "the operator
  * configured nothing" -- which is precisely why core/account.c's predicate does
  * not need to ask about it.
+ *
+ * ATOMIC REPLACE. The file is read line by line with no lock, and only once,
+ * at startup -- there is no reload that could keep a previous store, so a
+ * refused load lasts until the next restart. A non-atomic rewrite racing that
+ * read lands mid-file and reads as malformed, which refuses the WHOLE store.
+ * Replace it atomically instead: write a temporary file in the same directory,
+ * fsync() it, rename() it over the old path. A restart then sees the old file
+ * or the new one, never half of one.
  */
 #ifndef IRC_ACCOUNT_STORE_H
 #define IRC_ACCOUNT_STORE_H

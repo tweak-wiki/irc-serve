@@ -1097,6 +1097,23 @@ static void test_registry_refused(const char *sasl, const char *path,
     tc_close(&alice.c);
 }
 
+/* Issue #311: a TORN write (a non-atomic rewrite racing a restart) reads as a
+ * malformed record, so the refusal names the atomic-replace remedy and not
+ * just the reason. */
+static void test_torn_registry_names_remedy(const char *sasl, const char *path)
+{
+    nf_node_t node;
+
+    spawn_node(&node, sasl, path, "a torn registry rewrite");
+    TF_CHECK_MSG(nf_expect(&node, "reason=malformed_record", T_READY_MS) == 0,
+                 "a torn registry was not refused as malformed");
+    TF_CHECK_MSG(nf_expect(&node, "remedy=write-tmp+fsync+rename", T_READY_MS) == 0,
+                 "a torn registry's refusal did not name the atomic remedy");
+
+    nf_stop(&node);
+    nf_free(&node);
+}
+
 /* ==========================================================================
  * CASE 6: A REGISTRY AND NO CREDENTIAL STORE
  * ==========================================================================
@@ -2528,6 +2545,7 @@ int main(void)
                           "a FIFO registry");
     test_registry_refused(sasl_good, acct_long, "reason=line_too_long",
                           "an over-long registry line");
+    test_torn_registry_names_remedy(sasl_good, acct_bad);
 
     /* ---- accounts without logins ---- */
     test_registry_without_credentials(acct_good);
