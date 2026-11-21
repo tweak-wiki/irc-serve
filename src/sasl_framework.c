@@ -16,9 +16,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#if defined(__APPLE__)
 #include <sys/random.h>
-#endif
 
 #include "sasl_framework.h"
 #include "core/secret_util.h"
