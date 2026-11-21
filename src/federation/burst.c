@@ -2168,8 +2168,11 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
      * origin are touched: a channel this node created locally, or one owned by a
      * third server, is a different origin's state and a burst about someone else
      * is not evidence about it. */
-    for (size_t i = 0; i < server_chan_count(s); i++) {
-        chan_t *ch = server_chan_at(s, i);
+    /* BACKWARD: chan_dispose_if_empty() compacts the array, so a forward
+     * walk advancing past a disposal skips the channel shifted into its
+     * slot. */
+    for (size_t n = server_chan_count(s); n > 0u; n--) {
+        chan_t *ch = server_chan_at(s, n - 1u);
         int named = 0;
 
         if (ch == NULL || !chan_same_name(ch->origin, origin)) {
