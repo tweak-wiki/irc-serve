@@ -55,7 +55,7 @@ static int digit_value(char c)
  * (Closes #183). The block is already split at the first SP/HTAB by the
  * caller, so what arrives here is exactly what ircv3_tags_parse() accepts
  * without a marker. A raw ';' always separates pairs -- even one written
- * `\;`, which is an invalid escape whose backslash is dropped on decode, not
+ * `\;`, which leaves a dangling backslash that refuses on decode (#278), not
  * a way to smuggle a separator inside a value (that spelling is `\:`).
  * Duplicates keep the first occurrence, so a block can never rewrite a tag
  * another node set. */
@@ -90,7 +90,7 @@ size_t message_tag_escape(const char *value, char *out, size_t cap)
 
 /* Thin wrapper over the single unescape in ircv3_tags.c (Closes #183):
  * a '\' before a character outside the escape set has its BACKSLASH DROPPED,
- * and a lone trailing '\' produces nothing. */
+ * and a lone trailing '\' refuses with -1 (#278). */
 int message_tag_unescape(const char *value, char *out, size_t cap)
 {
     if (value == NULL || out == NULL || cap == 0) {
