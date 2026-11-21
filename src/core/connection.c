@@ -242,32 +242,25 @@ int conn_queue(conn_t *c, const char *data, size_t len)
         goto out;
     }
 
-    /* Reclaim the already-sent head before growing, so a connection that has
-     * been writing for hours reuses one allocation instead of ratcheting.
-     *
-     * The third condition matters as much as the first two. The cap is on the
-     * UNSENT tail, so an allocation that has ratcheted close to the cap can
-     * refuse a legitimate append -- one that is well inside the bound -- simply
-     * because growing to fit would exceed the allocation limit. When woff is
-     * small that leaves the caller with a refusal that means "no room" while
-     * the counter says "over the cap", which is a lie the diagnostics cannot
-     * tell apart. Compacting whenever the growth would not fit removes that.
-     *
-     * With woff == 0 the allocation is the tail, so the cap check above already
-     * guarantees the growth fits and this cannot trigger. */
-    if (c->woff > 0 && (c->woff == c->wlen || c->woff >= CONN_WQ_COMPACT ||
-                        c->wlen + len > CONN_WQ_MAX)) {
-        if (c->woff == c->wlen) {
-            c->wlen = 0;
-            c->woff = 0;
-        } else {
+    /* #316: reclaim the already-sent head WITHOUT copying on the hot path.
+     * When the queue has drained (woff == wlen) the reset is O(1); otherwise
+     * the head gap simply waits -- it is reclaimed exactly once, below, on
+     * the append that actually needs the room to grow. The old code memmove'd
+     * up to 256 KiB under wq_lock on every append past the compact threshold,
+     * blocking the reader, while the common case (fits in wcap) copies nothing
+     * either way. The cap check above already bounds the tail, so the grow
+     * below cannot exceed CONN_WQ_MAX once the head is reclaimed. */
+    if (c->woff > 0 && c->woff == c->wlen) {
+        c->wlen = 0;
+        c->woff = 0;
+    }
+
+    if (c->wlen + len > c->wcap) {
+        if (c->woff > 0) {
             memmove(c->wbuf, c->wbuf + c->woff, c->wlen - c->woff);
             c->wlen -= c->woff;
             c->woff = 0;
         }
-    }
-
-    if (c->wlen + len > c->wcap) {
         if (buf_grow(&c->wbuf, &c->wcap, c->wlen + len, CONN_WQ_MAX) != 0) {
             rc = -1;
             goto out;
@@ -440,6 +433,14 @@ size_t conn_write_pending_locked(conn_t *c)
     n = c->wlen - c->woff;
     pthread_mutex_unlock(&c->wq_lock);
     return n;
+}
+/* #316: lock-free pending read for drains that already hold wq_lock. */
+size_t conn_write_pending_held(const conn_t *c)
+{
+    if (c == NULL) {
+        return 0;
+    }
+    return c->wlen - c->woff;
 }
 
 void conn_mark_closing(conn_t *c)
