@@ -121,7 +121,7 @@ int ircv3_unescape_value(const char *value, size_t len, char *out, size_t cap)
 
         if (c == '\\') {
             if (i + 1u >= len) {
-                break; /* a lone trailing '\' produces no output character */
+                return -1; /* lone trailing '\': malformed, refuse (issue #278) */
             }
             c = value[++i];
             switch (c) {
@@ -256,8 +256,8 @@ int ircv3_tags_parse(const char *block, ircv3_tags_t *out)
                 dst->key[klen] = '\0';
                 if (vstart != NULL) {
                     /* Unescaping cannot grow a value, so vlen bytes always fit
-                     * in dst->value; the -1 arm is unreachable and is still
-                     * reported rather than ignored. */
+                     * in dst->value; a -1 (e.g. lone trailing '\', #278)
+                     * is reported rather than ignored. */
                     if (ircv3_unescape_value(vstart, vlen, dst->value,
                                              sizeof dst->value) != 0) {
                         memset(out, 0, sizeof *out);
