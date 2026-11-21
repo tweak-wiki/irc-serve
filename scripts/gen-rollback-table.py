@@ -292,8 +292,9 @@ def rows(remote):
         # had been generated on that machine. The same remote, two published SHAs.
         #
         # The tag LIST was already immune, which is why the teeth that cover this file
-        # (`scripts/teeth/docs_truth_reads_local_clone.py`) stayed GREEN against it: it
-        # faults the REMOTE, and the remote default is the only place the list came from.
+        # (teeth.sh's `docs-truth-reads-the-local-clone` input fault) stayed GREEN
+        # against it: it faults the REMOTE, and the remote default is the only place
+        # the list came from.
         # A check that covers the tag list and not the commit column is a check that
         # covers half of the claim the table makes.
         #

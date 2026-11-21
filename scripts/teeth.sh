@@ -624,6 +624,16 @@ run_fault hostmask-width-derivation-replaced-by-a-literal \
     hostmask_width_literal.py
 
 # ---------------------------------------------------------------------------
+# THE IDENT GUARD BACK OUT OF handle_user(). test_ident_injection watches the
+# wire and the sweep watches the stored surface, so this is the second fault
+# here that two instruments have to catch: a fault caught by only one of them
+# would mean the other is decorative.
+# ---------------------------------------------------------------------------
+run_fault ident-ingest-check-removed \
+    "test_ident_injection test_terminal_sweep" \
+    ident_ingest_check_removed.py
+
+# ---------------------------------------------------------------------------
 # 16. #135: A PEER'S <nick> BACK IN A printf("%s") ON THE BRANCH THAT REFUSED IT.
 #
 # The one fault in this file that TWO instruments have to catch, which is why it is
@@ -860,7 +870,7 @@ run_command_fault linux-cell-dirty-tree-flag-suppressed \
     "sh scripts/gate-linux-cell.sh --report-selftest"
 
 note ""
-note "teeth: $PASS of 29 faults caught, $FAIL not."
+note "teeth: $PASS of 30 faults caught, $FAIL not."
 if [ "$FAIL" != "0" ]; then
     note "not caught:$FAILED_LIST"
     exit 1

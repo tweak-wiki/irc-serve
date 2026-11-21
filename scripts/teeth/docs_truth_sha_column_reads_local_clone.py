@@ -21,10 +21,10 @@ SHAs differed, and one of the two machines was a CLEAN clone of exactly the remo
 tags. The defect did not need a local-only tag to happen -- it needed a clone whose
 `refs/tags` had been moved by the history rewrite.
 
-WHY THIS IS A SEPARATE TOOTH AND NOT A WIDENING OF THE EXISTING ONE
+WHY THIS IS A SEPARATE TOOTH AND NOT A WIDENING OF THE INPUT FAULT
 -------------------------------------------------------------------
-`scripts/teeth/docs_truth_reads_local_clone.py` faults `DEFAULT_DOCS_REMOTE` from
-`origin` to `.`, and it goes red for the RIGHT reason -- a tag the local repository has
+teeth.sh's `docs-truth-reads-the-local-clone` input fault faults
+`DEFAULT_DOCS_REMOTE` from `origin` to `.`, and it goes red for the RIGHT reason
 and the committed table does not. That is the tag LIST. It stayed GREEN for the whole
 life of the SHA defect, because the list half had been fixed and the column half had not,
 and a check that covers the list and not the column is a check that reports CLEAN while
