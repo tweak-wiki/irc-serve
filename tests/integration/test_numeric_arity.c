@@ -19,7 +19,7 @@
  * So this file does two things no other assertion here does. It PARSES the 461
  * line into fields and asserts the verb is the SECOND one, so the assertion is
  * about the field list and not about a substring; and it drives the SAME check
- * through twenty-two probes over seventeen verbs, so "the field is present" and
+ * through twenty-four probes over nineteen verbs, so "the field is present" and
  * "the field is the right verb" are separate failures with separate messages.
  *
  * RFC 2812 5.2, the whole of the claim:
@@ -104,7 +104,7 @@ typedef struct {
     const char *why; /* what a reader of the failure is looking at */
 } arity_case_t;
 
-/* TWENTY-THREE PROBES ACROSS SEVENTEEN VERBS, ordered so the ones with the fewest
+/* TWENTY-FOUR PROBES ACROSS NINETEEN VERBS, ordered so the ones with the fewest
  * side effects come first. Nothing here registers a second connection, joins a
  * channel, or sets state: every case is a refusal that happens before the handler
  * does anything, which is what keeps the cases independent of each other and of
@@ -160,6 +160,8 @@ static const arity_case_t k_arity[] = {
     { "TOPIC " ARITY_CHAN " x y"   , "TOPIC",   "at most a channel and a topic -- too MANY" },
     { "KICK " ARITY_CHAN " a b c"  , "KICK",    "at most a channel, a nick, a comment -- too MANY" },
     { "MODE " ARITY_CHAN " +k a b" , "MODE",    "at most a channel, modes, one argument -- too MANY" },
+    { "NAMES " ARITY_CHAN " #x"    , "NAMES",   "at most one channel -- too MANY" },
+    { "LIST " ARITY_CHAN " #x"     , "LIST",    "at most one channel -- too MANY" },
 };
 
 /* Join ARITY_CHAN and wait for the end of the JOIN sequence.
@@ -171,7 +173,7 @@ static const arity_case_t k_arity[] = {
  * one that does. Joining first makes the sweep test what it claims to test (the
  * arity field) rather than which of the two refusals comes first.
  *
- * It is still not load-bearing for the other twenty-one probes, and that is
+ * It is still not load-bearing for the other twenty-three probes, and that is
  * asserted by ARITY_CHAN's own comment rather than left to be discovered. */
 static void join_arity_channel(test_client_t *c)
 {
@@ -396,7 +398,7 @@ static void expect_461_fields(const char *line, const char *who,
 }
 
 /* ===========================================================================
- * 1. THE LEGACY CLIENT: TWENTY PROBES, ONE FIELD LIST
+ * 1. THE LEGACY CLIENT: TWENTY-FOUR PROBES, ONE FIELD LIST
  * ====================================================================== */
 static void check_legacy_arity(test_client_t *c)
 {
@@ -463,7 +465,7 @@ static void check_451_has_no_command_field(int port)
                  "the fresh client could not connect");
     /* NICK but not USER: the registration gate is what answers, and the gate runs
      * BEFORE the handler, which is the whole point -- 451 is emitted by the
-     * dispatcher and not by any of the twenty handlers above, so this case also
+     * dispatcher and not by any of the twenty-four handlers above, so this case also
      * covers the one 461-shaped path the sweep cannot reach. */
     TF_CHECK_MSG(tc_send(&fresh, "NICK arity") == 0, "NICK send failed");
     TF_CHECK_MSG(tc_send(&fresh, "TOPIC") == 0,
@@ -806,7 +808,7 @@ int main(void)
 
     /* THREE CONNECTIONS, and each exists because the other two cannot do its job.
      *
-     * alice is the legacy client: she created #ARITY, runs the twenty-two-probe
+     * alice is the legacy client: she created #ARITY, runs the twenty-four-probe
      * sweep, and is the one whose 461 must still name its verb at the very end.
      *
      * bob joins alice's channel, so he is a member WITHOUT +o, which is the only
@@ -815,7 +817,7 @@ int main(void)
      * the 482 check is the legacy numeric's field list.
      *
      * carol negotiates `standard-replies`, which is a different code path, and a
-     * CAP REQ sent on alice would change the very branch the twenty-two probes above
+     * CAP REQ sent on alice would change the very branch the twenty-four probes above
      * are asserting. */
     tc_init(&legacy);
     register_client(&legacy, node.port, "alice", NULL);
