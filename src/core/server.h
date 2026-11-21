@@ -749,26 +749,35 @@ struct server {
      * than this node's cache. */
     uint64_t  n_rnick_evicted;
 
-    /* The registry itself: a vector of entries, ordered least-recently-LEARNED
-     * first (so index 0 is the eviction candidate), LAZILY allocated so a node
-     * with no peers pays nothing, and released by fed_nickreg_close() from
-     * server_shutdown().
+    /* The registry itself: a vector of entries with an intrusive LRU list over
+     * it (dedup's arrangement), LAZILY allocated so a node with no peers pays
+     * nothing, and released by fed_nickreg_close() from server_shutdown().
+     * Entries never move -- removal unlinks and zeroes in place -- so the
+     * list's pointers into the calloc stay valid for the table's life.
      *
-     * `nrnicks` is the ALLOCATED length and `nrnick_used` is how much of it holds
-     * an entry, which is a distinction worth making explicit: the eviction policy
-     * is a bound on USED entries, not on the allocation, and a node that has
-     * learned one nick and then forgotten it still holds the whole 86 KiB. That
-     * is deliberate -- freeing and reallocating a table on a quiet mesh would put
-     * an allocator call on the path a burst takes, and 86 KiB of untouched heap is
-     * cheaper than that.
+     * `nrnick_lru_head` is the most recently seen entry and `nrnick_lru_tail`
+     * the eviction candidate; both NULL on an empty table, which server_init()'s
+     * memset establishes and fed_nickreg_close() restores.
+     *
+     * `nrnicks` is the ALLOCATED length and `nrnick_used` is how many entries
+     * are LIVE, which is a distinction worth making explicit: freed slots stay
+     * as holes for the next append to reuse, so the live count is not a scan
+     * bound -- every scan runs over the allocation and skips holes, which costs
+     * the same walk the old dense scan cost now that no scan moves memory. That
+     * a node that has learned one nick and then forgotten it still holds the
+     * whole 88 KiB is deliberate -- freeing and reallocating a table on a quiet
+     * mesh would put an allocator call on the path a burst takes, and 88 KiB of
+     * untouched heap is cheaper than that.
      *
      * `nrnick_swept_ms` is the sweep throttle and 0 means "never swept", which is
      * also the state of a node that has just learned its first nick, so the first
      * sweep is immediate rather than being delayed by an interval measured from
      * zero. */
     struct fed_rnick *rnicks;
+    struct fed_rnick *nrnick_lru_head; /* LRU: most recently seen */
+    struct fed_rnick *nrnick_lru_tail; /* LRU: least recently seen */
     size_t    nrnicks;   /* allocated entries */
-    size_t    nrnick_used; /* entries in use */
+    size_t    nrnick_used; /* live entries */
     uint64_t  nrnick_swept_ms;
 
     /* ------------------------------------------------------------------------
