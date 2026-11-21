@@ -283,14 +283,6 @@ int batch_line_tag(conn_t *dst, char *out, size_t cap)
     return 0;
 }
 
-const char *batch_open_ref(const conn_t *c)
-{
-    if (c == NULL) {
-        return "";
-    }
-    return c->batch_ref;
-}
-
 /* ---------------------------------------------------------------------------
  * BATCH
  * ---------------------------------------------------------------------------
