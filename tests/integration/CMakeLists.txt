@@ -215,6 +215,9 @@ irc_add_integration_test(test_eintr test_eintr.c)
 irc_add_integration_test(test_flood_rate test_flood_rate.c)
 
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
+# #368: loop/writer handoff fields share their own cache lines; a field
+# migrating across the boundary fails the build of this assertion.
+irc_add_integration_test(test_handoff_layout test_handoff_layout.c)
 irc_add_integration_test(test_close_handoff test_close_handoff.c)
 
 # MT 3.1 (#290): the shutdown drain serializes under wq_lock -- TLS peer
