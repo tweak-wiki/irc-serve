@@ -105,77 +105,7 @@ struct resume_window {
 #define RESUME_SWEEP_DIVISOR ((uint64_t)16u)
 
 /* ---------------------------------------------------------------------------
- * Folds
- * ---------------------------------------------------------------------------
- *
- * THE NODE HAS THREE OF THESE and this is the third, added here for the reason
- * server.c records when it deleted its third copy: each module owns the fold for
- * the field it owns, because a shared "ascii fold" helper is a function whose
- * contract would have to be "fold anything, and the answer is right for
- * nicknames and server names and not for something else", and a contract like
- * that is a contract nobody can check.
- *
- * 2.1's nickname charset folds case; `Bob` and `bob` are one nickname. RFC 1459
- * 2.2's casemapping is `ascii`, and `005` advertises CASEMAPPING=ascii, so this
- * fold is the advertised one and not a guess. The same fold serves the ident
- * because USER has no charset rule of its own and a session that missed on case
- * would be a session a client could not get back by reconnecting correctly. */
-static char resume_fold(char ch)
-{
-    if (ch >= 'A' && ch <= 'Z') {
-        return (char)(ch - 'A' + 'a');
-    }
-    return ch;
-}
-
-static int same_folded(const char *a, const char *b)
-{
-    size_t i;
-
-    if (a == NULL || b == NULL) {
-        return 0;
-    }
-    for (i = 0;; i++) {
-        char ca = resume_fold(a[i]);
-        char cb = resume_fold(b[i]);
-
-        if (ca != cb) {
-            return 0;
-        }
-        if (ca == '\0') {
-            return 1;
-        }
-    }
-}
-
-/* A bounded copy that reports whether it fitted, because the three callers all
- * need to know: a nick or a channel name that does not fit is a name this node
- * would have refused, and storing a truncated one would produce a window whose
- * key matches nothing. Returns 0 when the value was refused and `dst` is then
- * empty, so a caller that ignores the return still cannot produce a half-built
- * name. */
-static int resume_copy(char *dst, size_t cap, const char *src)
-{
-    size_t n;
-
-    if (dst == NULL || cap == 0u) {
-        return 0;
-    }
-    if (src == NULL) {
-        dst[0] = '\0';
-        return 1;
-    }
-    n = strlen(src);
-    if (n >= cap) {
-        dst[0] = '\0';
-        return 0;
-    }
-    memcpy(dst, src, n + 1u);
-    return 1;
-}
-
-/* ---------------------------------------------------------------------------
- * THE IDENT HALF OF resume_copy(), AND WHY IT IS A FUNCTION OF ITS OWN
+ * THE IDENT HALF OF copy_bounded(), AND WHY IT IS A FUNCTION OF ITS OWN
  * ---------------------------------------------------------------------------
  * `resume_window::ident` is a copy of `conn_t::user`, and `conn_t::user` is the
  * `<user>` slot of a `nick!user@host` hostmask -- the field that reached every
@@ -234,7 +164,7 @@ static int resume_ident_copy(char *dst, size_t cap, const char *src)
         dst[0] = '\0';
         return 1;
     }
-    return resume_copy(dst, cap, src);
+    return copy_bounded(dst, cap, src);
 }
 /* ---------------------------------------------------------------------------
  * Table access
@@ -313,9 +243,9 @@ static const struct resume_window *resume_find_const(const server_t *s,
     for (i = 0; i < s->nresume_used; i++) {
         const struct resume_window *w = &s->resume_windows[i];
 
-        if (!same_folded(w->nick, c->nick) || !same_folded(w->ident, c->user) ||
-            !same_folded(w->host, c->host) ||
-            !same_folded(w->account, c->account)) {
+        if (!chan_same_name(w->nick, c->nick) || !chan_same_name(w->ident, c->user) ||
+            !chan_same_name(w->host, c->host) ||
+            !chan_same_name(w->account, c->account)) {
             continue;
         }
         if (now_ms < w->dropped_ms || (now_ms - w->dropped_ms) >= s->resume_window_ms) {
@@ -341,9 +271,9 @@ static struct resume_window *resume_find(server_t *s, const conn_t *c,
     for (i = 0; i < s->nresume_used; i++) {
         struct resume_window *w = &s->resume_windows[i];
 
-        if (!same_folded(w->nick, c->nick) || !same_folded(w->ident, c->user) ||
-            !same_folded(w->host, c->host) ||
-            !same_folded(w->account, c->account)) {
+        if (!chan_same_name(w->nick, c->nick) || !chan_same_name(w->ident, c->user) ||
+            !chan_same_name(w->host, c->host) ||
+            !chan_same_name(w->account, c->account)) {
             continue;
         }
         /* THE KEY AND NOTHING ELSE, and that is the difference from
@@ -456,10 +386,10 @@ void resume_note(server_t *s, const conn_t *c, uint64_t now_ms)
     memset(w, 0, sizeof *w);
     w->nchans = 0u;
     w->dropped_ms = now_ms;
-    if (!resume_copy(w->nick, sizeof w->nick, c->nick) ||
+    if (!copy_bounded(w->nick, sizeof w->nick, c->nick) ||
         !resume_ident_copy(w->ident, sizeof w->ident, c->user) ||
-        !resume_copy(w->host, sizeof w->host, c->host) ||
-        !resume_copy(w->account, sizeof w->account,
+        !copy_bounded(w->host, sizeof w->host, c->host) ||
+        !copy_bounded(w->account, sizeof w->account,
                     (c->account[0] != '\0') ? c->account : "")) {
         /* Unreachable: every field was accepted by the struct it is being
          * copied into, which is the same width. Handled rather than asserted
@@ -496,7 +426,7 @@ void resume_note(server_t *s, const conn_t *c, uint64_t now_ms)
         m = chan_find_member(ch, c);
         rc = &w->chans[w->nchans];
         memset(rc, 0, sizeof *rc);
-        if (!resume_copy(rc->name, sizeof rc->name, ch->name)) {
+        if (!copy_bounded(rc->name, sizeof rc->name, ch->name)) {
             continue;
         }
         rc->flags = (m != NULL) ? m->flags : 0u;
@@ -635,7 +565,7 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
     /* The three key fields are COPIED before the window is taken, because taking
      * it shifts the array and the connection's own fields are the only other
      * place they exist. */
-    (void)resume_copy(nick, sizeof nick, c->nick);
+    (void)copy_bounded(nick, sizeof nick, c->nick);
     (void)resume_ident_copy(ident, sizeof ident, c->user);
 
     /* THE FINDER, NOT A SECOND COPY OF ITS COMPARISON. resume_apply() needs the
@@ -712,7 +642,7 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
      * shifts underneath the pointer. The copy is onto the STACK at the bound
      * rather than a heap allocation, which is what lets this function have no
      * failure mode of its own. */
-    (void)resume_copy(account, sizeof account,
+    (void)copy_bounded(account, sizeof account,
                       s->resume_windows[idx].account);
     nchans = s->resume_windows[idx].nchans;
     dropped = s->resume_windows[idx].dropped_chans;
@@ -762,7 +692,7 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
          * an account (an unauthenticated session) keeps the old behaviour, so
          * the feature still works for clients that do not use SASL; the
          * residual shared-host risk for those is documented in SECURITY.md. */
-        if (account[0] != '\0' && !same_folded(account, c->account)) {
+        if (account[0] != '\0' && !chan_same_name(account, c->account)) {
             flags = 0u;
         }
         if (chans[i].flags != 0u && flags != chans[i].flags) {
@@ -885,7 +815,7 @@ int resume_holds(const server_t *s, const char *chan)
             continue;
         }
         for (k = 0; k < w->nchans; k++) {
-            if (same_folded(w->chans[k].name, chan)) {
+            if (chan_same_name(w->chans[k].name, chan)) {
                 return 1;
             }
         }

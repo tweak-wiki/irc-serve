@@ -107,38 +107,6 @@ struct fed_rnick {
  * stored them as two entries would let a node claim two servers hold a nick
  * when one does. */
 
-/* A bounded copy: the same rule as channel.c's copy_bounded() -- refuse, never
- * truncate -- for the reason 3.2 gives: a truncated host is a hostmask that is not
- * the one the peer reported. A copy rather than a share because channel.c's is
- * static and a shared helper for two strings is a header dependency this file
- * does not otherwise have. */
-static int nickreg_copy(char *dst, size_t cap, const char *src)
-{
-    size_t n;
-
-    if (dst == NULL || cap == 0u) {
-        return 0;
-    }
-    /* An absent source is an EMPTY value, not a refusal. The three fields a
-     * report can legitimately omit are `user` (a relay that only reports a
-     * roster), `host` (2.2: an empty host is the normal state for a member
-     * learned from a live SJOIN) and `server` (4.3's SJOIN carries no server
-     * field). Storing "" is what every reader of these fields already handles --
-     * see chan_remote_t's comment on an empty member_server -- and a refusal
-     * would throw away the nick, which is the one field the entry exists for. */
-    if (src == NULL) {
-        dst[0] = '\0';
-        return 1;
-    }
-    n = strlen(src);
-    if (n >= cap) {
-        dst[0] = '\0';
-        return 0;
-    }
-    memcpy(dst, src, n + 1u);
-    return 1;
-}
-
 /* Find the entry for (nick, server), or NULL. An EMPTY `server` is a wildcard
  * match rather than an equality test, which is what makes
  * fed_nickreg_forget(s, nick, NULL) able to forget a nick everywhere in one
@@ -373,16 +341,16 @@ int nickreg_ident_ok(const char *s, size_t cap)
     if (s == NULL || s[0] == '\0' || cap == 0u) {
         return 0;
     }
-    /* AND THE WIDTH, which is the second half of the rule and was `nickreg_copy()`'s
+    /* AND THE WIDTH, which is the second half of the rule and was the copy's
      * whole job until now. A value that does not FIT is one this node cannot hold,
-     * whatever it is made of -- and `nickreg_copy()` TRUNCATES, so without this a
-     * 400-byte host would become a 63-byte host under a name the peer will never be
-     * asked about again, which is 3.2's "never deliver a silently shortened
-     * parameter" arriving by a different road. `account_name_wire_safe()` binds the
-     * same way with ACCOUNT_MAX_NAME hard-wired, because its callers all share one
-     * field width; here the caller supplies it, because `user` and `host` are two
-     * different fields and a caller that passed the wrong one would get a value
-     * truncated to a width nobody declared. */
+     * whatever it is made of -- and the copy REFUSES (copy_bounded(), issue #212),
+     * so without this a 400-byte host would either be dropped or become unusable
+     * under a name the peer will never be asked about again, which is 3.2's
+     * "never deliver a silently shortened parameter" arriving by a different
+     * road. `account_name_wire_safe()` binds the same way with ACCOUNT_MAX_NAME
+     * hard-wired, because its callers all share one field width; here the caller
+     * supplies it, because `user` and `host` are two different fields and a caller
+     * that passed the wrong one would get a refusal at a width nobody declared. */
     if (strlen(s) >= cap) {
         return 0;
     }
@@ -477,21 +445,21 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
          * report of the same nick with no holder must not erase a holder a burst
          * had already established. */
         if (server != NULL && server[0] != '\0') {
-            (void)nickreg_copy(e->server, sizeof e->server, server);
+            (void)copy_bounded(e->server, sizeof e->server, server);
         }
         if (user != NULL && user[0] != '\0') {
             /* IDENTIFIERS, REFUSED NOT SANITISED (#142). See the predicate's own
              * comment for the policy and for why the answer here is "refuse the
              * field" rather than "strip it" or "store it and hope". */
             if (nickreg_ident_ok(user, sizeof e->user)) {
-                (void)nickreg_copy(e->user, sizeof e->user, user);
+                (void)copy_bounded(e->user, sizeof e->user, user);
             } else {
                 nickreg_ident_refused(s, nick, "user", user);
             }
         }
         if (host != NULL && host[0] != '\0') {
             if (nickreg_ident_ok(host, sizeof e->host)) {
-                (void)nickreg_copy(e->host, sizeof e->host, host);
+                (void)copy_bounded(e->host, sizeof e->host, host);
             } else {
                 nickreg_ident_refused(s, nick, "host", host);
             }
@@ -514,8 +482,8 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
      * new report does not carry. This is the reason eviction memsets rather than
      * overwriting only what it knows. */
     memset(e, 0, sizeof *e);
-    have = nickreg_copy(e->nick, sizeof e->nick, nick);
-    (void)nickreg_copy(e->server, sizeof e->server, server);
+    have = copy_bounded(e->nick, sizeof e->nick, nick);
+    (void)copy_bounded(e->server, sizeof e->server, server);
     /* The two hostmask components go through the SAME predicate as the refresh arm
      * above, and the reason it is one function rather than two checks written at the
      * two call sites is the one this file has been bitten by twice: two answers to
@@ -523,12 +491,12 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
      * filled on the append path and refused on the refresh path is a registry whose
      * contents depend on the order the same nickname was reported in. */
     if (user != NULL && nickreg_ident_ok(user, sizeof e->user)) {
-        (void)nickreg_copy(e->user, sizeof e->user, user);
+        (void)copy_bounded(e->user, sizeof e->user, user);
     } else if (user != NULL && user[0] != '\0') {
         nickreg_ident_refused(s, nick, "user", user);
     }
     if (host != NULL && nickreg_ident_ok(host, sizeof e->host)) {
-        (void)nickreg_copy(e->host, sizeof e->host, host);
+        (void)copy_bounded(e->host, sizeof e->host, host);
     } else if (host != NULL && host[0] != '\0') {
         nickreg_ident_refused(s, nick, "host", host);
     }
@@ -682,7 +650,7 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
      * produce an entry learn() would have refused -- two entry-creation paths with
      * different bounds is how a table ends up holding a truncated name that no
      * lookup can match. */
-    if (!nickreg_copy(s->rnicks[at].nick, sizeof s->rnicks[at].nick, new_nick)) {
+    if (!copy_bounded(s->rnicks[at].nick, sizeof s->rnicks[at].nick, new_nick)) {
         return -1;
     }
     /* THE STAMP MOVES, and the reason is that the most recent fact about this
@@ -754,7 +722,7 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
             }
             if (!have || fed_nickreg_local_loses(holder, e->server) != 0) {
                 /* e->server is the smaller of the two, so it is the new winner. */
-                (void)nickreg_copy(holder, sizeof holder, e->server);
+                (void)copy_bounded(holder, sizeof holder, e->server);
                 have = 1;
             }
         }
@@ -833,7 +801,7 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
      * asked rather than trusted -- `nick` and `c->nick` are the same string
      * folded, and a caller that passed `Bob` must not produce a line that names
      * the client's own spelling. */
-    (void)nickreg_copy(oldnick, sizeof oldnick, nick);
+    (void)copy_bounded(oldnick, sizeof oldnick, nick);
     memcpy(c->nick, fresh, strlen(fresh) + 1u);
 
     /* 1. THE CLIENT, through send_line() and not a fanout: there is exactly one
@@ -1033,7 +1001,7 @@ const char *fed_nickreg_holder(const server_t *s, const char *nick, char *out,
              * an answer most callers do not need -- and the flag is what the
              * rename policy asks for, so it is cheaper to compute it than to
              * leave it out and have a caller walk the table itself. */
-            if (nickreg_copy(out, cap, e->server) == 0) {
+            if (copy_bounded(out, cap, e->server) == 0) {
                 return NULL;
             }
             found = 1;
@@ -1179,7 +1147,7 @@ int fed_nickreg_next_name(const server_t *s, const char *nick, char *out,
         if (server_nick_lookup(s, candidate) != NULL) {
             continue;
         }
-        if (nickreg_copy(out, cap, candidate) == 0) {
+        if (copy_bounded(out, cap, candidate) == 0) {
             return -1;
         }
         return 0;
