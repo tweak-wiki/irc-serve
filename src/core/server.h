@@ -1712,6 +1712,16 @@ void server_writers_kick(server_t *s);
  * conn with no usable fd) falls back to slot 0, which always exists at
  * N > 0 -- never a broadcast. */
 void server_writers_kick_conn(server_t *s, const conn_t *c);
+/* Issue #279: quiet queue + coalesced kick. server_queue_quiet() queues with
+ * the same bound, overflow count and CLOSING mark as server_queue() but wakes
+ * no writer; the caller wakes each touched owner slot once at the end of the
+ * emission via server_writers_kick_slots(). server_writer_slot() exposes the
+ * fd % N owner mapping so an emission can name the slots it dirtied. */
+int server_queue_quiet(server_t *s, conn_t *c, const char *data, size_t len);
+int server_writer_slot(const server_t *s, int fd);
+/* One wq_mu hold for the whole set: duplicate slots are signalled once. NULL
+ * server, never-started pool and out-of-range slots are no-ops. */
+void server_writers_kick_slots(server_t *s, const int *slots, size_t nslots);
 void server_writers_stop(server_t *s);
 
 /* The tick hook and the clock, called by the loop. server_tick() stamps the
