@@ -54,9 +54,75 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/server.h"
 #include "federation/nickreg.h"
 
 static int failures;
+
+/* A learning check, which is a different `check` because it names a server, not
+ * a pair. */
+static void check_ev(int ok, const char *what, const char *nick)
+{
+    if (ok) {
+        return;
+    }
+    failures++;
+    printf("FAILED: %s (nick=\"%s\")\n", what, nick);
+}
+
+/* ---------------------------------------------------------------------------
+ * THE EVICTION ORDER (issue #332)
+ * ---------------------------------------------------------------------------
+ * Learn is O(1) now, but the property the LRU rewrite must not change is WHICH
+ * entry goes: the least recently seen. A repeat refreshes in place and saves
+ * the entry, and a freed slot is reused before anything is evicted. The table
+ * is 256 entries, so the case fills it, touches one end, and overflows it --
+ * all through the public learn/forget/holder/count entry points, because the
+ * list is an implementation detail and the order is the contract. */
+static void case_evicts_least_recently_seen(void)
+{
+    server_t s;
+    char nick[16];
+    char holder[64];
+    int ambiguous = 0;
+
+    check_ev(server_init(&s, "irc.me") == 0, "server_init failed", "");
+    for (int i = 0; i < 256; i++) {
+        snprintf(nick, sizeof nick, "u%03d", i);
+        fed_nickreg_learn(&s, nick, "irc.h", NULL, NULL, 0u, 1000u);
+    }
+    check_ev(fed_nickreg_count(&s) == 256, "filling the table must hold 256", "");
+    /* A repeat refreshes rather than adding, and the refresh makes u000 the
+     * most recently seen -- so the overflow below must take u001, not u000. */
+    fed_nickreg_learn(&s, "u000", "irc.h", NULL, NULL, 0u, 2000u);
+    check_ev(fed_nickreg_count(&s) == 256, "a refresh must not add", "u000");
+    fed_nickreg_learn(&s, "u256", "irc.h", NULL, NULL, 0u, 3000u);
+    check_ev(fed_nickreg_count(&s) == 256, "an overflow must evict, not grow",
+             "u256");
+    check_ev(fed_nickreg_holder(&s, "u001", holder, sizeof holder, NULL) == NULL,
+             "the least recently seen entry must be the one evicted", "u001");
+    check_ev(fed_nickreg_holder(&s, "u000", holder, sizeof holder, NULL) != NULL,
+             "a refreshed entry must survive the overflow", "u000");
+    check_ev(fed_nickreg_holder(&s, "u256", holder, sizeof holder, NULL) != NULL,
+             "the new entry must be held after the overflow", "u256");
+    /* A freed slot is reused before anything is evicted: forgetting u002 and
+     * learning u257 must leave the count whole and take nothing else. */
+    fed_nickreg_forget(&s, "u002", "irc.h");
+    check_ev(fed_nickreg_count(&s) == 255, "forget must drop the count", "u002");
+    fed_nickreg_learn(&s, "u257", "irc.h", NULL, NULL, 0u, 4000u);
+    check_ev(fed_nickreg_count(&s) == 256, "a hole must be reused, not evicted",
+             "u257");
+    check_ev(fed_nickreg_holder(&s, "u003", holder, sizeof holder, NULL) != NULL,
+             "reusing a hole must evict nothing", "u003");
+    /* Duplicates answer least-recently-seen first, with the flag set. */
+    fed_nickreg_learn(&s, "dup", "irc.x", NULL, NULL, 0u, 5000u);
+    fed_nickreg_learn(&s, "dup", "irc.y", NULL, NULL, 0u, 6000u);
+    check_ev(fed_nickreg_holder(&s, "dup", holder, sizeof holder, &ambiguous) != NULL,
+             "a duplicated nick must still resolve", "dup");
+    check_ev(strcmp(holder, "irc.x") == 0 && ambiguous != 0,
+             "the first-learned holder must answer with ambiguity set", "dup");
+    server_shutdown(&s);
+}
 
 static void check(int ok, const char *what, const char *a, const char *b)
 {
@@ -236,6 +302,7 @@ int main(void)
     case_folds();
     case_transitive();
     case_prefix_is_an_order();
+    case_evicts_least_recently_seen();
 
     if (failures != 0) {
         printf("%d nick-policy check(s) failed\n", failures);
