@@ -41,6 +41,10 @@ Every channel verb SHALL enforce arity both ways and strip identically.
 - **WHEN** a multi-channel JOIN contains empty elements (`JOIN #a,,#b`)
 - **THEN** empty elements are skipped and every valid channel is joined.
 
+#### Scenario: Case-only NICK adopts new spelling
+- **WHEN** a client holding `bob` sends `NICK BOB` (folded-equal but byte-different)
+- **THEN** the node adopts the new spelling with no 433 and no re-claim.
+
 ### Requirement: Bounded enumeration
 
 Membership output SHALL never stall the tick or drown the requester.
