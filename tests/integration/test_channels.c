@@ -1217,6 +1217,28 @@ static void test_mode(nf_node_t *node)
                           "k");
     }
 
+    /* An EMPTY mode string is 461, not 472: "" names no letter at all, so there
+     * is nothing for 472's <char> field to hold, and "not enough parameters"
+     * is the true statement. `MODE #mo :` is the wire form -- a trailing colon
+     * with nothing after it parses to params[1] == "". */
+    {
+        (void)send_and_drain(&a, "m-461-empty");
+        client_send(&a, "MODE #mo :");
+        (void)send_and_drain(&a, "m-461-empty-after");
+        expect_line(&a.c, "461 for an empty mode string",
+                    ":irc.test 461 moa MODE :Not enough parameters\r\n");
+    }
+
+    /* A LONE SIGN is 461 too: "+" carries the sign and no letters, which is the
+     * same too-FEW shape as the empty string. */
+    {
+        (void)send_and_drain(&a, "m-461-sign");
+        client_send(&a, "MODE #mo +");
+        (void)send_and_drain(&a, "m-461-sign-after");
+        expect_line(&a.c, "461 for a lone-sign mode string",
+                    ":irc.test 461 moa MODE :Not enough parameters\r\n");
+    }
+
     /* A THIRD CHARACTER, to prove the field is the client's byte and not a
      * constant that happens to be `k`. `s` is advertised in 004 and is not
      * evaluated either, and `MODE #mo +s` puts a real sign on a character this
