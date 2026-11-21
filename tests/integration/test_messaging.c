@@ -786,30 +786,44 @@ int main(void)
     }
 
     /* =======================================================================
-     * 10. AN EMPTY BODY IS DELIVERED, not dropped
+     * 10. AN EMPTY BODY IS 412, not a delivery (#304)
      * ==================================================================== */
-    /* `PRIVMSG #t :` parses to a message with an EMPTY trailing parameter, which
-     * 3.2's formatter represents by coloning it. A node that treated the empty
-     * body as "nothing to send" would drop it silently, and a client that pokes
-     * a channel with an empty body would get no answer at all. */
-    /* ...and is echoed to the sender, because the sender is a member of #t and
-     * 3.1's channel row writes to the member list without exempting anybody.
-     * Both halves are asserted because either alone is weak: a node that dropped
-     * the trailing parameter as "nothing to send" would pass the absence, and a
-     * node that dropped it everywhere would pass the presence on a channel
-     * where it happened to reach carol by accident. */
+    /* `PRIVMSG #t :` parses to an EMPTY trailing parameter, and RFC 2812 5.2
+     * answers that with 412 ERR_NOTEXTTOSEND, delivered to nobody. Same for
+     * NOTICE: the verbs share send_message(), so one check each. */
     {
         size_t s1 = open_window(&bob);
         size_t f1 = open_window(&carol);
         size_t s2, e1;
 
+        (void)snprintf(want, sizeof want, ":%s 412 bob :No text to send\r\n",
+                       BIN_NAME);
         TF_CHECK_MSG(tc_send(&bob.c, "PRIVMSG #t :") == 0, "tc_send failed");
         s2 = drain(&bob); /* sender first -- see section 1 */
         e1 = drain(&carol);
-        expect_in_window(&bob, s1, s2, "an empty body is echoed to its sender",
-                         ":bob!bob@127.0.0.1 PRIVMSG #T :\r\n");
-        expect_in_window(&carol, f1, e1, "an empty body reaches another member",
-                         ":bob!bob@127.0.0.1 PRIVMSG #T :\r\n");
+        expect_in_window(&bob, s1, s2, "412 for an empty PRIVMSG", want);
+        TF_CHECK_MSG(tf_count(tc_buffer(&bob.c) + s1, " 412 ") == 1u,
+                     "empty PRIVMSG produced %zu 412 lines, expected exactly one",
+                     tf_count(tc_buffer(&bob.c) + s1, " 412 "));
+        expect_absent_in_window(&carol, f1, e1, "another member, empty PRIVMSG",
+                                "PRIVMSG");
+    }
+    {
+        size_t s1 = open_window(&bob);
+        size_t f1 = open_window(&carol);
+        size_t s2, e1;
+
+        (void)snprintf(want, sizeof want, ":%s 412 bob :No text to send\r\n",
+                       BIN_NAME);
+        TF_CHECK_MSG(tc_send(&bob.c, "NOTICE #t :") == 0, "tc_send failed");
+        s2 = drain(&bob); /* sender first -- see section 1 */
+        e1 = drain(&carol);
+        expect_in_window(&bob, s1, s2, "412 for an empty NOTICE", want);
+        TF_CHECK_MSG(tf_count(tc_buffer(&bob.c) + s1, " 412 ") == 1u,
+                     "empty NOTICE produced %zu 412 lines, expected exactly one",
+                     tf_count(tc_buffer(&bob.c) + s1, " 412 "));
+        expect_absent_in_window(&carol, f1, e1, "another member, empty NOTICE",
+                                "NOTICE");
     }
 
     /* =======================================================================
