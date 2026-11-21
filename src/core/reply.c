@@ -292,11 +292,11 @@ static int emit_built_ex(server_t *s, conn_t *c, const char *code,
  * `send_line()`, `send_line_colon()` and `send_line_tagged()` are the RELAYED path:
  * a client's own PRIVMSG, a STOPIC a peer forwarded, an SJOIN. Their content is user
  * text, already filtered by the policy its consumer calls for -- relayed message text
- * through `conn_text_strip_relay()`, which keeps the eight mIRC bytes because in
- * message text they are semantics and removing them corrupts a CTCP. Running the
- * STRICT filter over relayed text would strip a colour code off every message on the
- * network, so the two paths are deliberately different and the difference is named
- * here rather than left to be discovered as a missing colour.
+ * through `conn_text_strip()` under STRIP_RELAY, which keeps the eight mIRC bytes
+ * because in message text they are semantics and removing them corrupts a CTCP.
+ * Running the STRICT filter over relayed text would strip a colour code off every
+ * message on the network, so the two paths are deliberately different and the
+ * difference is named here rather than left to be discovered as a missing colour.
  *
  * THE ARENA, and its size is a bound rather than a guess. The sum of a numeric's
  * parameter bytes cannot exceed `IRC_MAX_LINE`, because a line that would exceed it is
@@ -343,7 +343,7 @@ static int emit_numeric_ex(server_t *s, conn_t *c, const char *code,
         if (room < 2u) {
             return refuse(s, c, code, "unrepresentable");
         }
-        kept = conn_text_strip_wire(arena + used, room, v);
+        kept = conn_text_strip(arena + used, room, v, STRIP_STORED);
         if (kept + 1u > room) {
             return refuse(s, c, code, "unrepresentable");
         }

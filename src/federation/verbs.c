@@ -327,13 +327,13 @@ static int fed_queue_refuse(fed_queue_why_t *why_out, fed_queue_why_t why)
  *      keep in step, and this file has now shipped two divergences from exactly
  *      that cause: SMODES applying modes the client path refuses, and the log
  *      values bypassing `fed_obs()`.
- *   3. IT NAMES `conn_text_strip_relay()` AND `conn_text_strip()` IN THE TABLE
- *      rather than reimplementing either. Those two ARE the single implementations
- *      of "what a relayed message may contain" and "what a stored value may
- *      contain"; the client relay path in core/msg_verbs.c calls the first for
- *      PRIVMSG text. This table is a statement about WHICH FIELD and WHICH POLICY,
- *      and nothing else -- the byte rules live in one place per policy and a change
- *      to either is a change to both surfaces.
+ *   3. IT NAMES STRIP_RELAY AND STRIP_STORED IN THE TABLE rather than
+ *      reimplementing either. Those two ARE the single implementations of "what
+ *      a relayed message may contain" and "what a stored value may contain";
+ *      the client relay path in core/msg_verbs.c passes the first for PRIVMSG text.
+ *      This table is a statement about WHICH FIELD and WHICH POLICY, and nothing
+ *      else -- the byte rules live in one place per policy and a change to either
+ *      is a change to both surfaces.
  *
  * WHY TWO POLICIES IN ONE TABLE. Because the client path has two, and a peer relay
  * carries both kinds of field. A message's text is RELAYED, and `relay_byte_kept()`
@@ -354,25 +354,23 @@ static int fed_queue_refuse(fed_queue_why_t *why_out, fed_queue_why_t why)
  * refused anyway -- and it is reported rather than truncated, because a truncated
  * parameter is a lie about what the peer sent.
  */
-typedef size_t (*fed_clean_fn)(char *dst, size_t cap, const char *src);
-
 static const struct {
     const char *verb;
-    int at;             /* which parameter carries the text */
-    fed_clean_fn clean; /* WHICH policy, named as the function that owns it */
+    int at;                          /* which parameter carries the text */
+    conn_text_strip_policy_t policy; /* WHICH policy: message text or stored value */
 } OUTBOUND_TEXT[] = {
     /* The two message verbs: index 1 is the text, and it is the same field and the
      * same policy as PRIVMSG's on the client relay path. */
-    { "SPRIVMSG", 1, conn_text_strip_relay },
-    { "SNOTICE",  1, conn_text_strip_relay },
+    { "SPRIVMSG", 1, STRIP_RELAY },
+    { "SNOTICE",  1, STRIP_RELAY },
     /* The state verbs' free-text fields, all of which the receiving node STORES or
      * renders to clients rather than relays. 4.3's frozen shapes put the channel in
      * the second slot for all three and the evaluating server in the first, which is
      * why these indices are what they are -- and why getting one wrong is a field
      * read from the wrong place rather than a visible error. */
-    { "STOPIC",   2, conn_text_strip },
-    { "SKICK",    3, conn_text_strip },
-    { "SMODES",   2, conn_text_strip }
+    { "STOPIC",   2, STRIP_STORED },
+    { "SKICK",    3, STRIP_STORED },
+    { "SMODES",   2, STRIP_STORED }
 };
 #define OUTBOUND_TEXT_COUNT \
     ((int)(sizeof OUTBOUND_TEXT / sizeof OUTBOUND_TEXT[0]))
@@ -425,7 +423,7 @@ static int fed_relay_clean(const char *verb, const char *const *params,
         for (int k = 0; k < nparams; k++) {
             cleaned[k] = params[k];
         }
-        *kept_len = OUTBOUND_TEXT[i].clean(arena, cap, src);
+        *kept_len = conn_text_strip(arena, cap, src, OUTBOUND_TEXT[i].policy);
         cleaned[OUTBOUND_TEXT[i].at] = arena;
         return 1;
     }
@@ -2182,7 +2180,7 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
                     size_t mask_kept = 0;
 
                     if (strlen(mask) <= (size_t)CHAN_MAX_BAN) {
-                        mask_kept = conn_text_strip(clean, sizeof clean, mask);
+                        mask_kept = conn_text_strip(clean, sizeof clean, mask, STRIP_STORED);
                         effective = clean;
                     }
                     /* The raw length binds, exactly as the client path's does: a
@@ -3028,9 +3026,9 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
          * filters already existed and none of them is on this path:
          *
          *   - `msg_verbs.c` filters a CLIENT's message text before fanning it out,
-         *     with `conn_text_strip_relay()`;
+         *     with `conn_text_strip()` under STRIP_RELAY;
          *   - `fed_relay_clean()` below `fed_queue_line()` filters the same text
-         *     again on the way to a PEER, with the same function;
+         *     again on the way to a PEER, with the same policy;
          *   - `write_to_members()` -> `send_line_tagged()` filters NOTHING, and it
          *     is what writes to a local client.
          *
@@ -3096,7 +3094,7 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
         {
             char clean[IRC_MAX_LINE];
             const size_t in_len = strlen(sp[0]);
-            const size_t kept = conn_text_strip_relay(clean, sizeof clean, sp[0]);
+            const size_t kept = conn_text_strip(clean, sizeof clean, sp[0], STRIP_RELAY);
 
             sp[0] = clean;
             if (kept != in_len) {
