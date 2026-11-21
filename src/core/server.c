@@ -767,17 +767,24 @@ static void *writer_main(void *arg);
 
 static void writer_drain_one(server_t *s)
 {
-    size_t i;
+    size_t i = 0;
 
-    /* MT 2.2: the whole scan holds reg_mu, so the loop's add/detach cannot
-     * move active_fds/by_fd under us (TSan) and a resolved conn cannot be
-     * detached/freed mid-pump. Lock order reg_mu -> wq_lock is fixed: the
-     * pump takes wq_lock inside, never the reverse. The loop never blocks on
-     * reg_mu while holding wq_lock (fill/queue take wq_lock alone). */
+    /* #279: reg_mu is held only for the registry scan, never across a pump.
+     * Holding it over every conn_pump_slice_locked serialized all writers on
+     * one mutex (N=4 ~= N=1) and blocked the loop's add/detach behind write
+     * syscalls. The scan below takes each conn's wq_lock while still holding
+     * reg_mu (order reg_mu -> wq_lock, never the reverse) and only as a
+     * trylock, so it never blocks under reg_mu; the pump then runs under
+     * wq_lock alone. The held wq_lock is what keeps the reaper from
+     * detaching/freeing mid-pump -- its trylock fails and it defers the
+     * close -- so validation-to-pump has no gap. After the pump the wq_lock
+     * is released BEFORE reg_mu is retaken, keeping the order strict. A
+     * detach between scans only moves active_fds, which is re-read every
+     * iteration, so a conn is at worst visited twice or next scan. */
     if (s->reg_started) {
         pthread_mutex_lock(&s->reg_mu);
     }
-    for (i = 0; i < s->nactive; i++) {
+    while (i < s->nactive) {
         int fd;
         conn_t *c;
         size_t before;
@@ -792,31 +799,44 @@ static void writer_drain_one(server_t *s)
          * (the 417-flush path leaves them for us). Only the reaper closes; a
          * failed pump still only marks. */
         if (c == NULL) {
+            i++;
             continue;
         }
         if (atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING &&
             !atomic_load_explicit(&c->want_write, memory_order_acquire)) {
+            i++;
             continue;
         }
-        /* wlen/woff are wq_lock-guarded (loop's conn_queue vs our pump);
-         * reg_mu covers structure only, so these stay locked reads. Order
-         * reg_mu -> wq_lock holds: nothing takes them in reverse.
-         * #369: one bounded slice per conn per visit, not the whole
+        if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+            /* Another writer is pumping this conn, or the reaper is reading
+             * its pending: either way it is being handled, and the next scan
+             * picks up what is left. */
+            i++;
+            continue;
+        }
+        if (s->reg_started) {
+            pthread_mutex_unlock(&s->reg_mu);
+        }
+        /* #369: one bounded slice per conn per visit, not the whole
          * backlog -- the scan is round-robin, so a thin conn queued behind
-         * a fat one drains within one slice of being queued. */
-        before = conn_write_pending_locked(c);
-        pthread_mutex_lock(&c->wq_lock);
+         * a fat one drains within one slice of being queued. wlen/woff are
+         * read with the plain accessor: wq_lock is already held, and the
+         * _locked form takes the lock itself (self-deadlock inside a pump
+         * critical section, by its own contract). */
+        before = conn_write_pending(c);
         rc = conn_pump_slice_locked(c);
-        pthread_mutex_unlock(&c->wq_lock);
         if (rc < 0) {
             atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
             printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
             conn_mark_closing(c);
-            continue;
-        }
-        if (before > 0 && conn_write_pending_locked(c) > 0) {
+        } else if (before > 0 && conn_write_pending(c) > 0) {
             atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
         }
+        pthread_mutex_unlock(&c->wq_lock);
+        if (s->reg_started) {
+            pthread_mutex_lock(&s->reg_mu);
+        }
+        i++;
     }
     if (s->reg_started) {
         pthread_mutex_unlock(&s->reg_mu);
