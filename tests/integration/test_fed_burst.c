@@ -263,15 +263,14 @@ static int g_tiny_recv;
  * that would otherwise get there first. Shrinking cannot demonstrate it -- a
  * smaller budget makes the arithmetic bind harder, which is the other case.
  *
- * THE FIGURE IS DERIVED FROM THE TWO BOUNDS rather than picked, so that moving
- * either moves it: 2 KiB is IRC_BURST_MAX_CHANS (1024) times twice the 204-byte
- * minimum charge, which is what leaves a factor of two between this budget and the
- * number of records the ceiling stops at. The charge is a floor, not an estimate --
- * IRC_MAX_TAG_OVERHEAD is frozen at 179 and every record pays it plus its origin,
- * its verb and six parameters -- so a budget of 2 KiB per channel cannot be
- * exhausted by 1024 records on any input, and the case cannot sit on the
- * boundary. The cost of the headroom is memory in the RECEIVER under test: 1024
- * burst_chan_t is about 524 KiB, allocated only by this case. */
+* THE FIGURE IS DERIVED FROM THE TWO BOUNDS rather than picked, so that moving
+* either moves it: 512 bytes per ceiling record -- IRC_BURST_MAX_CHANS times
+* 512 -- which is two-and-a-half times the 204-byte minimum charge. The charge
+* is a floor, not an estimate -- IRC_MAX_TAG_OVERHEAD is frozen at 179 and every
+* record pays it plus its origin, its verb and six parameters -- so 8192 minimal
+* records cannot exhaust this budget on any input the helper sends, and the case
+* cannot sit on the boundary. The cost of the headroom is memory in the RECEIVER
+* under test: 8192 burst_chan_t is about 4 MiB, allocated only by this case. */
 #define BURST_TEST_CEIL_BUDGET (IRC_BURST_MAX_CHANS * 512u)
 static int g_raised_recv;
 
@@ -304,6 +303,20 @@ static int g_hostile;
  * than IRC_BURST_MAX_CHANS. Pre-fork state, like the rest; 0 sends nothing, which
  * is what every other case wants. */
 static size_t g_flood_count;
+/* Records of the current flood already queued, across ticks. The flood goes
+ * out one tick-batch per tick, so the helper resumes where the last tick
+ * stopped; reset with g_flood_count by every case that floods. */
+static size_t g_flood_done;
+/* DRIVE ONE RESYNC OF A BURST THAT DOES NOT FIT ONE FLUSH (#330), for
+ * case_big_burst_resyncs_in_chunks(). Pre-fork state, like the rest; 0 in
+ * every other case, which is what keeps this arm from firing there. */
+static int g_big_resync;
+/* How many channels the #330 case builds: four clients at CONN_MAX_CHANNELS
+ * (128) each, so the burst carries 512 SBURSTC and 512 SBURSTM records -- about
+ * 110 KiB on the wire, past the 64 KiB chunk that forces the sender onto its
+ * multi-flush path, and under the 256 KiB link queue so one flush at a time
+ * always fits. */
+#define BIG_RESYNC_CHANS ((size_t)512u)
 
 /* Defined below, with the wire format written out. Forward-declared rather than
  * moved so the RESYNC DRIVER -- the thing every case in this file is about -- reads
@@ -343,6 +356,20 @@ static void offer_resync(server_t *s)
                                      g_flood_count) > 0u) {
             g_stage = 3;
         }
+        return;
+    }
+    if (g_big_resync != 0 && g_is_b == 0 && g_stage == 0) {
+        /* ONCE, when the parent has built the channels -- and the gate is the
+         * count, so a resync cannot go out with half the roster. Straight to 3
+         * for the flood's reason: one transaction, once, and the stage machine
+         * below is inert at 3 ("node A drives three, and no more"). */
+        if (server_chan_count(s) < BIG_RESYNC_CHANS) {
+            return;
+        }
+        (void)federation_resync(s, server_find_link(s, NAME_B));
+        printf("[fixture] big_resync_sent: chans=%zu\n", server_chan_count(s));
+        fflush(stdout);
+        g_stage = 3;
         return;
     }
     if (g_is_b != 0) {
@@ -871,36 +898,53 @@ static void send_hostile_burst(server_t *s, server_link_t *link)
  * ---------------------------------------------------------------------------
  * The channel count is bounded twice over. The byte budget bounds it ARITHMETICALLY
  * -- every record is charged before it is stored, and at the shipped budget the
- * cheapest possible SBURSTC costs 204 bytes against 131072, so at most 642 fit --
+ * cheapest possible SBURSTC costs 204 bytes against 1048576, so at most 5140 fit --
  * and IRC_BURST_MAX_CHANS bounds it by a number somebody wrote down. Two
  * senders below, one per bound, and the pair is the point: the first proves the
  * arithmetic is what does the work, and the second proves the stated ceiling is
  * real code rather than a comment.
  *
- * `count` records go out, one per tick-batch, each naming a DIFFERENT channel, so
- * the receiver's shadow really does grow by `count` and nothing dedups them. The
- * topic is one byte and the topic_who is one byte, which is what makes the charge
- * the 204 the arithmetic above is built on.
+ * `count` records go out, one tick-batch per tick, each naming a DIFFERENT
+ * channel, so the receiver's shadow really does grow by `count` and nothing
+ * dedups them. The topic is one byte and the topic_who is one byte, which is
+ * what makes the charge the 204 the arithmetic above is built on.
+ *
+ * ONE TICK-BATCH PER TICK, because the floods this helper now sends do not fit
+ * the sender's queue: 6666 minimal records are ~580 KiB on the wire against a
+ * 256 KiB link queue, and queueing them all at once would saturate the link --
+ * which is exactly the verdict the product code stopped returning for large
+ * bursts in #330, so a fixture that saturated its own link would be measuring
+ * the queue rather than either bound. 512 records are ~45 KiB, the loop drains
+ * the queue between ticks, and the receiver sees one transaction in the end.
+ * Progress lives in g_flood_done, which the case resets with g_flood_count.
  */
+#define FLOOD_BATCH ((size_t)512u)
 static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t count)
 {
     conn_t *peer = server_link_conn(s, link);
     char epoch[24];
     char count_s[24];
     char name[CHAN_MAX_NAME + 1];
-    size_t sent = 0u;
+    size_t tranche = 0u;
 
-    /* RETURNS WHAT IT SENT, AND THAT IS THE POINT OF THE RETURN VALUE: the tick
-     * hook that calls this advances its own stage on a non-zero answer, so a tick
-     * that arrives before the link is up -- which is the first tick on this node --
-     * does not consume the one attempt the case has. A fixture that advanced its
-     * stage first and sent second would report "sent 0 of 1024" on the tick before
-     * the handshake and then never try again. */
+    /* RETURNS WHETHER THE WHOLE FLOOD IS OUT, AND THAT IS THE POINT OF THE
+     * RETURN VALUE: the tick hook that calls this advances its own stage on a
+     * non-zero answer, so a tick that arrives before the link is up -- which is
+     * the first tick on this node -- does not consume the one attempt the case
+     * has. A fixture that advanced its stage first and sent second would report
+     * "sent 0 of 6666" on the tick before the handshake and then never try
+     * again. A partial tick returns 0, so the next tick continues where this
+     * one stopped rather than restarting: SBURST goes out once, on the tick
+     * that queues the first records, and SBURSTE goes out once, on the tick
+     * that queues the last ones. */
+    if (g_flood_done >= count) {
+        return 1u;
+    }
     if (peer == NULL) {
         return 0u;
     }
     burst_render_u64(epoch, sizeof epoch, s->epoch);
-    {
+    if (g_flood_done == 0u) {
         const char *n0[2];
 
         n0[0] = epoch;
@@ -910,13 +954,13 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
             return 0u;
         }
     }
-    for (size_t i = 0; i < count; i++) {
+    while (g_flood_done < count && tranche < FLOOD_BATCH) {
         const char *c1[6];
 
         /* A DISTINCT LEGAL NAME PER RECORD, and the width matters as much as the
          * distinctness: chan_name_valid() has to accept it or the record is
          * refused as malformed and the case would be measuring the wrong refusal. */
-        (void)snprintf(name, sizeof name, "#f%05zu", i);
+        (void)snprintf(name, sizeof name, "#f%05zu", g_flood_done);
         c1[0] = name;
         c1[1] = NAME_A;
         c1[2] = "-"; /* no topic setter: the SHORTEST legal form */
@@ -927,9 +971,13 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
                            6, NULL) != 0) {
             break;
         }
-        sent++;
+        g_flood_done++;
+        tranche++;
     }
-    burst_render_u64(count_s, sizeof count_s, (uint64_t)sent);
+    if (g_flood_done < count) {
+        return 0u;
+    }
+    burst_render_u64(count_s, sizeof count_s, (uint64_t)g_flood_done);
     {
         const char *e1[4];
 
@@ -937,12 +985,14 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
         e1[1] = "0";
         e1[2] = count_s;
         e1[3] = "0";
-        (void)fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTE", e1,
-                             4, NULL);
+        if (fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTE", e1,
+                           4, NULL) != 0) {
+            return 0u;
+        }
     }
-    printf("[fixture] flood_sent: sent=%zu of %zu\n", sent, count);
+    printf("[fixture] flood_sent: sent=%zu of %zu\n", g_flood_done, count);
     fflush(stdout);
-    return sent;
+    return 1u;
 }
 
 /* Runs in the CHILD, before anything may connect. */
@@ -2878,19 +2928,19 @@ static void case_identifiers_are_refused_and_the_record_kept(void)
  * case_channel_ceiling_refuses_what_the_budget_would_allow(), and the two are one
  * claim split so that neither can be satisfied by the other.
  *
- * HOW MANY RECORDS IT SENDS, and the arithmetic. The cheapest legal SBURSTC charges
- * IRC_MAX_TAG_OVERHEAD (179, frozen) + a one-byte origin + the seven-byte verb +
- * six one-byte parameters with their six separators + the four wire_size() adds =
- * 204. The shipped budget is IRC_BURST_MAX_BYTES = CONN_WQ_MAX/2 = 131072, so the
- * byte arithmetic stops the count at 131072/204 = 642. The case sends
- * IRC_BURST_MAX_CHANS (1024) records -- comfortably more than the budget can take,
- * and comfortably more than the ceiling -- and asserts the refusal came from the
- * budget with chans= under the ceiling.
- *
- * 1024 records is about 87 KiB on the wire against a 256 KiB link queue, so the
- * transaction fits the sender's queue as well as being over the receiver's budget:
- * a case that saturated the link instead would be refused at the queue and would
- * learn nothing about either bound.
+* HOW MANY RECORDS IT SENDS, and the arithmetic. The cheapest legal SBURSTC charges
+* IRC_MAX_TAG_OVERHEAD (179, frozen) + a one-byte origin + the seven-byte verb +
+* six one-byte parameters with their six separators + the four wire_size() adds =
+* 204. The shipped budget is IRC_BURST_MAX_BYTES = CONN_WQ_MAX*4 = 1048576, so the
+* byte arithmetic stops the count at 1048576/204 = 5140. The case sends the
+* midpoint between that and the ceiling -- (5140 + 8192) / 2 = 6666 records --
+* comfortably more than the budget can take, and comfortably under the ceiling --
+* and asserts the refusal came from the budget with chans= under the ceiling.
+*
+* 6666 records is about 580 KiB on the wire against a 256 KiB link queue, so the
+* flood goes out one tick-batch per tick rather than all at once: a case that
+* saturated the link instead would be refused at the queue and would learn
+* nothing about either bound.
  */
 static void case_channel_count_bound(void)
 {
@@ -2908,7 +2958,8 @@ static void case_channel_count_bound(void)
     g_raised_recv = 0;
     g_open_burst = 0;
     g_overlong = 0;
-    g_flood_count = IRC_BURST_MAX_CHANS;
+    g_flood_count = (IRC_BURST_MAX_BYTES / 204u + IRC_BURST_MAX_CHANS) / 2u;
+    g_flood_done = 0u;
     TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
                  "could not spawn node A");
     g_peer_port = a.port;
@@ -2919,7 +2970,7 @@ static void case_channel_count_bound(void)
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
                  "node B never applied the empty establishment transaction: %s",
                  b.out);
-    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=1024 of 1024", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=6666 of 6666", T_IO_MS) == 0,
                  "node A did not queue the whole flood, so the receiver was not given "
                  "the chance to run out of budget and the assertion below is not "
                  "about a transaction that stopped early: %s",
@@ -2944,9 +2995,9 @@ static void case_channel_count_bound(void)
                  b.out);
 
     /* AND THE COUNT STOPPED SHORT OF THE CEILING, with the two figures adjacent so
-     * the relationship is legible in the log rather than computed by the reader. The
-     * budget allows 642 and the ceiling is 1024, so a count at or above the ceiling
-     * would mean the two bounds had traded places. */
+    * the relationship is legible in the log rather than computed by the reader. The
+    * budget allows 5140 and the ceiling is 8192, so a count at or above the ceiling
+    * would mean the two bounds had traded places. */
     TF_CHECK_MSG(nf_find_u64(&b, "chans=", &chans) == 0,
                  "node B never reported how many channel records it had staged, so "
                  "the count cannot be placed against the ceiling: %s",
@@ -2959,9 +3010,9 @@ static void case_channel_count_bound(void)
                  (unsigned long long)chans,
                  (unsigned long long)IRC_BURST_MAX_CHANS, b.out);
     /* AND THE BUDGET IS THE ONE THAT BOUNDED IT, restated as arithmetic so the case
-     * says what it measured rather than only that it refused: the budget is what the
-     * records were charged against, so the count cannot exceed it by more than one
-     * record's charge. 131072/204 is 642, and the margin is two whole records. */
+    * says what it measured rather than only that it refused: the budget is what the
+    * records were charged against, so the count cannot exceed it by more than one
+    * record's charge. 1048576/204 is 5140, and the margin is two whole records. */
     TF_CHECK_MSG(chans <= (uint64_t)(IRC_BURST_MAX_BYTES / 204u) + 2u,
                  "node B staged %llu channel records, which is more than the %llu the "
                  "shipped byte budget can pay for at the 204-byte minimum charge -- so "
@@ -2999,6 +3050,7 @@ static void case_channel_count_bound(void)
     nf_free(&a);
     nf_free(&b);
     g_flood_count = 0u;
+    g_flood_done = 0u;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3007,16 +3059,16 @@ static void case_channel_count_bound(void)
  * The other half of the pair, and the one with the negative in it. IRC_BURST_MAX_CHANS
  * is unreachable at the shipped budget -- case_channel_count_bound() is what proves
  * that -- and a bound nobody has ever seen refuse anything is a comment with a cost.
- * So this case removes the budget that would otherwise get there first: the
- * receiver's byte budget is raised to twice what 1024 records charge, the ceiling
- * is the only bound left, and the transaction is refused by it.
- *
- * DELETE `IRC_BURST_MAX_CHANS` FROM burst.c AND THIS CASE GOES RED: with no ceiling
- * the 1024 records all fit the raised budget, the transaction commits, and
- * `reason=TOO_MANY_CHANS` is never printed. Nothing else in the suite notices,
- * because nothing else ever sends a thousand channel records -- which is precisely
- * the class of defect that survives to a release, and why this case exists as a
- * separate one rather than as an assertion inside the previous case.
+* So this case removes the budget that would otherwise get there first: the
+* receiver's byte budget is raised to twice what 8192 records charge, the ceiling
+* is the only bound left, and the transaction is refused by it.
+*
+* DELETE `IRC_BURST_MAX_CHANS` FROM burst.c AND THIS CASE GOES RED: with no ceiling
+* the 8192 records all fit the raised budget, the transaction commits, and
+* `reason=TOO_MANY_CHANS` is never printed. Nothing else in the suite notices,
+* because nothing else ever sends eight thousand channel records -- which is precisely
+* the class of defect that survives to a release, and why this case exists as a
+* separate one rather than as an assertion inside the previous case.
  */
 static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
 {
@@ -3033,6 +3085,7 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     g_open_burst = 0;
     g_overlong = 0;
     g_flood_count = IRC_BURST_MAX_CHANS + 1u;
+    g_flood_done = 0u;
     TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
                  "could not spawn node A");
     g_peer_port = a.port;
@@ -3043,17 +3096,17 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
                  "node B never applied the empty establishment transaction: %s",
                  b.out);
-    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=1025 of 1025", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=8193 of 8193", T_IO_MS) == 0,
                  "node A did not queue one record more than the ceiling allows, so "
                  "the ceiling was never approached: %s",
                  a.out);
 
-    /* THE CEILING REFUSED IT. The budget could not have: 1025 records at the
-     * 204-byte minimum charge is 209100 bytes, and BURST_TEST_CEIL_BUDGET is
-     * IRC_BURST_MAX_CHANS * 512 = 524288 -- a factor of 2.5 of headroom, so this
-     * case cannot sit on the boundary between the two bounds. */
+    /* THE CEILING REFUSED IT. The budget could not have: 8193 records at the
+    * 204-byte minimum charge is 1671372 bytes, and BURST_TEST_CEIL_BUDGET is
+    * IRC_BURST_MAX_CHANS * 512 = 4194304 -- a factor of 2.5 of headroom, so this
+    * case cannot sit on the boundary between the two bounds. */
     TF_CHECK_MSG(nf_expect(&b, "reason=TOO_MANY_CHANS", T_IO_MS) == 0,
-                 "node B did not refuse a thousand and twenty-five channel records on "
+                 "node B did not refuse eight thousand one hundred ninety-three channel records on "
                  "IRC_BURST_MAX_CHANS with its byte budget raised out of the way, so "
                  "the ceiling is a comment rather than a bound: %s",
                  b.out);
@@ -3067,7 +3120,7 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     /* AND IT STOPPED AT THE CEILING, not before it. A ceiling that fired early
      * would pass every assertion above and still be wrong, because its job is to be
      * the LAST line rather than the only one. */
-    TF_CHECK_MSG(nf_expect(&b, "chans=1024", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&b, "chans=8192", T_IO_MS) == 0,
                  "node B did not stage exactly IRC_BURST_MAX_CHANS channel records "
                  "before refusing, so it stopped for some other reason than the "
                  "ceiling's count: %s",
@@ -3093,7 +3146,146 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     nf_free(&a);
     nf_free(&b);
     g_flood_count = 0u;
+    g_flood_done = 0u;
     g_raised_recv = 0;
+}
+/* ---------------------------------------------------------------------------
+ * #330: A BURST PAST ONE FLUSH STILL RESYNCS
+ * ---------------------------------------------------------------------------
+ * The resync budget used to cap the whole burst below half a peer queue
+ * (128 KiB): every federation_resync() past ~280 nicks was refused TOO_LARGE,
+ * nothing queued, and the mesh never converged after a flap. The budget is now
+ * four queues, and the sender flushes in quarter-queue chunks with a pump
+ * between them -- so this case builds a burst that does not fit one flush and
+ * asserts the far side applies it whole.
+ *
+ * 512 channels from four clients at CONN_MAX_CHANNELS (128) each: no client can
+ * hold more, and one client's 128 would sit under the chunk. The burst carries
+ * 4 nicks, 512 channels and 512 members -- about 110 KiB on the wire -- past
+ * the 64 KiB chunk and under the 256 KiB queue, so the old code refused it at
+ * staging (TOO_LARGE) and a chunking bug shows up as a saturation (the link
+ * drops) or a partial transaction (the receiver abandons it).
+ *
+ * THE BYTES NEEDLE is what says the burst went out in pieces rather than all
+ * at once: nothing this size fits a single 64 KiB flush, so a fed_burst_sent
+ * over 65536 bytes is a burst the chunk path carried. The counts needle says
+ * it arrived whole: one transaction, nicks=4 chans=512 members=512, applied
+ * once -- a second transaction would be a second fed_burst_applied, and a
+ * partial one would be a fed_burst_abandon instead.
+ */
+static void case_big_burst_resyncs_in_chunks(void)
+{
+    nf_node_t a;
+    nf_node_t b;
+    test_client_t c0;
+    test_client_t c1;
+    test_client_t c2;
+    test_client_t c3;
+    test_client_t *members[4] = { &c0, &c1, &c2, &c3 };
+    /* Four DISTINCT nicknames on A; the channels are split across them at 128
+     * each so no client trips CONN_MAX_CHANNELS. */
+    static const char *const nicks[4] = { "biga", "bigb", "bigc", "bigd" };
+    char cmd[64];
+
+    g_peer_port = 0;
+    g_trace = 0;
+    g_is_b = 0;
+    g_stage = 0;
+    g_tiny_send = 0;
+    g_tiny_recv = 0;
+    g_raised_recv = 0;
+    g_open_burst = 0;
+    g_overlong = 0;
+    g_truncate = 0;
+    g_hostile = 0;
+    g_flood_count = 0u;
+    g_flood_done = 0u;
+    g_big_resync = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node A");
+    TF_CHECK_MSG(a.port > 0, "node A reported no port");
+    g_peer_port = a.port;
+    g_is_b = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
+                 "could not spawn node B");
+
+    TF_CHECK_MSG(nf_expect(&b, "link_dial: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never dialled its configured peer");
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never established its link to node B");
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never established its link to node A");
+
+    /* THE CONTROL: the empty establishment bursts go out and are applied, so a
+     * missing resync below is about its size and not about a peer path that
+     * never worked. */
+    TF_CHECK_MSG(nf_expect(&a, "fed_burst_sent: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never burst on establishment: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never applied the establishment burst: %s", b.out);
+
+    /* Four clients, 128 channels each, each client creating its own: the first
+     * JOIN creates and the creator is its operator, so every channel has
+     * exactly one member and the burst carries 512 of each record. No per-JOIN
+     * wait -- the PING afterwards is ordered behind all of them, so its PONG
+     * proves every JOIN was processed. */
+    for (size_t c = 0; c < 4u; c++) {
+        register_client(members[c], a.port, nicks[c]);
+    }
+    for (size_t i = 0; i < (size_t)BIG_RESYNC_CHANS; i++) {
+        (void)snprintf(cmd, sizeof cmd, "JOIN #b%04zu", i);
+        TF_CHECK_MSG(tc_send(members[i / 128u], cmd) == 0,
+                     "JOIN %s send failed", cmd);
+    }
+    TF_CHECK_MSG(tc_send(&c0, "PING :joined") == 0, "drain PING send failed");
+    TF_CHECK_MSG(tc_expect(&c0, "PONG", T_IO_MS) == 0,
+                 "no PONG after 512 JOINs, so the resync below may not see all "
+                 "512 channels: %s",
+                 a.out);
+
+    /* THE RESYNC: the tick hook fires it once A holds all 512 channels, and it
+     * is one transaction of 4 nicks, 512 channels and 512 members. */
+    TF_CHECK_MSG(nf_expect(&a, "big_resync_sent: chans=512", T_IO_MS) == 0,
+                 "node A never drove the post-JOIN resync: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&a, "nicks=4 chans=512 members=512", T_IO_MS) == 0,
+                 "node A never sent the whole 512-channel transaction: %s",
+                 a.out);
+    /* AND IT WENT OUT IN PIECES: 65536 is the chunk, so a transaction this
+    * size fits no single flush -- the old code refused it at staging, and a
+    * chunking that queued it all at once would have saturated the link. The
+    * leading space keeps "bytes=" from matching the "bad_bytes=" tail of
+    * unrelated observables, whose trailing zero would otherwise be read as
+    * the latest value. */
+    TF_CHECK_MSG(nf_expect_u64_ge(&a, " bytes=", (uint64_t)65536u, T_IO_MS) == 0,
+                 "node A's resync was not bigger than one flush, so the case "
+                 "did not exercise the chunk path: %s",
+                 a.out);
+    /* AND IT ARRIVED WHOLE: one more fed_burst_applied on B than the
+     * establishment one, carrying every nick, channel and member. */
+    TF_CHECK_MSG(nf_expect(&b, "nicks=4 chans=512 members=512", T_IO_MS) == 0,
+                 "node B never applied the whole 512-channel transaction: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_nth(&b, "fed_burst_applied:", 2u, T_IO_MS) == 0,
+                 "node B did not apply exactly the establishment burst plus the "
+                 "resync: %s",
+                 b.out);
+    TF_CHECK_MSG(strstr(b.out, "fed_burst_abandon") == NULL,
+                 "node B abandoned a transaction, so the resync arrived partial "
+                 "and the receiver threw it away: %s",
+                 b.out);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_close: shadow=NONE", 1000) == 0,
+                 "node B reported an open shadow at shutdown: %s", b.out);
+
+    tc_close(&c0);
+    tc_close(&c1);
+    tc_close(&c2);
+    tc_close(&c3);
+    nf_free(&a);
+    nf_free(&b);
+    g_big_resync = 0;
 }
 
 int main(void)
@@ -3107,6 +3299,7 @@ int main(void)
     case_identifiers_are_refused_and_the_record_kept();
     case_channel_count_bound();
     case_channel_ceiling_refuses_what_the_budget_would_allow();
+    case_big_burst_resyncs_in_chunks();
     tf_done("fed_burst");
     return 0;
 }

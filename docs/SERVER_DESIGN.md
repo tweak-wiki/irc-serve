@@ -1399,8 +1399,10 @@ per-line check would be a formality (`SBURSTM`, at 510 after the `<server>` and
 3.4 **drops** a saturated peer link rather than buffering it, and a burst is
 O(nicks + members), so a large node's burst can be megabytes and queueing it all
 would starve every live message behind it. A burst is therefore assembled into a
-staging buffer of `IRC_BURST_MAX_BYTES` = `CONN_WQ_MAX / 2` — half a link's
-queue, so a resync can never crowd out a live message — and a burst that does not
+staging buffer of `IRC_BURST_MAX_BYTES` = `CONN_WQ_MAX * 4` -- four links' queues
+of heap, which fits 800 worst-case nicks with room for their channels (#330) --
+and flushed in quarter-queue chunks with a pump between them, so a resync can
+never crowd out a live message on the wire -- and a burst that does not
 fit is **refused in full** with one `n_burst_refused`: nothing queued, the link
 untouched, no truncation. The receiver charges every record against the same
 bound, because the shadow is memory made out of what a peer *said*.
@@ -1448,11 +1450,11 @@ whose presentation this node declined to store.
 
 **The channel count is bounded twice, and only one of the two is the budget.** The
 byte budget does bound it — at the shipped `IRC_BURST_MAX_BYTES` the cheapest
-legal `SBURSTC` charges 204 bytes, so at most 642 channel records fit — but that is
+legal `SBURSTC` charges 204 bytes, so at most 5140 channel records fit — but that is
 arithmetic about a charge calculation in another function, not a number the code
 states, and it holds only while `IRC_MAX_TAG_OVERHEAD` stays frozen, `wire_size()`
 keeps adding it unconditionally, and `shadow_charge()` keeps running before each
-record. `IRC_BURST_MAX_CHANS` (1024, 1.59× the 642) is the bound the code states,
+record. `IRC_BURST_MAX_CHANS` (8192, 1.59× the 5140) is the bound the code states,
 and it is defence in depth rather than the bound: at the shipped budget it cannot
 bind, and when it does — a raised budget, a narrower charge, a moved charge — it
 refuses through the same abandon path every other refusal uses, because a

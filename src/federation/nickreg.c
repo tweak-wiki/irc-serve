@@ -11,8 +11,8 @@
  * This one is not that. The bound is IRC_FED_MAX_REMOTE_NICKS, which is 256, and
  * a linear scan of 256 POD entries on a path that runs at most once per inbound
  * burst record is a few hundred comparisons -- and a burst is a transaction that
- * is already O(nicks + members) with a staging buffer the size of half a link's
- * write queue. A hash table here would be a second table, a probe function, a
+ * is already O(nicks + members) with a staging buffer the size of four links'
+ * write queues. A hash table here would be a second table, a probe function, a
  * growth policy and a second teardown arm, all to turn a comparison that happens
  * inside an O(n) transaction into a comparison that happens once.
  *
