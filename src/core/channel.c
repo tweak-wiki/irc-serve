@@ -627,13 +627,12 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
      * corruption. Refusing an empty one would mean a live SJOIN could not record
      * a member at all.
      *
-     * THE VALIDATION ALSO BOUNDS THE LENGTH, which is why the copy further down
+     * THE VALIDATION ALSO BOUNDS THE LENGTH, which is why the copies further down
      * cannot fail: irc_serve_server_name_valid() refuses a name longer than
      * IRC_MAX_SERVER_NAME, and CHAN_MAX_SERVER is that same bound, so a name
-     * that passed is a name that fits. The copy's result is still checked for the
-     * KEY, which is what the existing code did, and deliberately not for the
-     * holder -- a refusal there would drop a whole member over a field the
-     * member itself is fine without. */
+     * that passed is a name that fits. Every copy's result is checked anyway --
+     * a refusal returns -1 rather than keeping a truncated field the sender
+     * will never be asked about again. */
     if (!irc_serve_server_name_valid(server) || !valid_nick(nick)) {
         return -1;
     }
@@ -653,19 +652,27 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
          * and must not silently clear what a burst established -- a stale holder
          * is a fact this node can still act on, a cleared one is not. */
         seen->flags = flags;
+        /* The copies are checked: a refusal returns -1 rather than keeping a
+         * truncated prefix the peer will never be asked about again.
+         * Unreachable through the validation above, which bounds both values
+         * to their fields. */
         if (member_server != NULL && member_server[0] != '\0') {
-            (void)copy_bounded(seen->member_server, sizeof seen->member_server,
-                               member_server);
+            if (!copy_bounded(seen->member_server, sizeof seen->member_server,
+                              member_server)) {
+                return -1;
+            }
         }
-        /* THE ACCOUNT IS OVERWRITTEN ON A REPEAT WHEN IT IS GIVEN, and NOT
+        /* THE ACCOUNT IS OVERWRITTEN ON A REPEAT WHEN IT IS GIVEN, AND NOT
          * CLEARED when it is not, which is `member_server`'s rule rather than
          * `host`'s. A peer's re-assertion is allowed to correct a stale account --
          * a user who changed accounts is now a fact this node should hold -- while
          * a peer that says nothing must not clear what a burst established, since a
          * cleared account is a member this node can no longer describe. */
         if (account != NULL && account[0] != '\0') {
-            (void)copy_bounded(seen->account, sizeof seen->account,
-                               (account[0] == '*') ? "" : account);
+            if (!copy_bounded(seen->account, sizeof seen->account,
+                              (account[0] == '*') ? "" : account)) {
+                return -1;
+            }
         }
         return 0;
     }
@@ -705,14 +712,21 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
      * Phase 10.3 and a recycled element inheriting the previous member's account
      * would be that same impersonation with a third field. */
     ch->remotes[ch->nremotes].account[0] = '\0';
+    /* Checked like the key above: a refusal returns -1 rather than keeping a
+     * truncated prefix, which is unreachable through the validation at the
+     * top of this function. */
     if (account != NULL && account[0] != '\0') {
-        (void)copy_bounded(ch->remotes[ch->nremotes].account,
+        if (!copy_bounded(ch->remotes[ch->nremotes].account,
                            sizeof ch->remotes[0].account,
-                           (account[0] == '*') ? "" : account);
+                           (account[0] == '*') ? "" : account)) {
+            return -1;
+        }
     }
     if (member_server != NULL) {
-        (void)copy_bounded(ch->remotes[ch->nremotes].member_server,
-                           sizeof ch->remotes[0].member_server, member_server);
+        if (!copy_bounded(ch->remotes[ch->nremotes].member_server,
+                           sizeof ch->remotes[0].member_server, member_server)) {
+            return -1;
+        }
     }
     ch->remotes[ch->nremotes].flags = flags;
     ch->nremotes++;
