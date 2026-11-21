@@ -917,8 +917,16 @@ static void send_hostile_burst(server_t *s, server_link_t *link)
  * the queue rather than either bound. 512 records are ~45 KiB, the loop drains
  * the queue between ticks, and the receiver sees one transaction in the end.
  * Progress lives in g_flood_done, which the case resets with g_flood_count.
+ *
+ * AND A LONGER NEEDLE FOR THE REFUSAL, because the receiver ingests on the
+ * order of sixty lines per tick: 8193 records need ~140 receive-ticks, and at
+ * a slow tick -- an instrumented binary on a loaded runner -- that is past
+ * the 15 s T_IO_MS every other needle uses. 120 s is ~8x the measured need,
+ * and it applies to the refusal waits only: the flood going out is the
+ * sender's steady pace and stays on T_IO_MS.
  */
 #define FLOOD_BATCH ((size_t)512u)
+#define FLOOD_IO_MS 120000
 static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t count)
 {
     conn_t *peer = server_link_conn(s, link);
@@ -2981,7 +2989,7 @@ static void case_channel_count_bound(void)
      * ceiling got there first, which is the whole thing being ruled out. */
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_abandon: origin=" NAME_A
                                    " reason=TOO_LARGE",
-                           T_IO_MS) == 0,
+                           FLOOD_IO_MS) == 0,
                  "node B did not refuse the flood on its byte budget, so the bound on "
                  "the channel count is not the byte arithmetic the header claims it "
                  "is: %s",
@@ -3105,7 +3113,7 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     * 204-byte minimum charge is 1671372 bytes, and BURST_TEST_CEIL_BUDGET is
     * IRC_BURST_MAX_CHANS * 512 = 4194304 -- a factor of 2.5 of headroom, so this
     * case cannot sit on the boundary between the two bounds. */
-    TF_CHECK_MSG(nf_expect(&b, "reason=TOO_MANY_CHANS", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&b, "reason=TOO_MANY_CHANS", FLOOD_IO_MS) == 0,
                  "node B did not refuse eight thousand one hundred ninety-three channel records on "
                  "IRC_BURST_MAX_CHANS with its byte budget raised out of the way, so "
                  "the ceiling is a comment rather than a bound: %s",
