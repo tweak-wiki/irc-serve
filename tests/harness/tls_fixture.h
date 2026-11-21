@@ -209,6 +209,10 @@ int tf_tls_connect_plain(tf_tls_t *t, int port);
 /* Send `line` with CRLF. Returns 0 on success, -1 on failure. */
 int tf_tls_send(tf_tls_t *t, const char *line);
 
+/* Send exactly `n` bytes with no CRLF and no line-length cap. Returns 0 on
+ * success, -1 on failure. */
+int tf_tls_send_raw(tf_tls_t *t, const void *buf, size_t n);
+
 /* Wait until `needle` appears in the accumulated PLAINTEXT, or the deadline
  * passes. Returns 0 on success, -1 on timeout.
  *

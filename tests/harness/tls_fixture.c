@@ -1044,6 +1044,35 @@ int tf_tls_send(tf_tls_t *t, const char *line)
     return 0;
 }
 
+/* Send exactly `n` bytes with no CRLF and no line-length cap, for inputs that
+ * are deliberately NOT lines: an over-long fragment must reach the node as one
+ * flight, and tf_tls_send() would frame it into lines (or refuse it) rather
+ * than deliver it. Same write loop as tf_tls_send(), minus the snprintf. */
+int tf_tls_send_raw(tf_tls_t *t, const void *buf, size_t n)
+{
+    size_t sent = 0;
+
+    if (t == NULL || (buf == NULL && n != 0u)) {
+        return -1;
+    }
+    while (sent < n) {
+        int w;
+
+        if (t->ssl != NULL) {
+            w = SSL_write((SSL *)t->ssl, (const char *)buf + sent, (int)(n - sent));
+        } else {
+            w = (int)send(t->fd, (const char *)buf + sent, n - sent,
+                          MSG_NOSIGNAL);
+        }
+        if (w > 0) {
+            sent += (size_t)w;
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 static uint64_t tf_now_ms(void)
 {
     struct timespec ts;
