@@ -1291,11 +1291,11 @@ int chan_dispose_if_empty(server_t *s, chan_t *ch)
     /* The TOPIC goes out to the cache on the way down, and this is the only
      * place it happens, which is what makes the cache's lifetime equal to the
      * channel's: there is no other teardown path for a chan_t, so there is no
-     * other place a topic could be dropped. A loss here -- a full cache -- leaves
-     * the topic lost exactly as it would have been without the cache, and is
-     * counted on s->n_topic_cache_full; the return value is deliberately not
-     * examined, because refusing to dispose a channel over a cache miss would
-     * trade a lost topic for an unbounded store. */
+     * other place a topic could be dropped. A full cache evicts its oldest
+     * entry to make room -- counted on s->n_topic_cache_full -- so the topic
+     * is always remembered; the return value is deliberately not examined,
+     * because refusing to dispose a channel over a cache miss would trade a
+     * lost topic for an unbounded store. */
     (void)server_topic_remember(s, ch);
     server_chan_detach(s, ch->name);
     chan_free(ch);
@@ -1369,28 +1369,36 @@ int server_topic_remember(server_t *s, const chan_t *ch)
         return 0;
     }
     if (e != NULL) {
-        /* Already known: overwrite in place. The three fields move together, so
-         * an entry is never half old and half new -- the same "every field
-         * changes or none does" rule chan_set_topic() applies to a channel. */
-        (void)copy_bounded(e->topic, sizeof e->topic, ch->topic);
-        (void)copy_bounded(e->who, sizeof e->who, ch->topic_who);
-        e->when = ch->topic_when;
+        /* Already known: rewrite and mark most-recently-used, so a channel
+         * whose topic is re-set keeps its entry. The slot is freed and
+         * re-appended because that is the same two operations the paths below
+         * already use; the append cannot fail here, a slot was just freed. */
+        size_t idx = (size_t)(e - s->topics);
+        chan_topic_t fresh = *e;
+
+        (void)copy_bounded(fresh.topic, sizeof fresh.topic, ch->topic);
+        (void)copy_bounded(fresh.who, sizeof fresh.who, ch->topic_who);
+        fresh.when = ch->topic_when;
+        topic_remove_at(s, idx);
+        s->topics[s->ntopics] = fresh;
+        s->ntopics++;
         printf("[observable] topic_persist: channel=%s state=remembered "
                "topic_len=%zu entries=%zu updated=1\n",
                ch->name, strlen(ch->topic), s->ntopics);
         return 1;
     }
     if (s->ntopics >= (size_t)SERVER_TOPIC_MAX) {
-        /* The bound, and the loss is COUNTED rather than hidden. A node whose
-         * counter climbs is a node that has seen more distinct channel names
-         * than it can remember topics for, and that is the number an operator
-         * needs; the topic is then lost exactly as it would have been without
-         * this cache. */
+        /* The bound, and the oldest entry is EVICTED rather than the new topic
+         * refused: the cache holds the most-recently-used names, and a node
+         * cycling through more distinct channels than it can remember for loses
+         * the stalest topic, not the newest. s->n_topic_cache_full counts the
+         * evictions, which is the number an operator needs, and the freed slot
+         * is what the append below fills, so no allocation happens here. */
+        printf("[observable] topic_persist: channel=%s state=evicted "
+               "reason=CACHE_FULL entries=%zu evicted=%s\n",
+               ch->name, s->ntopics, s->topics[0].name);
+        topic_remove_at(s, 0);
         s->n_topic_cache_full++;
-        printf("[observable] topic_persist: channel=%s state=REFUSED "
-               "reason=CACHE_FULL entries=%zu\n",
-               ch->name, s->ntopics);
-        return -1;
     }
     /* Geometric growth, doubling from the first entry, so a node that remembers
      * 64 topics has done six reallocs rather than 64. The bound above is what
