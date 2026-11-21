@@ -45,7 +45,18 @@
 
 ## 5. Spec and rollout
 
-- [ ] 5.1 Update `openspec/config.yaml` context (`no threads` → loop-single-
+- [x] 5.1 Update `openspec/config.yaml` context (`no threads` → loop-single-
   writer + writers-only); verify `openspec validate --specs` green.
 - [ ] 5.2 Document `--writers` in README/DEVELOPMENT (`--help`, default,
   tuning); verify docs-truth check passes.
+
+## 6. Cache scheduling (new 2026-11-21, from `openspec/specs/threading/spec.md`)
+
+- [ ] 6.1 Sticky + rebalance (#366): `fd mod N` ownership; idle writer steals
+  whole conns past the backlog bound; verify no ping-pong + FIFO holds.
+- [ ] 6.2 Targeted wakeup (#367): per-writer signal + private runqueue;
+  verify one wake per queued conn per drain turn via wake counters.
+- [ ] 6.3 Handoff layout (#368): group lock/atomics/queue-head on own cache
+  lines; verify by struct inspection (`pahole`).
+- [ ] 6.4 Drain slice (#369): bounded slice per conn per turn; verify thin
+  conn reply latency behind a fat backlog.
