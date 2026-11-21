@@ -61,7 +61,7 @@ int main(void)
     server_link_t *lx;
 
     assert(server_init(&s, "irc.a") == 0);
-    assert(fed_open(&s, "secret-value-1") == 0);
+    assert(fed_open(&s, "secret-value-100") == 0);
     lx = configure_loopback(&s, "irc.x");
     assert(lx != NULL);
 
