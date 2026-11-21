@@ -360,6 +360,33 @@ int main(void)
                  "the enumeration did not come back to two after the departed "
                  "connection's name was claimed by somebody else");
 
+    /* --- #217: a pathological glob answers 315 alone, with no 352 sweep --- */
+    from = drain(&held);
+    TF_CHECK_MSG(tc_send(&held, "WHO *a*a*a*a*") == 0, "WHO glob send failed");
+    TF_CHECK_MSG(tc_expect(&held, ":" BIN_NAME " 315 " NICK_HELD
+                                " *a*a*a*a* :End of WHO list\r\n",
+                           T_IO_MS) == 0,
+                 "a WHO mask with more than two wildcards was not cut off "
+                 "with 315 alone");
+    end = drain(&held);
+    TF_CHECK_MSG(count_352(&held, from, end) == 0,
+                 "a capped WHO glob produced %zu 352 lines, expected none",
+                 count_352(&held, from, end));
+    /* A wildcard mask longer than 32 bytes is capped the same way. */
+    from = drain(&held);
+    TF_CHECK_MSG(tc_send(&held, "WHO aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa*") == 0,
+                 "WHO long-mask send failed");
+    TF_CHECK_MSG(tc_expect(&held, ":" BIN_NAME " 315 " NICK_HELD
+                                " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa* "
+                                ":End of WHO list\r\n",
+                           T_IO_MS) == 0,
+                 "a WHO mask longer than 32 bytes was not cut off with 315 "
+                 "alone");
+    end = drain(&held);
+    TF_CHECK_MSG(count_352(&held, from, end) == 0,
+                 "a capped long WHO mask produced %zu 352 lines, expected none",
+                 count_352(&held, from, end));
+
     /* --- the shape of the fix, asserted by inspection --- */
     {
         size_t len = 0;
