@@ -409,7 +409,7 @@ int fanout_deliver_local_forms(server_t *s, const fanout_target_t *t,
  *
  * THE SIGNATURE, and why `dst` is the only destination-side datum: a gate is
  * asked once per destination from inside the walk, so a predicate taking only the
- * destination can be an ordinary function -- `cap_away_notify_enabled` has exactly
+ * destination can be an ordinary function -- `cap_gate_away_notify` has exactly
  * this shape and is handed over with no glue at all. Everything about the
  * EMISSION that the audience depends on arrives through `ctx`, because the
  * alternative would be a per-emission closure and C has no room for one here.
