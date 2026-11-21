@@ -1364,30 +1364,6 @@ static struct fed_advert *advert_table(server_t *s)
     return s->advs;
 }
 
-/* A bounded copy that reports whether it fitted, for the reason resume.c's is the
- * same: a name or a host stored truncated is a name or a host that matches
- * nothing, and a store full of near-misses is worse than an empty one because it
- * looks populated. */
-static int advert_copy(char *dst, size_t cap, const char *src)
-{
-    size_t n;
-
-    if (dst == NULL || cap == 0u) {
-        return 0;
-    }
-    if (src == NULL) {
-        dst[0] = '\0';
-        return 1;
-    }
-    n = strlen(src);
-    if (n >= cap) {
-        dst[0] = '\0';
-        return 0;
-    }
-    memcpy(dst, src, n + 1u);
-    return 1;
-}
-
 /* The advertised fields of one peer, FOR A LOG OR A COUNTER. This is the whole
  * read surface of the store, and its return type is the enforcement of the SSRF
  * property as much as the comment is: it hands out two bounded strings and two
@@ -1465,7 +1441,7 @@ static void fed_in_advertise(server_t *s, server_link_t *link, const char *prefi
                link->name);
         return;
     }
-    (void)advert_copy(loadbuf, sizeof loadbuf, params[0]);
+    (void)bounded_copy(loadbuf, sizeof loadbuf, params[0]);
     /* A STRICT PARSE, and the reason is the same one 4.3's terminator counts
      * have: a field that "looks like" a number and is not would be stored as
      * whatever the parser salvaged, and a load of 50 from "50abc" is a number
@@ -1590,9 +1566,9 @@ static void fed_in_advertise(server_t *s, server_link_t *link, const char *prefi
     } else {
         memset(slot, 0, sizeof *slot);
     }
-    (void)advert_copy(slot->peer, sizeof slot->peer, link->name);
-    (void)advert_copy(slot->name, sizeof slot->name, hinted ? params[1] : "");
-    (void)advert_copy(slot->host, sizeof slot->host, hinted ? params[2] : "");
+    (void)bounded_copy(slot->peer, sizeof slot->peer, link->name);
+    (void)bounded_copy(slot->name, sizeof slot->name, hinted ? params[1] : "");
+    (void)bounded_copy(slot->host, sizeof slot->host, hinted ? params[2] : "");
     if (hinted != 0) {
         unsigned long port = 0u;
 
@@ -1686,10 +1662,10 @@ const char *fed_advertised(const server_t *s, const char *peer, char *name,
             continue;
         }
         if (name != NULL) {
-            (void)advert_copy(name, name_cap, s->advs[i].name);
+            (void)bounded_copy(name, name_cap, s->advs[i].name);
         }
         if (host != NULL) {
-            (void)advert_copy(host, host_cap, s->advs[i].host);
+            (void)bounded_copy(host, host_cap, s->advs[i].host);
         }
         if (port_out != NULL) {
             *port_out = s->advs[i].port;
