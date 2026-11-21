@@ -2071,8 +2071,39 @@ static void test_remote_server_cache(nf_node_t *node)
     tc_close(&c.c);
 }
 
+/* Issue #213: servers[] is filled from peer reports, so it is capped at
+ * CHAN_MAX_MEMBER_SERVERS the way the remote roster is capped -- a peer
+ * reporting new server names must not grow it without bound. In-process: no
+ * node is needed to prove the bound holds. */
+static void test_server_list_cap(void)
+{
+    chan_t *ch = chan_new("#captest", "irc.fixture", 1u);
+    char name[CHAN_MAX_SERVER + 1];
+    size_t i;
+
+    TF_CHECK_MSG(ch != NULL, "chan_new failed for the cap probe");
+    for (i = 0; i < (size_t)CHAN_MAX_MEMBER_SERVERS; i++) {
+        (void)snprintf(name, sizeof name, "srv%zu", i);
+        TF_CHECK_MSG(chan_server_add(ch, name) == 0,
+                     "servers[] refused entry %zu of %d", i,
+                     CHAN_MAX_MEMBER_SERVERS);
+    }
+    TF_CHECK_MSG(chan_server_add(ch, "one-too-many") == -1,
+                 "servers[] grew past CHAN_MAX_MEMBER_SERVERS (%d)",
+                 CHAN_MAX_MEMBER_SERVERS);
+    TF_CHECK_MSG(ch->nservers == (size_t)CHAN_MAX_MEMBER_SERVERS,
+                 "servers[] holds %zu entries after a refused add, not %d",
+                 ch->nservers, CHAN_MAX_MEMBER_SERVERS);
+    TF_CHECK_MSG(chan_server_add(ch, "srv0") == 0,
+                 "a full servers[] stopped being idempotent for a known name");
+    chan_free(ch);
+}
+
 int main(void)
 {
+    /* In-process bound check first: needs no node, and a red here means the
+     * cap below never held rather than that the wire hid it. */
+    test_server_list_cap();
     nf_node_t node;
 
     /* ------------------------------------------------------------------ */
