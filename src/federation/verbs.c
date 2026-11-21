@@ -1155,13 +1155,19 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
      * account -- and the same direction 4.3.1 chose for `<server>`, which was added
      * before a second implementation existed rather than after. */
     if (nparams != 4 || fed_parse_flags(params[2], &flags) != 0 ||
-        /* link->name TWICE, and that is the whole of what an SJOIN can say about a
-         * member's HOLDER: 4.3's SJOIN carries no server field, so the member's
-         * holder is inferred from the link the record arrived on -- exact on a
-         * two-node mesh and a relaying peer's best guess on a larger one, which is
-         * why the BURST format grew a <server> field and this one has not. See
-         * channel.h's chan_remote_t for the two-server split. */
-        chan_remote_add(ch, link->name, link->name, params[1], params[3], flags) != 0) {
+        /* NULL for the HOLDER, and that absence is the whole of what an SJOIN can
+         * say about one: 4.3's SJOIN carries no server field, so the holder is
+         * unknown and is recorded as such ("not told", which chan_remote_add()
+         * stores as empty). Writing the link's name here would file a guess as a
+         * fact: exact on a two-node mesh, a relay's name on a larger one, and a
+         * fact the next burst from whoever holds the member then has to
+         * overwrite. The burst corrects it -- SBURSTM carries the holder, and
+         * install overwrites the empty one -- and a repeat SJOIN must not clobber
+         * what the burst established. It does not: chan_remote_add() only
+         * overwrites the holder when the repeat carries one, and the send path's
+         * fallback to the key stays a best effort that a burst replaces rather
+         * than a stored answer. */
+        chan_remote_add(ch, link->name, NULL, params[1], params[3], flags) != 0) {
         /* The `nparams > 1` guard is why the measurement comes from the SAME ternary
          * rather than from `params[1]`: on the branch where the guard failed,
          * params[1] does not exist. */
@@ -1180,10 +1186,11 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
      * node's mesh ten minutes after the last one would be unknown to a registry
      * fed only by SBURST, and 2.1's scoped `nick@server` would 401 a user who is
      * right there. SJOIN is the only verb that reports a user joining, so it is
-     * the only place a live registry entry can come from. The holder is the LINK
-     * for the same reason the roster's is -- 4.3's SJOIN carries no server field
-     * -- and the two disagree only for a relaying peer's own best guess, which
-     * the next burst corrects. */
+     * the only place a live registry entry can come from. The registry's holder
+     * is the LINK -- 4.3's SJOIN carries no server field, and a registry with no
+     * answer cannot route, so the link is the best available -- while the roster
+     * above records the absence and waits for a burst. The two disagree only for
+     * a relaying peer's own best guess, which the next burst corrects. */
     fed_nickreg_learn_member(s, params[1], link->name, link->name, server_now_ms());
     /* 2.1's POLICY, ON THE LEARNING SIDE, and the reason it is a second call site
      * rather than a detail of the learn above: a user can register `zed` on a node
