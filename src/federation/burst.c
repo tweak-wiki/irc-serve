@@ -208,7 +208,6 @@ void fed_burst_set_max_bytes(server_t *s, size_t max_bytes)
     }
 }
 
-
 /* An unsigned decimal in 2.4's grammar: 1..20 digits, no leading zero unless
  * the value is exactly "0", no sign. The same rule the epoch and id tags use, for
  * the same reason -- a grammar stated once in this tree and used twice cannot
