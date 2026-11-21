@@ -1253,7 +1253,11 @@ static int tls_status_cb(SSL *ssl, void *arg)
  *
  * tests/integration/test_tls_revocation.c counts this function's callers to keep it
  * that way: two occurrences of the name means the definition and one call site. */
-static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen)
+/* `leaf` and `issuer` are this node's own certificate and its issuer, borrowed
+ * from the server context the caller already loaded -- never from the staple,
+ * which is the untrusted input. Both are needed to bind the response below. */
+static int tls_load_staple(const char *path, X509 *leaf, X509 *issuer,
+                           unsigned char **out, size_t *outlen)
 {
     BIO *bio = NULL;
     BIO *mem = NULL;
@@ -1269,15 +1273,19 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
     long body_len = 0L;
     int raw_len = 0;
     int der_len = 0;
+    OCSP_BASICRESP *bs = NULL;
+    OCSP_CERTID *cid = NULL;
+    int found = 0;
+    int pass = 0;
 
     *out = NULL;
     *outlen = 0u;
     /* ONE READ, BOUNDED. The file is an operator's, but an unbounded read of one is
      * still a thing to avoid, and OCSP_STAPLE_MAX is four times the largest DER that
      * could fit in a TLS CertificateStatus message -- so the cap cannot reject a
-     * staple that would have gone on the wire. A file that exceeds it fails to parse
-     * below and is refused by name, which is the right outcome rather than a
-     * truncation. */
+     * staple that would have gone on the wire. A file that fills the buffer is
+     * probed for one byte more: anything left means the read truncated, and a
+     * truncated staple is refused by name rather than kept short. */
     bio = BIO_new_file(path, "rb");
     if (bio == NULL) {
         ERR_clear_error();
@@ -1293,6 +1301,20 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
         return -1;
     }
     raw_len = BIO_read(bio, raw, OCSP_STAPLE_MAX);
+    if (raw_len >= OCSP_STAPLE_MAX) {
+        /* The buffer filled without reaching EOF: one byte more decides. */
+        unsigned char extra = 0;
+        int more = BIO_read(bio, &extra, 1);
+        if (more > 0) {
+            BIO_free(bio);
+            OPENSSL_free(raw);
+            ERR_clear_error();
+            printf("[observable] tls_init: state=FAILED path=%s "
+                   "reason=ocsp_staple_truncated\n",
+                   path);
+            return -1;
+        }
+    }
     BIO_free(bio);
     if (raw_len <= 0) {
         OPENSSL_free(raw);
@@ -1352,6 +1374,45 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
         OPENSSL_free(raw);
         printf("[observable] tls_init: state=FAILED path=%s "
                "reason=ocsp_staple_unreadable\n",
+               path);
+        return -1;
+    }
+    /* THE RESPONSE MUST BE ABOUT THIS NODE'S CERTIFICATE. A staple for another
+     * certificate parses fine and then fails on every peer at runtime, so it is
+     * refused here instead. Both digest arms are tried, mirroring the peer-side
+     * check -- the responder chose the algorithm, not this node. */
+    bs = OCSP_response_get1_basic(probe);
+    for (pass = 0;
+         pass < 2 && bs != NULL && leaf != NULL && issuer != NULL && found == 0;
+         pass++) {
+        const EVP_MD *md = (pass == 0) ? EVP_sha256() : EVP_sha1();
+
+        if (cid != NULL) {
+            OCSP_CERTID_free(cid);
+            cid = NULL;
+        }
+        cid = OCSP_cert_to_id(md, leaf, issuer);
+        if (cid == NULL) {
+            break;
+        }
+        if (OCSP_resp_find_status(bs, cid, NULL, NULL, NULL, NULL, NULL) == 1) {
+            found = 1;
+        }
+    }
+    if (cid != NULL) {
+        OCSP_CERTID_free(cid);
+        cid = NULL;
+    }
+    if (bs != NULL) {
+        OCSP_BASICRESP_free(bs);
+        bs = NULL;
+    }
+    if (found == 0) {
+        OCSP_RESPONSE_free(probe);
+        OPENSSL_free(raw);
+        ERR_clear_error();
+        printf("[observable] tls_init: state=FAILED path=%s "
+               "reason=ocsp_staple_cert_mismatch\n",
                path);
         return -1;
     }
@@ -1590,7 +1651,20 @@ int tls_backend_node_init(tls_node_t **out, const char *cert, const char *key,
      * to peers that do verify it, and refusing to staple because this node chose
      * not to check would break the other side of a one-directional mistake. */
     if (staple != NULL && staple[0] != '\0') {
-        if (tls_load_staple(staple, &node->staple, &node->staple_len) != 0) {
+        /* Leaf and issuer from the chain this node will serve, so the loader can
+         * bind the staple to them. The extra certs exclude the leaf itself. */
+        X509 *staple_leaf = SSL_CTX_get0_certificate(node->srv);
+        X509 *staple_issuer = NULL;
+        STACK_OF(X509) *staple_extra = NULL;
+
+        if (SSL_CTX_get0_chain_certs(node->srv, &staple_extra) == 1 &&
+            staple_extra != NULL &&
+            OPENSSL_sk_num((const OPENSSL_STACK *)(const void *)staple_extra) > 0) {
+            staple_issuer = (X509 *)OPENSSL_sk_value(
+                (const OPENSSL_STACK *)(const void *)staple_extra, 0);
+        }
+        if (tls_load_staple(staple, staple_leaf, staple_issuer, &node->staple,
+                            &node->staple_len) != 0) {
             tls_backend_node_free(node);
             return -1;
         }
