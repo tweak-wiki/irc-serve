@@ -73,10 +73,18 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
         const char *comma = strchr(p, ',');
         size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
 
-        if (n >= max || len == 0 || len >= stride) {
-            /* An empty element is not a channel name. "JOIN #a," must not be
-             * answered about a channel called ""; it is a malformed list, and
-             * the whole list is refused rather than half-honoured. */
+        if (len == 0) {
+            /* An empty element names no channel, so it is skipped rather than
+            * refusing the whole list: "JOIN #a," joins #a. */
+            if (comma == NULL) {
+                break;
+            }
+            p = comma + 1;
+            continue;
+        }
+        if (n >= max || len >= stride) {
+            /* An over-long element or more names than `max` still refuses the
+            * whole list, because the caller cannot honour it in part. */
             return -1;
         }
         memcpy(store + (size_t)n * stride, p, len);
