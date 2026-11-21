@@ -431,6 +431,46 @@ static int stage_flush(burst_stage_t *st, server_t *s, conn_t *peer)
     return 0;
 }
 
+/* The most this node ever has queued-but-unsent of one burst (#330). A quarter
+ * of CONN_WQ_MAX, so that even with no drain at all four chunks still fit the
+ * link's queue -- and with the pump below draining each chunk, any number of
+ * them does. */
+#define BURST_FLUSH_CHUNK (CONN_WQ_MAX / 4u)
+
+/* Queue one chunk of a large burst and pump the link, then reset the staging
+ * buffer so the next chunk renders into it. 0 when there was nothing worth
+ * flushing or the chunk went out, -1 when the link saturated mid-burst.
+ *
+ * WHY THIS EXISTS when the staging budget already bounds the transaction: the
+ * budget bounds MEMORY (staging and the receiver's shadow), but 800 worst-case
+ * nicks are ~630 KiB and the link's queue is 256 KiB -- staging the whole burst
+ * and flushing it at once would saturate every resync past ~280 nicks, and a
+ * saturated link is DROPPED, so the mesh would never converge after a flap.
+ * Flushing in quarter-queue chunks with a pump between them keeps the queue
+ * from ever holding the whole burst, while the BEGIN/COMMIT framing on the
+ * wire is unchanged: the receiver sees one transaction, whatever its size.
+ *
+ * THE PUMP IS BEST EFFORT: a peer that reads keeps up and the burst goes out
+ * in full; a peer that does not is a saturated link, which 3.4 drops -- the
+ * same verdict a burst past the queue would always have earned, now earned for
+ * the right reason (the link cannot take it) rather than the wrong one (the
+ * burst was rendered all at once). */
+static int burst_chunk_flush(burst_stage_t *st, server_t *s, conn_t *peer,
+                             size_t *flushed_total)
+{
+    if (st->len < BURST_FLUSH_CHUNK) {
+        return 0;
+    }
+    if (stage_flush(st, s, peer) != 0) {
+        return -1;
+    }
+    *flushed_total += st->len;
+    (void)conn_pump(peer);
+    st->len = 0u;
+    st->n = 0u;
+    return 0;
+}
+
 /* An empty MIDDLE parameter as the one byte that means "there is none of it here".
  *
  * 3.2 forces a literal rather than a convention: an empty middle parameter is not
@@ -574,6 +614,7 @@ int fed_burst_send(server_t *s, server_link_t *link)
     size_t nnicks;
     size_t nchans = 0u;
     size_t nmembers = 0u;
+    size_t flushed = 0u; /* bytes already chunk-flushed; st.len is the rest */
 
     if (s == NULL || link == NULL) {
         return -1;
@@ -659,6 +700,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
         if (stage_line(&st, s, s->name, "SBURSTN", params, 6) != 0) {
             goto refused;
         }
+        if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+            goto saturated;
+        }
     }
 
     /* --- every channel, and its members immediately after it -------------- */
@@ -684,6 +728,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
         params[5] = ch->topic;
         if (stage_line(&st, s, s->name, "SBURSTC", params, 6) != 0) {
             goto refused;
+        }
+        if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+            goto saturated;
         }
         for (size_t k = 0; k < ch->nmembers; k++) {
             char flags[4];
@@ -714,6 +761,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
             if (stage_line(&st, s, s->name, "SBURSTM", params, 5) != 0) {
                 goto refused;
             }
+            if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+                goto saturated;
+            }
         }
         for (size_t k = 0; k < ch->nremotes; k++) {
             const chan_remote_t *r = chan_remote_at(ch, k);
@@ -732,6 +782,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
             params[4] = burst_account_token(NULL, r->account);
             if (stage_line(&st, s, s->name, "SBURSTM", params, 5) != 0) {
                 goto refused;
+            }
+            if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+                goto saturated;
             }
         }
     }
@@ -758,27 +811,37 @@ int fed_burst_send(server_t *s, server_link_t *link)
     }
 
     if (stage_flush(&st, s, peer) != 0) {
-        size_t was = st.len;
+        goto saturated;
+    }
+    printf("[observable] fed_burst_sent: peer=%s epoch=%llu nicks=%zu chans=%zu "
+           "members=%zu bytes=%zu budget=%zu\n",
+           link->name, (unsigned long long)s->epoch, nnicks, nchans, nmembers,
+           flushed + st.len, s->burst_max_bytes);
+    stage_free(&st);
+    return 0;
+
+saturated:
+    {
+        size_t was = flushed + st.len;
 
         stage_free(&st);
         printf("[observable] fed_burst_saturated: peer=%s bytes=%zu\n", link->name,
                was);
         return -1;
     }
-    printf("[observable] fed_burst_sent: peer=%s epoch=%llu nicks=%zu chans=%zu "
-           "members=%zu bytes=%zu budget=%zu\n",
-           link->name, (unsigned long long)s->epoch, nnicks, nchans, nmembers,
-           st.len, s->burst_max_bytes);
-    stage_free(&st);
-    return 0;
 
 refused:
-    /* NOTHING WAS QUEUED. The whole transaction is still in a staging buffer
-     * that is about to be freed, the link has not been touched, and this node's
-     * own state is exactly what it was. That difference from a saturation
-     * mid-flush is the entire reason the burst is rendered before it is sent. */
+    /* NOTHING WAS QUEUED, in every case the budget can still refuse. Chunk
+    * flushes only ever move QUEUE-FITTING prefixes a link that keeps up
+    * drains, and the budget trips long before the first chunk can go out --
+    * at the shipped bound after a megabyte of staging, at a shrunken test
+    * bound after a few hundred bytes. A refusal after a flushed chunk would
+    * take the saturation path's shape instead: a prefix with no terminator,
+    * which the receiver discards by the same rule that catches a lost line.
+    * That difference from a saturation mid-flush is the entire reason the
+    * burst is rendered before it is sent. */
     {
-        size_t was = st.len;
+        size_t was = flushed + st.len;
 
         stage_free(&st);
         s->n_burst_refused++;
@@ -1243,7 +1306,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     /* THE EXPLICIT CEILING (#122), and it is checked BEFORE the realloc rather
      * than after it so that the refusal costs no allocation. See
      * IRC_BURST_MAX_CHANS for why this is not the bound: the charge above already
-     * caps the count at 642 at the shipped budget, and this arm exists so that
+     * caps the count at 5140 at the shipped budget, and this arm exists so that
      * the day that arithmetic moves, the count this node will allocate for is a
      * number somebody wrote down rather than a quotient. */
     if (sh->nchan_used >= IRC_BURST_MAX_CHANS) {
