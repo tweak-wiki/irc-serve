@@ -682,7 +682,7 @@ account_store_t *account_store_load(const char *path)
          * means the line did not fit, trailing newline or not. */
         if (n == sizeof line - 1u && line[n - 1u] != '\n') {
             printf("[observable] account_store: state=REFUSED path=%s "
-                   "reason=line_too_long\n",
+                   "reason=line_too_long remedy=write-tmp+fsync+rename\n",
                    path);
             account_wipe(line, sizeof line);
             account_store_free(store);
@@ -697,7 +697,7 @@ account_store_t *account_store_load(const char *path)
         }
         if (store_parse_line(store, p) != 0) {
             printf("[observable] account_store: state=REFUSED path=%s "
-                   "reason=malformed_record\n",
+                   "reason=malformed_record remedy=write-tmp+fsync+rename\n",
                    path);
             account_wipe(line, sizeof line);
             account_store_free(store);
@@ -707,7 +707,7 @@ account_store_t *account_store_load(const char *path)
     }
     if (ferror(f) != 0) {
         printf("[observable] account_store: state=REFUSED path=%s "
-               "reason=read_error\n",
+               "reason=read_error remedy=write-tmp+fsync+rename\n",
                path);
         account_wipe(line, sizeof line);
         account_store_free(store);

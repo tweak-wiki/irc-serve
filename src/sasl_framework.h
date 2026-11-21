@@ -146,7 +146,16 @@ typedef struct {
  * the only separator, because the alternative -- splitting on whitespace -- makes
  * a password with a space in it unrepresentable, and a store that cannot hold a
  * passphrase is a store that pushes operators to weak ones. A record with no
- * TAB is malformed and fails the whole load rather than being skipped. */
+ * TAB is malformed and fails the whole load rather than being skipped.
+ *
+ * ATOMIC REPLACE. The file is read line by line with no lock, and only once,
+ * at startup -- there is no reload that could keep a previous store, so a
+ * refused load lasts until the next restart. A non-atomic rewrite
+ * (`cp new.db store`) racing that read lands mid-file and reads as malformed,
+ * which refuses the WHOLE store. Replace it atomically instead: write a
+ * temporary file in the same directory, fsync() it, rename() it over the old
+ * path. A restart then sees the old file or the new one, never half of one.
+ */
 sasl_store_t *sasl_store_load(const char *path);
 
 /* An empty store, for a caller that wants to build one in memory. sasl_state_

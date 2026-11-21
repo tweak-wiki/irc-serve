@@ -479,7 +479,7 @@ sasl_store_t *sasl_store_load(const char *path)
          * means the line did not fit, trailing newline or not. */
         if (n == sizeof line - 1u && line[n - 1u] != '\n') {
             printf("[observable] sasl_store: state=REFUSED path=%s "
-                   "reason=line_too_long\n", path);
+                   "reason=line_too_long remedy=write-tmp+fsync+rename\n", path);
             sasl_wipe(line, sizeof line);
             sasl_store_free(store);
             (void)fclose(f);
@@ -493,7 +493,7 @@ sasl_store_t *sasl_store_load(const char *path)
         }
         if (store_parse_line(store, p) != 0) {
             printf("[observable] sasl_store: state=REFUSED path=%s "
-                   "reason=malformed_record\n", path);
+                   "reason=malformed_record remedy=write-tmp+fsync+rename\n", path);
             sasl_wipe(line, sizeof line);
             sasl_store_free(store);
             (void)fclose(f);
@@ -501,8 +501,8 @@ sasl_store_t *sasl_store_load(const char *path)
         }
     }
     if (ferror(f) != 0) {
-        printf("[observable] sasl_store: state=REFUSED path=%s reason=read_error\n",
-               path);
+        printf("[observable] sasl_store: state=REFUSED path=%s reason=read_error "
+               "remedy=write-tmp+fsync+rename\n", path);
         sasl_wipe(line, sizeof line);
         sasl_store_free(store);
         (void)fclose(f);
