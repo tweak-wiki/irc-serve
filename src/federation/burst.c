@@ -1101,7 +1101,28 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
     return 0;
 }
 
-/* SBURSTN <nick> <user> <host> <modes> <signon> :<away>. */
+/* A record belongs to the peer that opened the transaction. The dispatch gate
+ * refuses records when nothing is open, so an apply_* only runs for an owned
+ * shadow -- and a record from any other link is a second peer's burst landing
+ * in the first peer's shadow, which turns the owner's terminator counts into a
+ * mismatch and discards its legitimate burst. Refused WITHOUT touching the
+ * shadow: discarding here would let any peer kill another peer's in-flight
+ * burst with a single line. */
+static int burst_foreign(server_t *s, server_link_t *link)
+{
+    burst_shadow_t *sh = sh_of(s);
+
+    if (sh != NULL && !chan_same_name(sh->origin, link->name)) {
+        /* NOT_OWNER, not BUSY: BUSY is the start being refused, this is a
+         * record for a transaction that is already somebody else's. */
+        printf("[observable] fed_burst_refused: peer=%s reason=NOT_OWNER "
+               "owner=%s\n",
+               link->name, sh->origin);
+        return 1;
+    }
+    return 0;
+}
+
 static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
 {
     burst_shadow_t *sh = sh_of(s);
@@ -1109,6 +1130,9 @@ static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
     uint64_t signon = 0u;
 
     if (sh == NULL) {
+        return -1;
+    }
+    if (burst_foreign(s, link)) {
         return -1;
     }
 
@@ -1212,6 +1236,9 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     char canonical[CHAN_MAX_NAME + 1];
 
     if (sh == NULL) {
+        return -1;
+    }
+    if (burst_foreign(s, link)) {
         return -1;
     }
 
@@ -1449,6 +1476,9 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
     unsigned flags = 0u;
 
     if (sh == NULL) {
+        return -1;
+    }
+    if (burst_foreign(s, link)) {
         return -1;
     }
     sc = sh->cur;
@@ -1908,6 +1938,13 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
         printf("[observable] fed_malformed: fd=%d command=SBURSTE "
                "reason=NO_TRANSACTION\n",
                link->fd);
+        return -1;
+    }
+    /* A COMMIT for somebody else's transaction: refused like a foreign record,
+     * and before the arity check -- a terminator that is not yours is not
+     * yours to validate. The NO_TRANSACTION arm above stays first, so a
+     * terminator with nothing open keeps its existing report. */
+    if (burst_foreign(s, link)) {
         return -1;
     }
     if (m->nparams != 4 || burst_parse_u64(m->params[0], &epoch) != 0 ||
