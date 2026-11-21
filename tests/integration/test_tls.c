@@ -469,8 +469,36 @@ static void case_configuration_refusals(const char *dir)
           "and the refusal prints reason=mode_640 -- octal, with no leading zero -- "
           "which is what makes it checkable that the refusal came from the group bit",
           msg);
-}
 
+    /* A FIFO AS --tls-key. fopen() on a FIFO blocks until a writer opens the
+     * other end, so the old check wedged startup here; the shared open uses
+     * O_NONBLOCK and refuses it as not_regular instead. run_expecting_refusal
+     * already bounds the wait -- a hang returns -1 -- so the assertion on the
+     * reason is the regression check. */
+    snprintf(key, sizeof key, "%s/fifo.key", dir);
+    (void)unlink(key);
+    if (mkfifo(key, S_IRUSR | S_IWUSR) == 0) {
+        char *v_fifo_key[9];
+
+        v_fifo_key[0] = a0; v_fifo_key[1] = a1; v_fifo_key[2] = a2;
+        v_fifo_key[3] = a3;
+        v_fifo_key[4] = "--tls-cert"; v_fifo_key[5] = cert;
+        v_fifo_key[6] = "--tls-key"; v_fifo_key[7] = key;
+        v_fifo_key[8] = NULL;
+        rc = run_expecting_refusal(v_fifo_key, msg, sizeof msg, 10000);
+        check(rc > 0, "a FIFO --tls-key is REFUSED instead of hanging startup, "
+                      "with a non-zero exit",
+              msg);
+        check(strstr(msg, "tls_key: state=REFUSED") != NULL &&
+                  strstr(msg, "reason=not_regular") != NULL,
+              "and the refusal names reason=not_regular, which is what proves "
+              "the open never blocked on the FIFO",
+              msg);
+        (void)unlink(key);
+    } else {
+        check(0, "could create a FIFO for the --tls-key refusal case", NULL);
+    }
+}
 /* ===========================================================================
  * CASE GROUP 2: a build WITHOUT TLS has no TLS surface at all
  * ===========================================================================
