@@ -1256,9 +1256,10 @@ struct server {
      * ever been staged on this node. */
     struct burst_shadow *burst;
     /* MT 1.5 (issue #239): per-node stop flag, checked alongside the
-     * process-wide g_stop in core/poll_loop.c. Plain int: the loop is still
-     * single-threaded (3.4), so no atomics yet. server_init() clears it. */
-    int       stop;
+     * process-wide g_stop in core/poll_loop.c. _Atomic (issue #283): the
+     * signal handler stores it while loop/writer threads load it.
+     * server_init() clears it via the struct-wide zeroing. */
+    atomic_int  stop;
 
     /* The session window length for THIS node (resume.h default), in
      * milliseconds. resume_set_window() writes it; the sweep, the hold and
