@@ -5,8 +5,10 @@ Derived from docs/SERVER_DESIGN.md §3.3–3.4, docs/ARCHITECTURE.md.
 
 ## Purpose
 
-One process = one `poll()` loop. All state lives in `server_t`; there are no
-threads. Adding a node is a configuration change, not a rewrite.
+One process = one `poll()` loop plus writer threads. All state lives in
+`server_t`; registries are single-writer on the loop thread, and writers
+drain connection queues only (ownership, ordering, and handoff are in the
+threading spec). Adding a node is a configuration change, not a rewrite.
 
 ## Requirements
 

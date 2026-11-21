@@ -5,8 +5,10 @@ Derived from docs/SERVER_DESIGN.md §4, docs/AUTO_SCALE_DESIGN.md.
 
 ## Purpose
 
-Scale by adding nodes, not threads. Peers share the client dispatch path;
-the only difference is a field on the connection.
+Scale by adding nodes; use cores with writer threads (threading spec).
+Peers share the client dispatch path; the only difference is a field on the
+connection. Federation control state stays loop-thread-affine — writers
+never touch links, bursts, dedup, or nickreg.
 
 ## Requirements
 
