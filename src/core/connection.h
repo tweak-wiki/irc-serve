@@ -508,46 +508,6 @@ size_t conn_text_strip(char *dst, size_t cap, const char *src);
 size_t conn_text_strip_relay(char *dst, size_t cap, const char *src);
 
 /* ---------------------------------------------------------------------------
- * conn_text_strip_wire(): A VALUE RENDERED BACK INTO A FIELD ITS SENDER WILL READ
- * ---------------------------------------------------------------------------
- * The STRICT half of the split. Removes every C0 control, DEL, a raw C1
- * (`0x80`-`0x9F` with nothing expecting a continuation) and the encoded C1 pair
- * `0xC2 0x80`-`0xC2 0x9F`. Keeps every VALID multi-byte sequence, for the reason
- * `conn_text_strip_relay()`'s own header gives at length: a filter over the range
- * `0x80`-`0x9F` removes every accented, Greek and Cyrillic character on the node,
- * and it does it silently.
- *
- * IT IS NOT `conn_text_strip_relay()`, and the difference is eight named bytes. A
- * relayed message is IRC message text, where `0x01` is CTCP and `0x02`/`0x03`/
- * `0x0F`/`0x11`/`0x16`/`0x1D`/`0x1F` are mIRC's colour and style codes -- removing
- * them CORRUPTS rather than sanitises. A numeric's parameter is not message text:
- * there is no client rendering formatting codes out of a `401`, so the strict policy
- * is right there and the split is a real difference rather than an accident of
- * which function somebody reached for.
- *
- * WHY IT EXISTS, and the argument is a POLICY rather than an observation: a value
- * echoed back to the client that sent it is still filtered. The argument this tree
- * used for a long time was "there is no second reader", and that argument is
- * WRONG -- a client that writes numerics to a log file, or a bouncer relaying them
- * to a human's terminal, is the second reader, and it is downstream of the client
- * rather than of this node. The decisive argument is simpler and it is
- * INFORMATION: **the echo carries nothing the sender does not already have.** The
- * client sent the value on the line before. So filtering it costs no information at
- * all and removes a real hazard, which makes it a decision rather than a trade-off.
- * See `SECURITY.md`'s control-byte section for the policy in full.
- *
- * IT REMOVES BYTES AND KEEPS THE FIELD. A parameter that becomes empty is still a
- * parameter, and a positional parser still finds it where the RFC says it is -- which
- * is the whole reason this is a strip and not the placeholder substitution the `472`
- * uses. The placeholder is a different case: there the value is a single byte that is
- * structurally not a mode character, so there is nothing to strip and something has
- * to stand in its place.
- *
- * COST: one pass over one value, on a path that runs once per numeric. The caller
- * supplies the destination. */
-size_t conn_text_strip_wire(char *dst, size_t cap, const char *src);
-
-/* ---------------------------------------------------------------------------
  * conn_text_display_check(): MAY THIS STRING BE STORED AND RENDERED TO OTHER PEOPLE
  * ---------------------------------------------------------------------------
  * The VERDICT form of the same walk, and it exists for the one field whose value is
