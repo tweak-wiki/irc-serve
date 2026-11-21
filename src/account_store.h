@@ -175,8 +175,9 @@
  * With only the byte rule, the two LOCAL callers were safe (both bounded the
  * length separately) and the two PEER-side callers were not: channel.c's
  * copy_bounded() truncated an over-long SJOIN account into the roster, and
- * federation/burst.c's burst_copy() refused it -- leaving a slot of a realloc'd
- * array that nothing zeroes holding whatever the allocator had left there. So the
+ * federation/burst.c's own copy refused it -- leaving a slot of a realloc'd
+ * array that nothing zeroes holding whatever the allocator had left there. (Both
+ * copies are since unified into copy_bounded(), issue #212.) So the
  * length is HERE rather than at either receiver, which is the argument this
  * predicate's own header makes: a name it refuses is a name no field can hold,
  * whichever of the two a caller happened to notice.

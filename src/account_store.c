@@ -416,14 +416,15 @@ int account_name_wire_safe(const char *name)
      * two PEER-side callers came with Phase 10.3 and neither had anywhere to
      * bound it, because the rule they were handed says nothing about length:
      *
-     *   chan_remote_add()  copy_bounded() TRUNCATES and returns 0, which both call
-     *                      sites discard -- so the roster ended up holding a
+     *   chan_remote_add()  copy_bounded() TRUNCATED and returned 0, which both call
+     *                      sites discarded -- so the roster ended up holding a
      *                      DIFFERENT NAME from the one the peer reported, under a
      *                      name that peer will never be asked about again.
-     *   burst.c's apply_member()  burst_copy() REFUSES rather than truncating, and
-     *                      writes NOTHING -- into a slot of a realloc'd array that
-     *                      nothing zeroes. So what the resync went on to install
-     *                      was whatever the allocator had left there.
+     *   burst.c's apply_member()  its own burst_copy() REFUSED rather than truncating,
+     *                      and wrote NOTHING -- into a slot of a realloc'd array that
+     *                      nothing zeroed. So what the resync went on to install
+     *                      was whatever the allocator had left there. (Both copies
+     *                      are since unified into copy_bounded(), issue #212.)
      *
      * Both are the same defect seen from two receivers, and both are closed by
      * one bound in one place, which is what this predicate is FOR: the account

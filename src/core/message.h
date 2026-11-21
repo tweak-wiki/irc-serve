@@ -464,6 +464,11 @@ int irc_serve_server_name_valid(const char *name);
  * the value is exactly "0"). 0 on success, -1 otherwise. */
 int parse_decimal(const char *s, size_t len, uint64_t limit, uint64_t *out);
 
+/* The one decimal renderer (issue #212): canonical decimal of any uint64_t.
+ * Returns the length, 0 on refusal (NULL/zero cap, or does not fit with the
+ * NUL -- refuse, never truncate). `out` is emptied on refusal. */
+size_t irc_format_u64(char *out, size_t cap, uint64_t v);
+
 /* Read the four internal tags out of a parsed message into `*out`. Returns 0
  * when all four are present and legal, -1 otherwise (and *out is zeroed).
  * Extra unrelated tags are ignored, so a line may carry client tags too. */

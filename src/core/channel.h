@@ -662,6 +662,12 @@ int chan_has_flag(const chan_t *ch, const conn_t *c, unsigned flag);
  * name" must have ONE answer. */
 int chan_same_name(const char *a, const char *b);
 
+/* THE ONE BOUNDED COPY (issue #212): copy-or-refuse, never truncate. 1 when
+ * the whole value fitted, 0 on refusal (bad argument or does not fit); a
+ * refusal empties `dst`, and a NULL source stores empty. Owned by channel.c,
+ * shared by the burst, resume and nickreg receivers. */
+int copy_bounded(char *dst, size_t cap, const char *src);
+
 /* The member record whose connection has this nickname, or NULL. Nickname
  * matching is case-insensitive (2.1: RFC 2812 3.3.1 nicknames are case
  * insensitive), so KICK and MODE +o accept either spelling. */
