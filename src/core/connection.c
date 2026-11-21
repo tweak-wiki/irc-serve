@@ -354,6 +354,61 @@ int conn_pump_locked(conn_t *c)
 out:
     return rc;
 }
+/* MT 3.x (#369): bounded drain slice. Same as conn_pump_locked(), but stops
+ * after CONN_WQ_SLICE bytes have moved, so one fat conn cannot hold a writer
+ * for its whole backlog. The caller already holds wq_lock (see _locked). */
+int conn_pump_slice_locked(conn_t *c)
+{
+    size_t moved = 0u;
+    int rc = 0;
+
+    for (;;) {
+        size_t pending = c->wlen - c->woff;
+        size_t budget;
+        ssize_t n;
+
+        if (pending == 0u) {
+            (void)transport_send(c, NULL, 0u);
+            break;
+        }
+        if (moved >= CONN_WQ_SLICE) {
+            break; /* slice spent: the remainder waits for the next visit */
+        }
+        budget = CONN_WQ_SLICE - moved;
+        if (budget < pending) {
+            pending = budget;
+        }
+        n = transport_send(c, c->wbuf + c->woff, pending);
+        if (n > 0) {
+            c->woff += (size_t)n;
+            moved += (size_t)n;
+            continue;
+        }
+        if (n == TRANSPORT_RETRY) {
+            break;
+        }
+        rc = -1;
+        goto out;
+    }
+
+    if (c->woff == c->wlen) {
+        c->wlen = 0;
+        c->woff = 0;
+    }
+    /* Same STARTTLS ordering as conn_pump_locked(): the handshake starts only
+     * once the 670 is fully written. Arm on the drained queue, as there. */
+    if (c->starttls_pending && c->woff == c->wlen) {
+        c->starttls_pending = 0;
+        if (transport_starttls(c, 1) != 0) {
+            printf("[observable] starttls_failed: fd=%d reason=HANDSHAKE_START\n",
+                   c->fd);
+            rc = -1;
+            goto out;
+        }
+    }
+out:
+    return rc;
+}
 
 int conn_pump(conn_t *c)
 {
