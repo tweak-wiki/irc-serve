@@ -2,16 +2,19 @@
 
 ## 1. Foundations (no behavior change)
 
-- [ ] 1.1 Convert `state`/`want_read`/`want_write` to `_Atomic int` with
+- [x] 1.1 Convert `state`/`want_read`/`want_write` to `_Atomic int` with
   release-publish/acquire-consume; verify with full suite green, `--writers 0`.
-- [ ] 1.2 Replace bare `pthread` link with `find_package(Threads)`; verify all
-  three compilers configure clean.
-- [ ] 1.3 Add TSan CI cell (ThreadSanitizer, `--writers 4`), mutually exclusive
+  (done: #235, commit 7b84ac7)
+- [x] 1.2 Replace bare `pthread` link with `find_package(Threads)`; verify all
+  three compilers configure clean. (done: #236, commit 9425ec6)
+- [x] 1.3 Add TSan CI cell (ThreadSanitizer, `--writers 4`), mutually exclusive
   with ASan gate; verify it runs and passes on a clean tree.
-- [ ] 1.4 Move `file_secret` (`node_main.c:1354`) off static storage; verify
-  with ASan + secret-file integration test green.
-- [ ] 1.5 Add per-node stop flag alongside `g_stop`; verify two in-process
+  (done: #237, commit cbc3278)
+- [x] 1.4 Move `file_secret` (`node_main.c:1354`) off static storage; verify
+  with ASan + secret-file integration test green. (done: #238, commit af02a75)
+- [x] 1.5 Add per-node stop flag alongside `g_stop`; verify two in-process
   nodes stop independently in `test_fed_isolation`-style test.
+  (done: #239, commit 6d0dc63)
 
 ## 2. Writer pool
 
