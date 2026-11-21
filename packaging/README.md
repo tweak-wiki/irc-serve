@@ -1,10 +1,6 @@
 # packaging/ -- irc-serve for Debian, Arch and Homebrew
 
-**Nothing in this directory has been built.** The machine this packaging was written
-on is macOS, which has no `dpkg-buildpackage`, no `dpkg-source`, no `dh`, no
-`makepkg` and no `brew`. What was verified is listed under "What was verified" below,
-and what was not is listed under "What is NOT verified". Issue **#48** stays open
-until a real Debian build runs; this file does not close it.
+Build/measurement status: `scripts/check-packaging.py` (run in `scripts/gate.sh`) is the single truth -- see its MEASURED ON LINUX report.
 
 The Debian packaging lives at `packaging/debian/` and is reachable from the
 repository root as **`debian/`**, which is a committed symlink. See "The `./debian`
@@ -37,8 +33,7 @@ brew install --HEAD irc-serve
 brew test --HEAD irc-serve
 ```
 
-Each command is what a maintainer of that distribution would run. **None of them has
-been executed.**
+The Debian command above is measured on Linux (see the gate script's report); the Arch and Homebrew commands have not been executed.
 
 ## The `./debian` problem, and the layout this tree settled on
 
@@ -222,20 +217,7 @@ the verification that can run where the work happens.
 
 Stated plainly rather than left to be discovered:
 
-* **No `.deb` has ever been produced.** `dpkg-buildpackage` has not been run.
-* **That the symlink is what a real `dpkg-buildpackage` would follow.** The layout is
-  asserted by `scripts/check-packaging.py` -- that `debian` exists at the root, is a
-  symlink, and that `debian/rules` and `packaging/debian/rules` are the same file --
-  but that is a check reading a filesystem, not dpkg reading one. Whether dpkg
-  follows a committed symlink, and whether `dh` objects to one, is unverified here
-  because this machine has no dpkg at all. This is the one claim in this file that a
-  Debian machine settles in about a minute, and it is part of what #48 needs.
-* **`dpkg-source -b` has not been run**, so the source package is unproven. As
-  explained above, it is expected to fail for want of an upstream tarball.
-* **What a produced `.deb` would contain** is unverified: the executable's presence
-  from `cmake --install`, its `${shlibs:Depends}` substitution (which needs
-  `dpkg-shlibdeps` and the built binary), and the file list.
-* **`lintian` has not been run**, so Debian POLICY compliance is unknown.
+* **Debian build, `.deb` contents, `dpkg-source`, and `lintian`: measured on Linux -- see the gate script's MEASURED ON LINUX report, which is the single truth for these.**
 * **`makepkg` has not been run.** `PKGBUILD`'s `source` line is a git branch, so
   `makepkg` additionally needs network access, and `arch=('aarch64')` is a claim
   about this source compiling there rather than a measurement.
