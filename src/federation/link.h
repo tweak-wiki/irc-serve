@@ -503,8 +503,13 @@ typedef enum {
      * name, so it does not count as a duplicate and does not say DUPLICATE. */
     FED_NAME_MISMATCH,
     FED_BAD_NAME,        /* the claimed name is not a legal 2.4 tag value      */
-    FED_BAD_EPOCH,       /* the peer's epoch is not a legal 2.4 epoch value    */
-    FED_BAD_VERSION      /* the version word is not this node's                */
+    FED_BAD_EPOCH,       /* the peer's epoch is not a legal 2.4 epoch value     */
+    FED_BAD_VERSION,     /* the version word is not this node's                 */
+    /* A FEDERATE that arrived in cleartext for a link this node requires TLS
+     * for (issue #221). Last rather than in check order, so the existing
+     * counter slots do not move: it is returned by fed_on_federate(), which
+     * runs before fed_check_federate() and is not that function's step order. */
+    FED_TLS_REQUIRED     /* plaintext claim for a TLS-required peer            */
 } fed_federate_result_t;
 
 /* The stable spelling of a verdict, for the observable line and for tests.
