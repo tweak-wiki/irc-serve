@@ -1227,6 +1227,55 @@ static void test_mode(nf_node_t *node)
     (void)send_and_drain(&a, "m-query3");
     expect_line(&a.c, "324 shows no modes once the last ban is lifted",
                 ":irc.test 324 moa #MO - :Channel modes\r\n");
+    /* One parameter per letter, in order. `+oo` with two nicks promotes BOTH:
+     * the first nick serves the first `o` and the second serves the second.
+     * The bug this pins answered params[2] for every letter, so `+oo moa mob`
+     * promoted moa twice and never touched mob. */
+    client_send(&a, "MODE #mo +oo moa mob");
+    (void)send_and_drain(&a, "m-oo");
+    expect_line(&a.c, "the +oo echo for the first nick",
+                ":moa!moa@127.0.0.1 MODE #MO +o moa\r\n");
+    expect_line(&a.c, "the +oo echo for the second nick",
+                ":moa!moa@127.0.0.1 MODE #MO +o mob\r\n");
+    /* mob is an op now, proved by a 353 that renders it with '@' rather than
+     * as a plain nick -- which the pre-fix code never produced, since it
+     * promoted moa twice and never consumed mob at all. */
+    {
+        size_t before = tc_received(&a.c);
+
+        client_send(&a, "NAMES #mo");
+        (void)send_and_drain(&a, "m-names-oo");
+        expect_order(&a.c, before, "the 353 order after +oo",
+                     (const char *const[]){
+                         ":irc.test 353 moa = #MO :@moa @mob\r\n",
+                         ":irc.test 366 moa #MO :End of /NAMES list\r\n",
+                     }, 2);
+    }
+
+    /* Mixed letters consume in the same order: `+ov` takes the next two
+     * parameters left to right. moc joins first so both targets are members. */
+    {
+        client_t c;
+
+        client_open(&c, node, "moc");
+        client_send(&c, "JOIN #mo");
+        (void)send_and_drain(&c, "m-join-c");
+        client_send(&a, "MODE #mo +ov mob moc");
+        (void)send_and_drain(&a, "m-ov");
+        expect_line(&a.c, "the +ov echo for the op nick",
+                    ":moa!moa@127.0.0.1 MODE #MO +o mob\r\n");
+        expect_line(&a.c, "the +ov echo for the voice nick",
+                    ":moa!moa@127.0.0.1 MODE #MO +v moc\r\n");
+        tc_close(&c.c);
+    }
+
+    /* Fewer parameters than letters is 461: the first `o` re-applies +o to moa
+     * (already an op, so a no-op), and the second `o` has no parameter left to
+     * consume. */
+    client_send(&a, "MODE #mo +oo moa");
+    (void)send_and_drain(&a, "m-oo-short");
+    expect_line(&a.c, "461 when letters outnumber parameters",
+                ":irc.test 461 moa MODE :Not enough parameters\r\n");
 
     tc_close(&a.c);
     tc_close(&b.c);
