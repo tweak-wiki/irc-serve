@@ -534,7 +534,7 @@ size_t conn_hostmask(const conn_t *c, char *out, size_t cap)
  *
  * IT WAS LATENT rather than live, and the reason is worth stating because it is the
  * only reason this survived: `311` renders the realname through
- * `emit_numeric_ex()`, which runs `conn_text_strip_wire()`, so the byte was removed
+ * `emit_numeric_ex()`, which runs `conn_text_strip()`, so the byte was removed
  * before it could reach a third party. What was left was a stored value this node
  * had accepted and would then quietly mangle -- `Ma<0x9F>llory` shown to every
  * member of every channel as `Mallory`-with-a-hole, and a realname that no longer
@@ -648,7 +648,7 @@ size_t conn_text_bad_count(const char *s)
  * C1 range through. A raw `0x9B` is CSI on an 8-bit terminal, so a topic is exactly as
  * dangerous as a nickname and was being filtered against a narrower set.
  *
- * It is the SAME set the numeric-echo filter uses (`conn_text_strip_wire()`), and they
+ * It is the SAME set the numeric-echo filter uses (`conn_text_strip()`), and they
  * are the same function for the same reason `valid_nick()` and the nickname check share
  * one walk: two functions answering "which bytes are dangerous" is how they come to
  * disagree, and this tree has now been bitten by that three times.
@@ -1007,11 +1007,6 @@ size_t conn_text_strip(char *dst, size_t cap, const char *src)
 size_t conn_text_strip_relay(char *dst, size_t cap, const char *src)
 {
     return conn_text_walk(dst, cap, src, CONN_TEXT_RELAY, NULL);
-}
-
-size_t conn_text_strip_wire(char *dst, size_t cap, const char *src)
-{
-    return conn_text_walk(dst, cap, src, CONN_TEXT_WIRE, NULL);
 }
 
 conn_display_verdict_t conn_text_display_check(const char *s)

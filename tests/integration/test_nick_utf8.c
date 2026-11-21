@@ -308,7 +308,7 @@ int main(void)
         /* And the malformed shapes, where the filter removes NOTHING, which is
          * the more interesting half and is why the expectation is per case.
          *
-         * `conn_text_strip_wire()` removes the log-injection SET: C0 controls,
+         * `conn_text_strip()` removes the log-injection SET: C0 controls,
          * DEL, a bare 0x80-0x9F, and the encoded 0xC2 pair. It is not a UTF-8
          * validator, and it is sequence-aware: a continuation byte the stripper
          * believes is inside a sequence it already emitted is KEPT, because the
