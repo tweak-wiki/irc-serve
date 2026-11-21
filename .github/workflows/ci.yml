@@ -49,16 +49,20 @@ concurrency:
 #   2. macOS CANNOT RUN THERE. ci_macos stays on a hosted macOS runner. That is
 #      not a preference, it is the platform.
 #
-#   3. THE MERGE GATE MUST NOT DEPEND ON A MACHINE THAT CAN BE SWITCHED OFF.
-#      ci_test stays on a hosted Linux runner and stays required, so a merge is
-#      still possible when the self-hosted runner is offline. If every required
-#      check lived on a personal machine, powering it off would be a
-#      development freeze.
+#   3. OWNER DECISION 2026-11-21: every Linux check runs on tweak-ci; no
+#      blocking check uses hosted runners. The availability cost the old rule
+#      guarded against is accepted: if the box is down, merges wait.
+#      Mitigation is 28 runner instances as systemd user units
+#      (Restart=always, linger on) so reboots no longer kill them — but a
+#      powered-off box is still a freeze, and that is now true for merges,
+#      not just pushes.
 #
 # Exposure: ci_linux_cachyos runs on the self-hosted machine, so anything that
 # reaches it executes code there. It is gated twice -- push to main only, and
 # the `self-hosted` environment, whose only required reviewer is the owner and
 # which the owner's own pushes bypass by design (see docs/DEVELOPMENT.md).
+# Required gates (ci_test, ci_sanitizers) now also execute PR code there;
+# that exposure predates this change (ci_tsan/ci_optin_probes already do).
 # ---------------------------------------------------------------------------
 
 jobs:
@@ -172,7 +176,7 @@ jobs:
   # merge possible when the shared runners are offline, and the one Linux result
   # that is not produced by the maintainer's own machine.
   ci_test:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -471,7 +475,7 @@ jobs:
   # branch protection. That is a settings change, not a workflow change.
   ci_sanitizers:
     name: ci_sanitizers (ASan+UBSan) WITH_TLS=${{ matrix.with_tls }}
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 40
     permissions:
       contents: read
@@ -480,7 +484,7 @@ jobs:
     #
     # LeakSanitizer is Linux-only: it is not supported on Darwin, and an ASan binary
     # built with detect_leaks=1 HANGS on macOS rather than reporting, which is why
-    # the job below is hosted Linux and why every other sanitizer claim in this file
+    # the job below is Linux (self-hosted tweak-ci) and why every other
     # says "Linux only". That has a consequence worth stating plainly: before this
     # matrix dimension, EVERY sanitizer run in this repository was a build with
     # -DWITH_TLS=OFF, and a WITH_TLS=OFF build compiles ZERO tokens of OpenSSL. So
@@ -1060,13 +1064,13 @@ jobs:
                exit 1 ;;
           esac
 
-  # --- Advisory only, hosted ---------------------------------------------
-  # Benchmark and compliance run on the hosted runner rather than the
-  # self-hosted one so that their results are produced by infrastructure the
-  # owner does not control. Neither is a required check, so they cost nothing
-  # in merge latency and their numbers are independent of the fast machine.
+  # --- Advisory only -------------------------------------------------------
+  # Benchmark and compliance run on the self-hosted runners with everything
+  # else. Neither is a required check, so they cost nothing in merge latency;
+  # their numbers come from shared fast machines (noisier than the old pinned
+  # hosted runners) and are for trend-spotting, not gating.
   ci_benchmark:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1081,7 +1085,7 @@ jobs:
         run: ctest -L Benchmark --output-on-failure --timeout 60
 
   ci_compliance:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 30
     permissions:
       contents: read
