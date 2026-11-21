@@ -301,7 +301,13 @@ static void conn_on_readable(server_t *s, int fd)
          * loop should be able to see that it happened here and why.
          * ------------------------------------------------------------------------ */
         if (c->rlen > 0u) {
-            conn_readable(s, c);
+            /* One call frames at most 128 lines, and the CLOSING mark below
+             * stops the loop's conn_has_line() revisit, so drain fully here. */
+            do {
+                conn_readable(s, c);
+            } while (atomic_load_explicit(&c->state, memory_order_acquire) !=
+                         CONN_CLOSING &&
+                     conn_has_line(c));
         }
         printf("[observable] conn_close: fd=%d reason=eof\n", c->fd);
         conn_mark_closing(c);
@@ -346,7 +352,12 @@ static void conn_on_readable(server_t *s, int fd)
          * overwhelming majority of times this arm is reached, and a fragment and
          * dispatch of whatever is in hand when something is. */
         if (c->rlen > 0u) {
-            conn_readable(s, c);
+            /* Same 128-line budget as the EOF arm above: drain fully here. */
+            do {
+                conn_readable(s, c);
+            } while (atomic_load_explicit(&c->state, memory_order_acquire) !=
+                         CONN_CLOSING &&
+                     conn_has_line(c));
         }
         printf("[observable] conn_close: fd=%d reason=read_error errno=%d\n", c->fd,
                errno);
