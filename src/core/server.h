@@ -1374,6 +1374,15 @@ int server_init(server_t *s, const char *name);
  * a half-built node would be a new way to fail during startup. */
 void server_shutdown(server_t *s);
 
+/* Issue #288: server_shutdown() in two phases, so the goodbye-before-close
+ * ordering is unit-testable. Phase 1 queues and drains SHUTDOWN on every
+ * ESTABLISHED link and closes nothing; phase 2 stops writers and frees every
+ * allocation on the struct. server_shutdown() is phase 1 then phase 2, and
+ * every existing caller keeps calling it. Both phases are NULL-safe and safe
+ * on a half-built node, for the same startup-failure paths stated above. */
+void server_shutdown_phase1_say_goodbye(server_t *s);
+void server_shutdown_phase2_close(server_t *s);
+
 /* Bind and listen on `port` (host 0.0.0.0), nonblocking, with SO_REUSEADDR.
  * `port` may be 0, which asks the kernel for an ephemeral port -- that is how
  * tests get a port nobody else is using, and server_port() then reads back
