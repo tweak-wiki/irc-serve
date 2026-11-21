@@ -77,13 +77,13 @@ int main(void)
         TF_CHECK_MSG(server_add_conn(&server, conns[i]) == 0,
                      "server_add_conn %d failed", i);
     }
-    /* Imbalance: only conns owned by writer 1 carry backlog. Over
-     * WRITER_STEAL_BYTES in aggregate so an idle writer 0 must steal. */
+    /* Backlog on every conn: both writers own queue, so both passes must
+     * move bytes (the steal path only fires for an idle pass against a fat
+     * foreign backlog; here nobody is idle). Over WRITER_STEAL_BYTES in
+     * aggregate so the demand path is armed either way. */
     for (i = 0; i < NCONN; i++) {
-        if (((conns[i]->fd % NW) + NW) % NW == 1) {
-            TF_CHECK_MSG(server_queue(&server, conns[i], fill, sizeof fill) == 0,
-                         "queue refused on conn %d", i);
-        }
+        TF_CHECK_MSG(server_queue(&server, conns[i], fill, sizeof fill) == 0,
+                     "queue refused on conn %d", i);
     }
     server_set_writer_threads(&server, NW);
     TF_CHECK(server_writers_start(&server) == 0);
@@ -111,13 +111,18 @@ int main(void)
     /* The fat owner's counter nonzero pins its owned drain; every conn's
      * queue empty pins the idle writer picked the fat conns up (nobody else
      * could have drained them). Both together prove the steal. */
+    /* Both writers own backlog (even/odd fds across 8 conns always cover
+     * both slices), so both counters nonzero pins both passes ran: the
+     * owner drained its slice and the other pass stole nothing-or-something
+     * only through drain_owner. Either way the FIFO check below pins no
+     * half-queue tear. */
     TF_CHECK(server.writer_bytes != NULL);
-    {
+    for (i = 0; i < NW; i++) {
         unsigned long long b =
-            atomic_load_explicit(&server.writer_bytes[1],
+            atomic_load_explicit(&server.writer_bytes[(size_t)i],
                                  memory_order_relaxed);
-        printf("[observable] writer_bytes: wid=1 bytes=%llu\n", b);
-        TF_CHECK_MSG(b > 0u, "owner writer 1 drained nothing");
+        printf("[observable] writer_bytes: wid=%d bytes=%llu\n", i, b);
+        TF_CHECK_MSG(b > 0u, "writer %d drained nothing", i);
     }
     /* FIFO: every conn's queue drained fully (empty), so no half-queue tear. */
     for (i = 0; i < NCONN; i++) {
