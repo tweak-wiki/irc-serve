@@ -255,6 +255,10 @@ irc_add_integration_test(test_registration test_registration.c)
 # that never implemented CAP.
 irc_add_integration_test(test_cap_negotiation test_cap_negotiation.c)
 
+# Issue #358: the SASL stack wipe -- a real PLAIN exchange still verifies, and
+# handle_authenticate() scrubs its four stack locals at all ten exits.
+irc_add_integration_test(test_sasl_stack_wipe test_sasl_stack_wipe.c)
+
 # 7/Phase 8: the IRCv3 `msgid`. Its own file because it is the only capability
 # whose whole property is a value INVARIANT across a hop, so three of its four
 # cases need clients that negotiated the capability and one of them needs two
