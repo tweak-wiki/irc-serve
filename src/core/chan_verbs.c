@@ -2212,12 +2212,33 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         send_creation_time(s, c, ch);
         return;
     }
-    if (m->nparams > 3) {
-        (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
-                            "Not enough parameters");
-        return;
-    }
+    /* TOO MANY is counted against the letters, not against a fixed shape. Each
+     * o/v/b letter consumes one argument in order, so `+oo` needs two nicks
+     * while `+k secret` needs none -- and the surplus past what the string can
+     * consume is what the 461 is about. A single spare argument still reaches
+     * the loop, because the 472 there is the answer for a letter this node does
+     * not evaluate (`MODE #c +k secret` names `k`, not an arity fault), and the
+     * sweep pins `+k a b` as the too-MANY shape. It stays ahead of the loop so
+     * it still wins over the 472 the loop would otherwise answer. */
+    {
+        size_t need = 0;
+        size_t have;
+        size_t cap;
 
+        for (size_t k = 1; m->params[1][k] != '\0'; k++) {
+            if (m->params[1][k] == 'o' || m->params[1][k] == 'v' ||
+                m->params[1][k] == 'b') {
+                need++;
+            }
+        }
+        have = (m->nparams > 2) ? (size_t)(m->nparams - 2) : 0u;
+        cap = (need > 1) ? need : 1u;
+        if (have > cap) {
+            (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
+                                "Not enough parameters");
+            return;
+        }
+    }
     /* A mode change is a state change, so the single-writer rule applies before
      * anything else is examined. The verdict is ASKED HERE AND HELD, because the
      * 482 and 472 refusals below come first in the RFC order and a caller that
@@ -2290,10 +2311,11 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     plus = (m->params[1][0] == '+');
 
     /* A multi-letter mode string is legal ("+ovb"), so this is a loop and not a
-     * single-letter parse, and each letter is applied in the order given. The
-     * argument to a prefix or ban mode is params[2] for EVERY letter in the
-     * string, which is what RFC 1459 2.3.1 specifies: "+oov nick" is two
-     * promotions of one nick, not two different nicks. */
+     * single-letter parse, and each letter is applied in the order given. Each
+     * letter that takes a parameter consumes the NEXT one: params[2] serves the
+     * first such letter, params[3] the second, and so on, which is what RFC 1459
+     * 2.3.1 specifies ("+ov" takes two parameters, one per letter).
+     * `next_arg` below holds that cursor. */
     /* THE FORWARD ARM, AND IT USED TO BE A 437 (#141).
      *
      * WHAT IT WAS, and why the reasoning was wrong. The comment here said a
@@ -2332,41 +2354,62 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
      * COST: one bounded copy and one extra pass over the mask, on a path that runs
      * once per client MODE against a channel this node does not own. */
     if (verdict == CHAN_VERDICT_FORWARD) {
-        const char *fwd[2];
-        char clean_mask[CHAN_MAX_BAN + 1u];
-        const char *mask = (m->nparams >= 3) ? m->params[2] : NULL;
+        const char *fwd[1 + IRC_MAX_PARAMS];
+        char clean[IRC_MAX_PARAMS][CHAN_MAX_BAN + 1u];
         int nfwd = 1;
         size_t kept = 0;
+        size_t in_len = 0;
 
         if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
             return;
         }
         fwd[0] = m->params[1];
-        if (mask != NULL && mask[0] != '\0') {
-            if (strlen(mask) > (size_t)CHAN_MAX_BAN) {
+        for (size_t k = 1; m->params[1][k] != '\0'; k++) {
+            char lm = m->params[1][k];
+            const char *arg;
+            size_t idx;
+
+            if (lm != 'o' && lm != 'v' && lm != 'b') {
+                continue;
+            }
+            idx = (size_t)(nfwd - 1);
+            if (2 + idx >= (size_t)m->nparams) {
+                break;
+            }
+            arg = m->params[2 + idx];
+            if (arg[0] == '\0') {
+                continue;
+            }
+            if (strlen(arg) > (size_t)CHAN_MAX_BAN) {
                 /* NOT FORWARDED, AND SAID SO -- to the client, not just the log.
-                 * The owned path answers 417 for the same condition (:2060), and
+                 * The owned path answers 417 for the same condition, and
                  * a forwarding node that stayed silent left the client waiting
                  * for a change the origin would refuse (#273). */
                 (void)reply_refused(s, c, "MODE", NULL, "417", NULL, 0,
                                     "Input line was too long");
                 printf("[observable] chan_mode_forward: channel=%s nick=%s modes=%s "
                        "in_len=%zu kept_len=0 forwarded=0 reason=MASK_TOO_LONG\n",
-                       ch->name, c->nick, m->params[1], strlen(mask));
+                       ch->name, c->nick, m->params[1], strlen(arg));
                 return;
             }
-            kept = conn_text_strip(clean_mask, sizeof clean_mask, mask);
-            fwd[1] = clean_mask;
-            nfwd = 2;
+            kept += conn_text_strip(clean[idx], sizeof clean[idx], arg);
+            in_len += strlen(arg);
+            fwd[nfwd] = clean[idx];
+            nfwd++;
         }
         deliver_state_change(s, c, ch, "MODE", prefix, fwd, nfwd);
         printf("[observable] chan_mode_forward: channel=%s nick=%s modes=%s "
                "in_len=%zu kept_len=%zu forwarded=1 reason=CONTROL_BYTES\n",
-               ch->name, c->nick, m->params[1],
-               (mask != NULL) ? strlen(mask) : 0u, kept);
+               ch->name, c->nick, m->params[1], in_len, kept);
         return;
     }
 
+    /* Which parameter the next letter that takes one consumes: params[2] is the
+     * first argument, so this starts there and advances one slot per o/v/b
+     * letter. Letters that run past the supplied parameters answer 461.
+     * `next_arg - 2` only ever reaches 2 + 15 at most, and nparams is bounded
+     * by IRC_MAX_PARAMS, so the arithmetic below cannot wrap. */
+    size_t next_arg = 2;
     for (size_t i = 1; m->params[1][i] != '\0'; i++) {
         char mode = m->params[1][i];
         char rendered[4];
@@ -2417,24 +2460,27 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
 
         if (mode == 'o' || mode == 'v') {
             struct member *target;
+            const char *nick;
 
-            if (m->nparams < 3) {
+            if (next_arg >= (size_t)m->nparams) {
                 (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
                                     "Not enough parameters");
                 return;
             }
-            target = chan_find_nick(ch, m->params[2]);
+            nick = m->params[next_arg];
+            next_arg++;
+            target = chan_find_nick(ch, nick);
             if (target == NULL) {
                 /* 441/401 for the same reason as in KICK: "real but not here"
                  * and "does not exist" are different facts. A MODE +o naming a
                  * nickname that is not on the channel is a client bug, and 441
                  * says precisely which bug. */
-                if (server_nick_lookup(s, m->params[2]) != NULL) {
+                if (server_nick_lookup(s, nick) != NULL) {
                     (void)reply(s, c, "441",
-                                (const char *const[]){ m->params[2], ch->name }, 2,
+                                (const char *const[]){ nick, ch->name }, 2,
                                 "They're not on that channel");
                 } else {
-                    (void)reply(s, c, "401", (const char *const[]){ m->params[2] },
+                    (void)reply(s, c, "401", (const char *const[]){ nick },
                                 1, "No such nick/channel");
                 }
                 return;
@@ -2472,7 +2518,9 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             const char *effective;
             size_t kept_mask;
 
-            if (m->nparams < 3) {
+            const char *mask;
+
+            if (next_arg >= (size_t)m->nparams) {
                 /* THE QUERY FORM, not a too-few-params case. RFC 2812 3.3.2:
                  * "If the <modestring> parameter is given with a list of mode
                  * arguments, then a list of mode arguments is returned for
@@ -2480,10 +2528,19 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                  * and no argument to go with it, which is the QUESTION, and
                  * 461 answered it with "you sent too few parameters" -- a
                  * refusal that told the client its own question was malformed.
-                 * See send_ban_list() for the full argument. */
-                send_ban_list(s, c, ch);
+                 * See send_ban_list() for the full argument. Only the bare
+                 * single-letter form queries: a longer string that runs out of
+                 * arguments mid-loop is a client that under-supplied. */
+                if (m->params[1][1] == 'b' && m->params[1][2] == '\0') {
+                    send_ban_list(s, c, ch);
+                    return;
+                }
+                (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                                    "Not enough parameters");
                 return;
             }
+            mask = m->params[next_arg];
+            next_arg++;
             /* A BAN MASK IS RELAYED, SO IT IS STRIPPED, and the store and the
              * broadcast MUST get the SAME COPY. That is the whole shape of this
              * fix and it is the one `handle_topic()` got wrong on the locally-owned
@@ -2535,12 +2592,11 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
              * the STORED value and the ANNOUNCED value, and the one-copy rule above
              * is what keeps those two the same string.
              */
-            if (strlen(m->params[2]) > (size_t)CHAN_MAX_BAN) {
-                effective = m->params[2];
-                kept_mask = strlen(m->params[2]);
+            if (strlen(mask) > (size_t)CHAN_MAX_BAN) {
+                effective = mask;
+                kept_mask = strlen(mask);
             } else {
-                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask,
-                                            m->params[2]);
+                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask, mask);
                 effective = clean_mask;
             }
             if (plus) {
@@ -2578,10 +2634,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             printf("[observable] chan_ban_mode: channel=%s by=%s mask=%s set=%d "
                    "nbans=%zu origin=%s\n", ch->name, c->nick, effective, plus,
                    ch->nbans, ch->origin);
-            if (kept_mask != strlen(m->params[2])) {
+            if (kept_mask != strlen(mask)) {
                 printf("[observable] chan_ban_mask_stripped: channel=%s by=%s "
                        "in_len=%zu kept_len=%zu reason=CONTROL_BYTES\n",
-                       ch->name, c->nick, strlen(m->params[2]), kept_mask);
+                       ch->name, c->nick, strlen(mask), kept_mask);
             }
             continue;
         }
