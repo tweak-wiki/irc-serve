@@ -844,25 +844,35 @@ static void send_whois_channels(server_t *s, conn_t *dst, const conn_t *who)
 void handle_whois(server_t *s, conn_t *c, const message_t *m)
 {
     conn_t *who;
+    const char *nick;
     char idle[24];
     char signon[24];
     uint64_t now_ms;
     unsigned long long secs;
 
-    if (m->nparams != 1) {
+    /* RFC 2812 3.3.4: WHOIS [<server>] <nick>. The last parameter is the nick
+     * and a leading one names the server to ask; a mask naming this node is
+     * answered locally, anything else is 402 (no route to forward to). */
+    if (m->nparams < 1 || m->nparams > 2) {
         (void)reply_refused(s, c, "WHOIS", "INVALID_PARAMS", "461", NULL, 0,
                             "Not enough parameters");
         return;
     }
-    who = fanout_find_nick(s, m->params[0]);
+    nick = m->params[m->nparams - 1];
+    if (m->nparams == 2 && chan_same_name(s->name, m->params[0]) == 0) {
+        (void)reply(s, c, "402", (const char *const[]){ m->params[0] }, 1,
+                    "No such server");
+        return;
+    }
+    who = fanout_find_nick(s, nick);
     if (who == NULL) {
         /* 401 and then 318. 318 is not optional: a client that asked about a
          * nick and received only 401 cannot tell "that user does not exist" from
          * "the server is still working on it", and 318 is the end-of-list marker
          * the RFC pairs with every other WHOIS reply. */
-        (void)reply(s, c, "401", (const char *const[]){ m->params[0] }, 1,
+        (void)reply(s, c, "401", (const char *const[]){ nick }, 1,
                     "No such nick/channel");
-        (void)reply(s, c, "318", (const char *const[]){ m->params[0] }, 1,
+        (void)reply(s, c, "318", (const char *const[]){ nick }, 1,
                     "End of /WHOIS list");
         return;
     }

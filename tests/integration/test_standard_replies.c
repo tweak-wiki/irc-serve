@@ -362,17 +362,15 @@ static void case_461(void)
                  ":" SRV " FAIL sfew USERHOST NEED_MORE_PARAMS :Not enough "
                  "parameters\r\n");
 
-    /* NEITHER -- WHOIS takes exactly one, and one test cannot say which way it
-     * went, which is why `INVALID_PARAMS` is the code rather than a guess at the
-     * direction. It is also a REGISTERED code and the other two are not, which is
-     * the distinction standard-replies draws: "use an existing code if one is
-     * defined". */
-    both_answers(node.port, "whois-2", "WHOIS with two parameters", NULL,
+    /* A FOREIGN SERVER -- WHOIS takes [<server>] <nick>, and "alice" names no
+     * server this node can reach, so the answer is 402 on both branches: the
+     * WHOIS path sends the numeric directly rather than through reply_refused(),
+     * so a standard-replies client gets the same 402 and no FAIL. */
+    both_answers(node.port, "whois-2", "WHOIS with a foreign server", NULL,
                  "WHOIS alice bob", "pneither", "sneither", NULL,
                  CAP_STANDARD_REPLIES,
-                 ":" SRV " 461 pneither WHOIS :Not enough parameters\r\n",
-                 ":" SRV " FAIL sneither WHOIS INVALID_PARAMS :Not enough "
-                 "parameters\r\n");
+                 ":" SRV " 402 pneither alice :No such server\r\n",
+                 ":" SRV " 402 sneither alice :No such server\r\n");
 
     TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
     nf_free(&node);

@@ -538,6 +538,31 @@ int main(void)
     expect_in_window(&alice, from, end, "WHOIS in a different case",
                      ":" BIN_NAME " 311 alice bob bob " OBSERVED_HOST " * :Real bob\r\n");
 
+    /* RFC 2812 3.3.4: WHOIS [<server>] <nick>. The server param names this
+     * node and the answer is the same full reply as a bare WHOIS; a foreign
+     * server has no route and is 402; three params is still 461. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHOIS " BIN_NAME " alice") == 0, "tc_send failed");
+    end = drain(&alice);
+    expect_in_window(&alice, from, end, "311 via server param",
+                     ":" BIN_NAME " 311 alice alice alice " OBSERVED_HOST " * :Real alice\r\n");
+    expect_in_window(&alice, from, end, "312 via server param",
+                     ":" BIN_NAME " 312 alice alice " BIN_NAME " ");
+    expect_in_window(&alice, from, end, "317 via server param",
+                     ":" BIN_NAME " 317 alice alice ");
+    expect_in_window(&alice, from, end, "318 via server param",
+                     ":" BIN_NAME " 318 alice alice :End of /WHOIS list\r\n");
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHOIS nosuch.example bob") == 0, "tc_send failed");
+    end = drain(&alice);
+    expect_in_window(&alice, from, end, "402 for a foreign server",
+                     ":" BIN_NAME " 402 alice nosuch.example :No such server\r\n");
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHOIS a b c") == 0, "tc_send failed");
+    end = drain(&alice);
+    expect_in_window(&alice, from, end, "461 for three params",
+                     ":" BIN_NAME " 461 alice WHOIS :Not enough parameters\r\n");
+
     /* =======================================================================
      * 3. AWAY: set, reflected by WHO and WHOIS, cleared, reflected again
      * ==================================================================== */
