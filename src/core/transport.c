@@ -83,6 +83,10 @@
  * behaviour the teardown path already documented wanting. The cost is one flag
  * ORed into an argument on a path that was already about to be a syscall.
  */
+/* #293: no lock here -- every caller already holds wq_lock (conn_fill across
+ * recv, conn_pump across send, the shutdown drain across its own), so the
+ * depth read is serialized. Locking would self-deadlock: wq_lock is not
+ * recursive. */
 static void plain_publish(conn_t *c, int want_write_extra)
 {
     const int pending = (conn_write_pending(c) > 0u) ? 1 : 0;
