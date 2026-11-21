@@ -1,10 +1,11 @@
 # packaging/ -- irc-serve for Debian, Arch and Homebrew
 
-**Nothing in this directory has been built.** The machine this packaging was written
-on is macOS, which has no `dpkg-buildpackage`, no `dpkg-source`, no `dh`, no
-`makepkg` and no `brew`. What was verified is listed under "What was verified" below,
-and what was not is listed under "What is NOT verified". Issue **#48** stays open
-until a real Debian build runs; this file does not close it.
+The Debian half of this directory **has been built**: `scripts/build-debian-package.sh`
+ran `dpkg-buildpackage` on Linux and produced a `.deb` (source and binary stages).
+The measured results live in `scripts/check-packaging.py`'s residue section, which is
+the single truth about what was measured and what still needs a packager. Issue **#48**
+stays open anyway -- one green build on one machine from one commit is not a verified
+packaging. `makepkg` and `brew` have not been run.
 
 The Debian packaging lives at `packaging/debian/` and is reachable from the
 repository root as **`debian/`**, which is a committed symlink. See "The `./debian`
@@ -37,8 +38,9 @@ brew install --HEAD irc-serve
 brew test --HEAD irc-serve
 ```
 
-Each command is what a maintainer of that distribution would run. **None of them has
-been executed.**
+Each command is what a maintainer of that distribution would run. The Debian one has
+been executed on Linux via `scripts/build-debian-package.sh` (see the residue section
+of `scripts/check-packaging.py`); `makepkg` and `brew` have not been run.
 
 ## The `./debian` problem, and the layout this tree settled on
 
@@ -81,10 +83,8 @@ would have cost:
 * **`dpkg-source` AND THE SOURCE PACKAGE.** The concern that was recorded against
   this option -- "would `dpkg-source` want to ship the symlink inside the
   `.debian.tar`?" -- does not arise for the documented command, because `-b` never
-  runs `dpkg-source`. It would arise for a source build, which this project cannot do
-  anyway: `3.0 (quilt)` wants `irc-serve_0.1.0.orig.tar.gz` and there are no
-  releases. When a release tarball is cut, this is a one-line `debian/watch` away and
-  nothing here changes.
+  runs `dpkg-source`. The measured Linux run also produced the source stage without
+  the symlink breaking it.
 * **A TOOL THAT WALKS THE TREE SEES IT TWICE.** Anything globbing `**/debian/**` finds
   the files twice. Nothing in this repository does (`CMakeLists.txt` globs nothing, and
   the check scripts read one path), and `check-packaging.py` reads every Debian file
@@ -151,11 +151,10 @@ Why Debian and Homebrew check rather than derive:
 
 The cost, stated plainly: `3.0 (quilt)` is a **source** package format and it
 expects an upstream tarball beside the package (`irc-serve_0.1.0.orig.tar.gz`). This
-project has no releases, so there is no such tarball and a full
-`dpkg-buildpackage -b -us -uc` **cannot** be satisfied from this tree. A
-**binary-only** build from a git checkout works without it, because `-b` never looks
-for the `.orig.tar.gz`. That is the command above. When a release tarball is cut,
-the fix is one line of `debian/watch` and nothing here changes.
+project has no releases, so there is no checked-in tarball; the documented `-b`
+command never looks for it, and the measured Linux run produced both the source and
+the binary stages. When a release tarball is cut, the fix is one line of
+`debian/watch` and nothing here changes.
 
 What this file prevented: with no `debian/source/format` at all, `dpkg-source` assumes
 `1.0`, which is a **native** format, and the `0.1.0-1` changelog then contradicts it.
@@ -197,7 +196,7 @@ on is `-DWITH_TLS=ON` plus a dependency (`libssl-dev` on Debian, `openssl` on Ar
 
 ## What was verified, and how
 
-Verified on macOS, without any of the builders:
+The text checks below run anywhere, without any of the builders:
 
 * `packaging/debian/rules` is valid make: every target reaches `dh <target>` under
   `make -n` with a stub `dh` on `PATH`, and every `override_` it declares is a target
@@ -220,29 +219,20 @@ the verification that can run where the work happens.
 
 ## What is NOT verified
 
-Stated plainly rather than left to be discovered:
+The Debian side was measured on Linux by `scripts/build-debian-package.sh`: a `.deb`
+IS produced (source and binary stages), it contains `/usr/bin/irc-serve`, the
+`${shlibs:Depends}` substitution resolves, the extracted binary runs, `lintian` on
+the `.deb` is clean, and `ctest` passes in the build container. The full measured
+record -- environment, reproduce command, and residual (one machine, one commit) --
+is the residue section at the bottom of `scripts/check-packaging.py`, which is the
+single truth for those claims and is not repeated here.
 
-* **No `.deb` has ever been produced.** `dpkg-buildpackage` has not been run.
-* **That the symlink is what a real `dpkg-buildpackage` would follow.** The layout is
-  asserted by `scripts/check-packaging.py` -- that `debian` exists at the root, is a
-  symlink, and that `debian/rules` and `packaging/debian/rules` are the same file --
-  but that is a check reading a filesystem, not dpkg reading one. Whether dpkg
-  follows a committed symlink, and whether `dh` objects to one, is unverified here
-  because this machine has no dpkg at all. This is the one claim in this file that a
-  Debian machine settles in about a minute, and it is part of what #48 needs.
-* **`dpkg-source -b` has not been run**, so the source package is unproven. As
-  explained above, it is expected to fail for want of an upstream tarball.
-* **What a produced `.deb` would contain** is unverified: the executable's presence
-  from `cmake --install`, its `${shlibs:Depends}` substitution (which needs
-  `dpkg-shlibdeps` and the built binary), and the file list.
-* **`lintian` has not been run**, so Debian POLICY compliance is unknown.
+Stated plainly rather than left to be discovered, what nothing has measured:
+
 * **`makepkg` has not been run.** `PKGBUILD`'s `source` line is a git branch, so
   `makepkg` additionally needs network access, and `arch=('aarch64')` is a claim
   about this source compiling there rather than a measurement.
 * **`brew install` and `brew test` have not been run.** The formula's `test` block is
   verified only to be valid Ruby with the right assertions in it.
-* **`override_dh_auto_test` running `ctest` in a Debian build environment is
-  unverified.** The suite binds ports and spawns nodes, and a Debian build
-  environment may not allow that.
 
-Issue #48 is the tracker for the Debian side of this list, and it stays open.
+Issue #48 tracks the remaining Debian residual, and it stays open.
