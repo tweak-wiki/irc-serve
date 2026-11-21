@@ -537,7 +537,33 @@ int main(void)
     fed_dedup_reset(&s);
 
     /* =======================================================================
-     * A4. THE TTL, AND BOTH SIDES OF IT
+     * A4. ID WRAP (test_dedup_id_wrap)
+     * ==================================================================== */
+    /* 64-bit message ids eventually wrap. The post-wrap sequence is UINT64_MAX
+     * then 1: id 0 is reserved as "unset" (message.h) and is never a key, so
+     * the boundary the store must survive is MAX straight to 1. The store keys
+     * on exact (origin, epoch, id), so the post-wrap id is a different message
+     * -- but only a test across the boundary proves the compare is equality
+     * and not recency, under which the wrapped id would read as older than
+     * everything and drop as a replay, silencing a long-running node's
+     * legitimate post-wrap traffic. */
+    tag_of(&t, PEER_NAME, 1756464000123ULL, UINT64_MAX, 0u);
+    TF_CHECK_MSG(fed_dedup_seen(&s, &t, base) == 0,
+                 "id UINT64_MAX was reported as already seen, so the first copy "
+                 "of a pre-wrap message would be dropped");
+    tag_of(&t, PEER_NAME, 1756464000123ULL, 1u, 0u);
+    TF_CHECK_MSG(fed_dedup_seen(&s, &t, base) == 0,
+                 "the post-wrap id 1 was dropped as a replay of id UINT64_MAX; "
+                 "a node that has been up long enough to wrap would lose "
+                 "legitimate traffic");
+    TF_CHECK_MSG(fed_dedup_size(&s) == 2u,
+                 "the wrap boundary left the store holding %zu entries, not the "
+                 "two distinct keys",
+                 fed_dedup_size(&s));
+    fed_dedup_reset(&s);
+
+    /* =======================================================================
+     * A5. THE TTL, AND BOTH SIDES OF IT
      * ==================================================================== */
     /* The expiry is a bound on memory, not on loop prevention, and it is checked
      * on both sides: one millisecond before the TTL the entry is still held,
@@ -588,7 +614,7 @@ int main(void)
     fed_dedup_reset(&s);
 
     /* =======================================================================
-     * A5. CAPACITY, AND WHY LOSING AN ENTRY IS NOT A CORRECTNESS PROBLEM
+     * A6. CAPACITY, AND WHY LOSING AN ENTRY IS NOT A CORRECTNESS PROBLEM
      * ==================================================================== */
     /* The store is fixed-capacity, so a full store EVICTS rather than refusing
      * to record. The cost of that is stated in federation/dedup.h: a forgotten
@@ -915,7 +941,7 @@ int main(void)
      * Teardown
      * ==================================================================== */
     /* server_shutdown() closes the peer connection and releases the link vector
-     * AND the dedup table, which by now holds entries from section A5. On this
+     * AND the dedup table, which by now holds entries from section A6. On this
      * platform that last part is asserted rather than verified: LeakSanitizer
      * does not exist on Darwin, so only the Linux CI job can catch a missing
      * free here. */
