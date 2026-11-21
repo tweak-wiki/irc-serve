@@ -843,18 +843,6 @@ int fed_mark_clean_leave(server_t *s, server_link_t *link, int set)
     return (was != link->clean_leave) ? 1 : 0;
 }
 
-/* How many bytes this node is willing to absorb from a peer, per link, on its way
- * out. See the drain inside fed_send_shutdown(): the bound exists so a teardown
- * cannot be made to spin by a peer that is streaming at it.
- *
- * 8 KiB is chosen for what it has to cover rather than for tidiness: it is above
- * what a receive queue holds in every realistic case, so the close that follows is a
- * FIN in every realistic case, and it is small enough that the whole drain is a
- * handful of recv() calls. It is NOT a limit on what a peer may have sent -- nothing
- * here refuses data, the bytes are read and discarded either way -- it is a limit on
- * how long this node will spend reading them. */
-#define FED_SHUTDOWN_DRAIN_MAX 8192u
-
 /* Send `SHUTDOWN [:reason]` to every ESTABLISHED link. Returns how many carried
  * it.
  *
@@ -957,13 +945,16 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * scratch and forgetting them is the honest description of what happens to
              * a peer's last words during a shutdown.
              *
-             * IT IS BOUNDED, because this runs on the teardown path and must not be
-             * able to spin: the loop stops on EAGAIN, on EOF, on a read error, or on
-             * DRAIN_MAX bytes. A peer that is streaming at us gets its queue emptied up
-             * to that bound and the close is still a FIN rather than an RST in every
-             * realistic case, because a receive queue holds kilobytes rather than
-             * megabytes. The cost is a recv() per pending chunk on the way out, on a
-             * path that runs once per process.
+             * THERE IS NO BYTE CAP ON THIS LOOP, and removing the old 8 KiB one
+             * is the fix: one TLS record is 16 KiB, so a peer with more than 8 KiB
+             * pending stopped the drain early and the close that followed was an
+             * RST that ate the SHUTDOWN. The loop stops on EAGAIN (empty queue),
+             * on EOF, or on a read error -- every one of those means there is
+             * nothing left that a close() could RST over. It cannot spin on an
+             * idle peer (RETRY breaks), and a peer streaming faster than a
+             * nonblocking drain during our own shutdown is not a case that
+             * exists. The cost is a recv() per pending chunk on the way out,
+             * on a path that runs once per process.
              *
              * MSG_DONTWAIT rather than relying on the socket's flags: the drain must
              * not be able to block a teardown even if some other code path made this
@@ -980,9 +971,8 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * answers in its own four-value vocabulary -- bytes, EOF, TRANSPORT_RETRY,
              * TRANSPORT_FATAL -- and TRANSPORT_FATAL is the one case this loop must not
              * spin on: it breaks, which is what the old `break` on a non-EINTR error
-             * did. The loop's own bound is unchanged, so the cost of this path on a
-             * plaintext mesh is one function call per pending chunk on a path that runs
-             * once per process.
+             * did. The cost of this path on a plaintext mesh is one function
+             * call per pending chunk on a path that runs once per process.
              *
              * MT 3.1 (#290): THIS DRAIN RUNS UNDER c->wq_lock, and that is the
              * fix rather than decoration. transport_recv() on a TLS link is
@@ -1005,11 +995,8 @@ int fed_send_shutdown(server_t *s, const char *reason)
                     ssize_t got = transport_recv(c, sink, sizeof sink);
 
                     if (got > 0) {
-                        drained += (size_t)got;
-                        if (drained >= (size_t)FED_SHUTDOWN_DRAIN_MAX) {
-                            break;
-                        }
-                        continue;
+                        drained += (size_t)got; /* counted for the log line only */
+                        continue; /* more may be pending: stop only on RETRY/EOF */
                     }
                     /* BREAK ON TRANSPORT_RETRY, AND THAT IS NOT AN INVERSION OF
                      * THE OLD LOOP -- IT IS THE OLD LOOP.
