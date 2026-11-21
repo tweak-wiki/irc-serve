@@ -772,8 +772,9 @@ static void writer_drain_one(server_t *s)
     /* MT 2.2: the whole scan holds reg_mu, so the loop's add/detach cannot
      * move active_fds/by_fd under us (TSan) and a resolved conn cannot be
      * detached/freed mid-pump. Lock order reg_mu -> wq_lock is fixed: the
-     * pump takes wq_lock inside, never the reverse. The loop never blocks on
-     * reg_mu while holding wq_lock (fill/queue take wq_lock alone). */
+     * drain below takes wq_lock around each pump, never the reverse. The
+     * loop never blocks on reg_mu while holding wq_lock (fill/queue take
+     * wq_lock alone). */
     if (s->reg_started) {
         pthread_mutex_lock(&s->reg_mu);
     }
@@ -781,6 +782,7 @@ static void writer_drain_one(server_t *s)
         int fd;
         conn_t *c;
         size_t before;
+        size_t after;
         int rc;
 
         if (i >= s->nactive) {
@@ -799,14 +801,17 @@ static void writer_drain_one(server_t *s)
             continue;
         }
         /* wlen/woff are wq_lock-guarded (loop's conn_queue vs our pump);
-         * reg_mu covers structure only, so these stay locked reads. Order
-         * reg_mu -> wq_lock holds: nothing takes them in reverse.
-         * #369: one bounded slice per conn per visit, not the whole
-         * backlog -- the scan is round-robin, so a thin conn queued behind
-         * a fat one drains within one slice of being queued. */
-        before = conn_write_pending_locked(c);
+         * reg_mu covers structure only. #369: one bounded slice per conn per
+         * visit, not the whole backlog -- the scan is round-robin, so a thin
+         * conn queued behind a fat one drains within one slice of being
+         * queued. #316: ONE lock/unlock per conn per scan -- the drain holds
+         * wq_lock across the before read, the slice pump and the after read
+         * (conn_write_pending_held), instead of three lock/unlock pairs.
+         * Order reg_mu -> wq_lock holds: nothing takes them in reverse. */
         pthread_mutex_lock(&c->wq_lock);
+        before = conn_write_pending_held(c);
         rc = conn_pump_slice_locked(c);
+        after = conn_write_pending_held(c);
         pthread_mutex_unlock(&c->wq_lock);
         if (rc < 0) {
             atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
@@ -814,7 +819,7 @@ static void writer_drain_one(server_t *s)
             conn_mark_closing(c);
             continue;
         }
-        if (before > 0 && conn_write_pending_locked(c) > 0) {
+        if (before > 0 && after > 0) {
             atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
         }
     }
@@ -841,8 +846,9 @@ static void *writer_main(void *arg)
      * sees gen != seen and drains instead of sleeping past it (idle conn,
      * no POLLOUT-driven pump at N > 0). wq_stop is part of the same
      * predicate, so the shutdown wakeup is never mistaken for a spurious
-     * wakeup. Consuming a generation counts one wake (wq_wakes), so one
-     * kick per queued conn shows up as exactly one wake on its owner. */
+     * wakeup. Consuming a generation counts one wake (wq_wakes). #316: the
+     * consume also clears wq_kick_pending, so kicks that arrived mid-drain
+     * collapse into this wakeup instead of queueing another. */
     unsigned long seen = 0ul;
 
     free(wa);
@@ -857,6 +863,7 @@ static void *writer_main(void *arg)
             }
             if (s->wq_slot_gen[idx] != seen) {
                 seen = s->wq_slot_gen[idx];
+                s->wq_kick_pending[idx] = 0;
                 (void)atomic_fetch_add_explicit(&s->wq_wakes[idx], 1u,
                                                   memory_order_relaxed);
                 break;
@@ -879,17 +886,21 @@ int server_writers_start(server_t *s)
         (pthread_cond_t *)calloc((size_t)s->writer_threads, sizeof *s->wq_slot_avail);
     s->wq_slot_gen =
         (unsigned long *)calloc((size_t)s->writer_threads, sizeof *s->wq_slot_gen);
+    s->wq_kick_pending =
+        (unsigned char *)calloc((size_t)s->writer_threads, sizeof *s->wq_kick_pending);
     s->wq_wakes =
         (atomic_ullong *)calloc((size_t)s->writer_threads, sizeof *s->wq_wakes);
     if (s->writers == NULL || s->wq_slot_avail == NULL || s->wq_slot_gen == NULL ||
-        s->wq_wakes == NULL) {
+        s->wq_kick_pending == NULL || s->wq_wakes == NULL) {
         free(s->writers);
         free(s->wq_slot_avail);
         free(s->wq_slot_gen);
+        free(s->wq_kick_pending);
         free(s->wq_wakes);
         s->writers = NULL;
         s->wq_slot_avail = NULL;
         s->wq_slot_gen = NULL;
+        s->wq_kick_pending = NULL;
         s->wq_wakes = NULL;
         return -1;
     }
@@ -897,10 +908,12 @@ int server_writers_start(server_t *s)
         free(s->writers);
         free(s->wq_slot_avail);
         free(s->wq_slot_gen);
+        free(s->wq_kick_pending);
         free(s->wq_wakes);
         s->writers = NULL;
         s->wq_slot_avail = NULL;
         s->wq_slot_gen = NULL;
+        s->wq_kick_pending = NULL;
         s->wq_wakes = NULL;
         return -1;
     }
@@ -915,10 +928,12 @@ int server_writers_start(server_t *s)
             free(s->writers);
             free(s->wq_slot_avail);
             free(s->wq_slot_gen);
+            free(s->wq_kick_pending);
             free(s->wq_wakes);
             s->writers = NULL;
             s->wq_slot_avail = NULL;
             s->wq_slot_gen = NULL;
+            s->wq_kick_pending = NULL;
             s->wq_wakes = NULL;
             return -1;
         }
@@ -963,10 +978,12 @@ int server_writers_start(server_t *s)
         free(s->writers);
         free(s->wq_slot_avail);
         free(s->wq_slot_gen);
+        free(s->wq_kick_pending);
         free(s->wq_wakes);
         s->writers = NULL;
         s->wq_slot_avail = NULL;
         s->wq_slot_gen = NULL;
+        s->wq_kick_pending = NULL;
         s->wq_wakes = NULL;
         s->writers_started = 0;
         s->writer_threads = 0;
@@ -978,6 +995,7 @@ int server_writers_start(server_t *s)
     pthread_mutex_lock(&s->wq_mu);
     for (i = 0; i < s->writer_threads; i++) {
         s->wq_slot_gen[i]++;
+        s->wq_kick_pending[i] = 1;
         pthread_cond_signal(&s->wq_slot_avail[i]);
     }
     pthread_mutex_unlock(&s->wq_mu);
@@ -1004,8 +1022,19 @@ void server_writers_kick(server_t *s)
     if (s == NULL || !s->writers_started) {
         return;
     }
+    /* #316: one kick per slot per drain turn. A slot with an unconsumed kick
+     * is skipped: its pending bump already guarantees its writer will drain
+     * everything queued so far (writers drain the whole scan, not one
+     * conn), so a fanout burst costs one wakeup per slot, not one per
+     * member. Skipping is lossless -- pending == 1 means a bump happened
+     * after the writer's last consume, and the writer always drains after
+     * consuming, covering every byte queued before the skip. */
     pthread_mutex_lock(&s->wq_mu);
     for (i = 0; i < s->writer_threads; i++) {
+        if (s->wq_kick_pending[i] != 0) {
+            continue;
+        }
+        s->wq_kick_pending[i] = 1;
         s->wq_slot_gen[i]++;
         pthread_cond_signal(&s->wq_slot_avail[i]);
     }
@@ -1021,8 +1050,11 @@ void server_writers_kick_conn(server_t *s, const conn_t *c)
     }
     slot = writer_owner_slot(s, (c != NULL) ? c->fd : -1);
     pthread_mutex_lock(&s->wq_mu);
-    s->wq_slot_gen[slot]++;
-    pthread_cond_signal(&s->wq_slot_avail[slot]);
+    if (s->wq_kick_pending[slot] == 0) {
+        s->wq_kick_pending[slot] = 1;
+        s->wq_slot_gen[slot]++;
+        pthread_cond_signal(&s->wq_slot_avail[slot]);
+    }
     pthread_mutex_unlock(&s->wq_mu);
 }
 
@@ -1049,10 +1081,12 @@ void server_writers_stop(server_t *s)
     free(s->writers);
     free(s->wq_slot_avail);
     free(s->wq_slot_gen);
+    free(s->wq_kick_pending);
     free(s->wq_wakes);
     s->writers = NULL;
     s->wq_slot_avail = NULL;
     s->wq_slot_gen = NULL;
+    s->wq_kick_pending = NULL;
     s->wq_wakes = NULL;
     s->writers_started = 0;
 }

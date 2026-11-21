@@ -219,11 +219,6 @@ struct server;
  * a client cannot grow it by withholding a newline. */
 #define CONN_RBUF_MAX ((size_t)IRC_MAX_LINE)
 
-/* Reclaim the head of the write queue once this many bytes have been sent and
- * the remainder is smaller than this, so a steady trickle does not leave the
- * allocation pinned at its high-water mark forever. */
-#define CONN_WQ_COMPACT ((size_t)4096u)
-
 /* Size of the buffer conn_hostmask() renders into: nick + '!' + user + '@' +
  * host + NUL, written as the three struct widths so raising any of them cannot
  * leave a caller with a buffer that is one byte short. */
@@ -1334,6 +1329,11 @@ size_t conn_write_pending(const conn_t *c);
  * checks (writer accounting, reaper deferral). NOT connection.h externals
  * churn: one accessor, same units. */
 size_t conn_write_pending_locked(conn_t *c);
+/* Same byte count, but the caller already holds c->wq_lock, so no locking:
+ * lets a drain read before/after around one conn_pump_locked() call with a
+ * single lock/unlock per conn per scan (#316) instead of three. MUST NOT be
+ * called without the lock. */
+size_t conn_write_pending_held(const conn_t *c);
 
 /* Mark the connection CLOSING. Idempotent, and deliberately the only state
  * transition a send or read path is allowed to make. */

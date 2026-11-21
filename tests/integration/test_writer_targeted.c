@@ -120,8 +120,10 @@ int main(void)
                      wakes(&s, (int)j), before[j]);
     }
 
-    /* A targeted conn kick wakes its owner; a NULL-conn kick lands on slot
-     * 0, still targeted -- never a broadcast. */
+    /* #316: kicks to a slot with an unconsumed kick collapse into one wakeup,
+     * so two back-to-back kicks to the SAME slot may show up as one wake or
+     * two, depending on whether the writer consumed the first in between.
+     * Targeting still holds exactly: no other slot may wake. */
     for (i = 0; i < NW; i++) {
         before[i] = wakes(&s, i);
     }
@@ -132,29 +134,36 @@ int main(void)
     while (now_us() < deadline) {
         unsigned long want_other = before[slots[other]] + 1u;
         unsigned long want_zero = before[0] + 1u;
+        unsigned long got_other = wakes(&s, slots[other]);
+        unsigned long got_zero = wakes(&s, 0);
 
         if (slots[other] == 0) {
-            want_zero++;
-        }
-        if (wakes(&s, slots[other]) == want_other &&
-            wakes(&s, 0) == want_zero) {
+            /* Both kicks landed on slot 0: at least one wakeup happened, and
+             * at most one per kick. */
+            if (got_zero >= before[0] + 1u && got_zero <= before[0] + 2u) {
+                break;
+            }
+        } else if (got_other == want_other && got_zero == want_zero) {
             break;
         }
         (void)usleep(1000);
     }
     {
-        unsigned long want_other = before[slots[other]] + 1u;
-        unsigned long want_zero = before[0] + 1u;
+        unsigned long got_other = wakes(&s, slots[other]);
+        unsigned long got_zero = wakes(&s, 0);
 
         if (slots[other] == 0) {
-            want_zero++;
+            TF_CHECK_MSG(got_zero >= before[0] + 1u && got_zero <= before[0] + 2u,
+                         "slot 0 double kick: %lu, want %lu..%lu", got_zero,
+                         before[0] + 1u, before[0] + 2u);
+        } else {
+            TF_CHECK_MSG(got_other == before[slots[other]] + 1u,
+                         "kick_conn target slot %d: %lu != %lu", slots[other],
+                         got_other, before[slots[other]] + 1u);
+            TF_CHECK_MSG(got_zero == before[0] + 1u,
+                         "NULL-conn kick: slot 0 %lu != %lu", got_zero,
+                         before[0] + 1u);
         }
-        TF_CHECK_MSG(wakes(&s, slots[other]) == want_other,
-                     "kick_conn target slot %d: %lu != %lu", slots[other],
-                     wakes(&s, slots[other]), want_other);
-        TF_CHECK_MSG(wakes(&s, 0) == want_zero,
-                     "NULL-conn kick: slot 0 %lu != %lu", wakes(&s, 0),
-                     want_zero);
     }
     for (j = 0; j < (size_t)NW; j++) {
         if ((int)j == slots[other] || (int)j == 0) {
