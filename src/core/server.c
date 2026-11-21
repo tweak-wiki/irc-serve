@@ -1699,6 +1699,10 @@ int server_add_conn(server_t *s, conn_t *c)
      * and the backend treats that as "not configured" rather than dereferencing. */
     c->owner = s;
     s->by_fd[c->fd] = c;
+    /* #281(b): a recycled descriptor inherits no deadline. The slot is keyed
+     * by fd NUMBER, so without this a new conn on an old fd would close early
+     * on the previous holder's bound -- or hang 2 s extra on it. */
+    s->wq_close_at[c->fd] = 0;
     s->active_fds[s->nactive++] = c->fd;
     s->nconns++;
     s->n_accepted++;
@@ -1873,6 +1877,12 @@ void server_close_conn(server_t *s, int fd)
         pthread_mutex_lock(&s->reg_mu);
     }
     s->by_fd[fd] = NULL;
+    /* #281(b): the bound dies with the holder. Every closer runs through here,
+     * so the reaper and the dial/shutdown paths cannot leave a deadline behind
+     * for the next conn the OS numbers this way. */
+    if (fd >= 0 && fd < SERVER_FD_TABLE) {
+        s->wq_close_at[fd] = 0;
+    }
     s->nconns--;
     for (i = 0; i < s->nactive; i++) {
         if (s->active_fds[i] == fd) {
@@ -2003,6 +2013,18 @@ int server_reap(server_t *s)
                         s->wq_close_at[fd] == 0) {
                         s->wq_close_at[fd] = server_now_ms() + 2000u;
                     }
+                    /* #281(a): the bound fires even when the lock never frees.
+                     * Past the deadline the holder is not draining but wedged,
+                     * and waiting on it would pin the fd and its queue toward
+                     * FD_SETSIZE. shutdown() neither detaches nor frees --
+                     * #242 still holds -- it just fails the in-flight pump, so
+                     * the writer drops the lock and the fall-through below
+                     * closes on the next tick. */
+                    if (fd >= 0 && fd < SERVER_FD_TABLE &&
+                        s->wq_close_at[fd] != 0 &&
+                        server_now_ms() >= s->wq_close_at[fd]) {
+                        (void)shutdown(fd, SHUT_RDWR);
+                    }
                     server_writers_kick_conn(s, c);
                     i++;
                     continue;
@@ -2024,9 +2046,8 @@ int server_reap(server_t *s)
                     }
                 }
             }
-            if (fd >= 0 && fd < SERVER_FD_TABLE) {
-                s->wq_close_at[fd] = 0;
-            }
+            /* The slot zeroing lives in server_close_conn() now (#281(b)), so a
+             * non-reaper closer cannot leave a deadline behind either. */
             server_close_conn(s, fd);
             closed++;
         } else {
