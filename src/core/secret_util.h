@@ -1,10 +1,7 @@
-/* secret_util.h -- the one shared secret-file open and constant-time compare.
- *
- * Both secret stores (sasl_framework.c's credential store and account_store.c's
- * registry) read files of passwords under the same discipline, and compare
- * salted digests under the same comparison. One copy rather than two, so the
- * refusal reasons and the comparison cannot drift apart between the two
- * loaders.
+/* secret_util.h -- the one shared home for the secret stores: secret-file
+ * open, constant-time digest compare, SHA-256, salt generation and the
+ * ASCII-folded name compare. One copy rather than two, so the stores cannot
+ * drift apart.
  *
  * WHY A FILE OF ITS OWN rather than living in sasl_framework.c: that file is
  * on test_close_sites.c's never-close list, and this open owns a descriptor
