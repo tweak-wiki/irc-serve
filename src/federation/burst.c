@@ -1863,6 +1863,81 @@ static void apply_topic(chan_t *ch, const burst_chan_t *sc)
     ch->topic_when = (time_t)sc->topic_when;
 }
 
+/* Whether the staged roster for one channel can be installed (#209): every
+ * member the commit loop would ADD must pass chan_remote_add()'s own checks,
+ * and the survivors plus the new members must fit under
+ * CHAN_MAX_REMOTE_MEMBERS. Runs BEFORE the purge, against the post-purge
+ * state (locals plus other servers' remotes plus earlier staged members), so
+ * a burst whose re-add would partly fail discards the whole record instead of
+ * shrinking the roster. Conservative on duplicates: a nick matching anything
+ * already counted is skipped, exactly as the commit loop's member_known()
+ * would skip it. Returns 0 when the install may proceed, -1 to discard. */
+static int burst_roster_fits(const server_t *s, const chan_t *ch,
+                             const char *origin, const burst_chan_t *sc)
+{
+    size_t keep = 0;
+    size_t fresh = 0;
+
+    if (ch == NULL || origin == NULL || sc == NULL ||
+        !irc_serve_server_name_valid(origin)) {
+        return -1;
+    }
+    for (size_t i = 0; i < ch->nremotes; i++) {
+        if (!chan_same_name(ch->remotes[i].server, origin)) {
+            keep++;
+        }
+    }
+    for (size_t k = 0; k < sc->nmembers; k++) {
+        const char *nick = sc->members[k].nick;
+        const char *ms = sc->members[k].server;
+        const char *acct = sc->members[k].account;
+        int seen = 0;
+
+        if (s != NULL) {
+            conn_t *local = server_nick_lookup(s, nick);
+
+            if (local != NULL && chan_find_member(ch, local) != NULL) {
+                continue;
+            }
+        } else if (chan_find_nick(ch, nick) != NULL) {
+            continue;
+        }
+        for (size_t i = 0; i < ch->nremotes; i++) {
+            if (!chan_same_name(ch->remotes[i].server, origin) &&
+                chan_same_name(ch->remotes[i].nick, nick)) {
+                seen = 1;
+                break;
+            }
+        }
+        if (seen == 0) {
+            for (size_t j = 0; j < k; j++) {
+                if (chan_same_name(sc->members[j].nick, nick)) {
+                    seen = 1;
+                    break;
+                }
+            }
+        }
+        if (seen != 0) {
+            continue;
+        }
+        /* THE SAME THREE REFUSALS chan_remote_add() APPLIES to a new entry:
+         * bad nick, bad holder server, bad account. Staging already filtered
+         * these, so this arm is the cap (and a second implementation's
+         * record) rather than the common path -- but the check is here and
+         * not only there because the purge below must not run first. */
+        if (!valid_nick(nick) ||
+            (ms[0] != '\0' && !irc_serve_server_name_valid(ms)) ||
+            (acct[0] != '\0' && acct[0] != '*' &&
+             account_name_wire_safe(acct) == 0)) {
+            return -1;
+        }
+        if (++fresh > (size_t)CHAN_MAX_REMOTE_MEMBERS - keep) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* SBURSTE <epoch> <nnicks> <nchans> <nmembers>. */
 static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 {
@@ -2025,6 +2100,19 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 
         if (ch == NULL) {
             dropped++;
+            continue;
+        }
+        /* TWO-PASS COMMIT (#209). The purge below destroys the roster the
+         * re-add may then refuse (member cap, bad account), so the fit is
+         * checked first and a burst that would shrink the channel discards
+         * the whole record instead. A channel this burst created has nothing
+         * to keep and is disposed so it does not linger empty. */
+        if (burst_roster_fits(s, ch, origin, sc) != 0) {
+            printf("[observable] fed_burst_chan_discarded: channel=%s peer=%s "
+                   "reason=ROSTER_WOULD_NOT_FIT\n",
+                   ch->name, origin);
+            dropped++;
+            (void)chan_dispose_if_empty(s, ch);
             continue;
         }
         /* THE REPLACEMENT. Everything the origin contributed to this channel
