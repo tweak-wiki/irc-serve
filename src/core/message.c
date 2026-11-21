@@ -499,7 +499,10 @@ int message_build(message_t *out,
      * renderer would refuse. *out stays zeroed on every refusal above and
      * below. Empty tags/prefix mean "absent", as in the copy below. */
     if (tags != NULL && tags[0] != '\0') {
-        if (tags[0] == '@' || strpbrk(tags, " \t\r\n") != NULL) {
+        /* A block the parser rejects (trailing ';', empty pair, ...) must
+         * never be held, let alone emitted (#276). */
+        if (tags[0] == '@' || strpbrk(tags, " \t\r\n") != NULL ||
+            tag_block_valid(tags) == 0) {
             return -1;
         }
     }
@@ -656,8 +659,11 @@ size_t message_format_ex(const message_t *m, char *out, size_t cap,
 
     /* Validate before emitting anything, so a failure never leaves a partial
      * line in `out`. */
-    if (m->tags != NULL) {
-        if (m->tags[0] == '@' || strpbrk(m->tags, " \t\r\n") != NULL) {
+    if (m->tags != NULL && m->tags[0] != '\0') {
+        /* Refuse what the parser rejects so format never emits a line the
+         * receiver drops, poisoning a whole burst for one bad field (#276). */
+        if (m->tags[0] == '@' || strpbrk(m->tags, " \t\r\n") != NULL ||
+            tag_block_valid(m->tags) == 0) {
             return 0;
         }
     }
