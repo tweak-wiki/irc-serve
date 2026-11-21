@@ -1,5 +1,6 @@
-/* secret_util.c -- the shared secret-file open and constant-time compare.
- * See secret_util.h for why this is a file of its own. */
+/* secret_util.c -- the shared secret-store helpers (file open, compare,
+ * SHA-256, salt, salted hash, folded compare). See secret_util.h for why
+ * this is a file of its own. */
 #include "core/secret_util.h"
 
 #include <fcntl.h>
