@@ -306,6 +306,18 @@ drained at N=0/2/4, nonzero exit on a stall, advisory-only in CI). The inline
 path wins unloaded, so stay on the default until the tick budget says otherwise,
 then try N=2 and measure again before N=4.
 
+### Deferred hot spots: measured cold (#375)
+
+The audit suspects below were timed at N=800 against the 50 ms tick budget and
+found cold, so do not re-file them without new numbers: per-tick 3x800 scans
+~0.6 us total (`poll_loop.c` poll-set build, readiness walk, `rate_refill`
+sweep at 0.39 us); dedup "416 KiB calloc" is a guarded once-only `table_alloc`
+(`dedup.c:178`) with a ~3 us `memset` reset once per cycle, not per tick;
+transport vtable costs ~0 ns over a direct call per socket op, next to a
+microsecond `read()`/`send()`; `rate_refill` is ~4 flops once per live conn per
+tick. Burst-path items (#373 qsort, #374 single-pass add) landed under their
+own PRs and were not re-measured here.
+
 ## Local verification
 
 ```sh
