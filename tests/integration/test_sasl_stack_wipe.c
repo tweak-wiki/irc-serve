@@ -157,8 +157,8 @@ static void expect_wipe_in_source(void)
         return;
     }
     /* The helper exists and scrubs through a volatile pointer, so the compiler
-     * cannot delete it as a dead store -- the same shape as sasl_framework.c's
-     * sasl_wipe(). */
+     * cannot delete it as a dead store -- the same shape as secret_util.c's
+     * secret_wipe(). */
     TF_CHECK_MSG(strstr(code, "static void auth_wipe(void *p, size_t n)") != NULL,
                  "auth_wipe() is missing from src/core/commands.c");
     TF_CHECK_MSG(strstr(code, "volatile unsigned char *v") != NULL,

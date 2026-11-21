@@ -2284,7 +2284,7 @@ static void handle_unregister(server_t *s, conn_t *c, const message_t *m)
  * no variable holds one afterwards. */
 /* Overwrite `n` bytes at `p`, through a volatile pointer: a memset() to a stack
  * buffer whose frame is about to be reused is a store the compiler may prove
- * dead and delete, which is why sasl_framework.c's sasl_wipe() does the same. */
+ * dead and delete, which is why secret_util.h's secret_wipe() does the same. */
 static void auth_wipe(void *p, size_t n)
 {
     volatile unsigned char *v = (volatile unsigned char *)p;
