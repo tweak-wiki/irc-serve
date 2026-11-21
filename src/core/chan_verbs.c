@@ -2284,6 +2284,20 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     if (verdict == CHAN_VERDICT_REFUSED) {
         return; /* 437 already sent */
     }
+    if (m->params[1][0] == '\0' ||
+        ((m->params[1][0] == '+' || m->params[1][0] == '-') &&
+         m->params[1][1] == '\0')) {
+        /* A MODE STRING WITH NO LETTERS -- "" or a lone "+" or "-": the client
+         * sent the mode argument and none of the argument that goes with it, so
+         * this is a too-FEW case rather than a malformed one, and NEED_MORE_PARAMS
+         * says exactly that. The empty string is checked FIRST, because an empty
+         * first byte is not '+' or '-' and the sign test below would otherwise
+         * answer 472 for a missing argument. A bare letter with no sign (`k`)
+         * still falls through to 472: it names a character, just not a signed one. */
+        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
     if (m->params[1][0] != '+' && m->params[1][0] != '-') {
         /* 472 ERR_UNKNOWNMODE, and RFC 2812 5.2's field list for it is
          *
@@ -2323,14 +2337,6 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=%s "
                "reason_len=%zu reason_byte=0x%02x reason_bad_bytes=%zu\n",
                ch->name, c->nick, shown, len, (unsigned char)m->params[1][0], bad);
-        return;
-    }
-    if (m->params[1][1] == '\0') {
-        /* A MODE STRING WITH NO LETTERS: the client sent the mode argument and
-         * none of the argument that goes with it, so this is a too-FEW case rather
-         * than a malformed one, and NEED_MORE_PARAMS says exactly that. */
-        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
-                            "Not enough parameters");
         return;
     }
     if (!chan_has_flag(ch, c, CHAN_MEMBER_OP)) {
