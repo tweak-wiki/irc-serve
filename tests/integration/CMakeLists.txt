@@ -229,6 +229,10 @@ irc_add_integration_test(test_close_handoff test_close_handoff.c)
 # MT 3.1 (#290): the shutdown drain serializes under wq_lock -- TLS peer
 # link, N=4, shutdown while the peer streams. No TSan race, no crash.
 irc_add_integration_test(test_shutdown_drain test_shutdown_drain.c)
+# Issue #272: the shutdown goodbye reaches the wire -- the peer, not the
+# sender, is the witness, so a removed pump turns this red (a sender-side
+# fed_shutdown_sent: wait would not).
+irc_add_integration_test(test_shutdown_goodbye test_shutdown_goodbye.c)
 
 # 3.4: the reaper is the only close site, and a closed slot leaves nothing
 # behind. The structural half is the test below.
