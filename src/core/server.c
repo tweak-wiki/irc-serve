@@ -751,11 +751,15 @@ void server_set_writer_threads(server_t *s, int n)
  * and the worker live here so server.c owns the whole lifecycle.
  *
  * Each writer loops: wait for work, then scan the active list for a live conn
- * with want_write set, and conn_pump() it under that conn's wq_lock. The loop
- * thread never pumps when N > 0 (see poll_loop.c), so every send on a conn
- * happens under exactly one holder of wq_lock at a time -- and conn_pump()
- * itself takes that lock, so two writers can never drain the same FIFO
- * concurrently. Order follows: bytes leave in queue order per conn.
+ * with want_write set, and drain one bounded slice of it under that conn's
+ * wq_lock (#369: CONN_WQ_SLICE bytes via conn_pump_slice_locked(), then on
+ * to the next owned conn -- round-robin, not priority, so a fat conn with an
+ * unbounded backlog cannot hold a writer past one slice while a thin conn's
+ * reply waits). The loop thread never pumps when N > 0 (see poll_loop.c),
+ * so every send on a conn happens under exactly one holder of wq_lock at a
+ * time -- and the slice pump takes that lock, so two writers can never drain
+ * the same FIFO concurrently. Order follows: bytes leave in queue order per
+ * conn.
  *
  * Counters: writers bump n_write_error / n_partial_writes with fetch_add;
  * everyone else reads them with atomic loads. */
@@ -796,9 +800,14 @@ static void writer_drain_one(server_t *s)
         }
         /* wlen/woff are wq_lock-guarded (loop's conn_queue vs our pump);
          * reg_mu covers structure only, so these stay locked reads. Order
-         * reg_mu -> wq_lock holds: nothing takes them in reverse. */
+         * reg_mu -> wq_lock holds: nothing takes them in reverse.
+         * #369: one bounded slice per conn per visit, not the whole
+         * backlog -- the scan is round-robin, so a thin conn queued behind
+         * a fat one drains within one slice of being queued. */
         before = conn_write_pending_locked(c);
-        rc = conn_pump(c);
+        pthread_mutex_lock(&c->wq_lock);
+        rc = conn_pump_slice_locked(c);
+        pthread_mutex_unlock(&c->wq_lock);
         if (rc < 0) {
             atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
             printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
