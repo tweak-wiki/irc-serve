@@ -1165,11 +1165,12 @@ typedef struct conn {
      * history and nothing reads it except STARTTLS's refusal. */
     int         credential_seen;
     /* Flood token bucket (#168), owned by poll_loop.c. rate_tokens starts at
-     * the burst (256) and refills at 50/sec on the tick path; each
-     * dispatched client line spends one. rate_last_ms == 0 means "never
-     * refilled", which the tick initialises rather than conn_new(), so the
-     * burst constant lives in exactly one place. CONN_SERVER links are
-     * exempt and never spend. */
+     * the burst (256) and refills lazily at 50/sec on the read path (#216:
+     * conn_readable() refills before the token check, so idle connections
+     * cost nothing); each dispatched client line spends one. rate_last_ms
+     * == 0 means "never refilled", which the first refill initialises
+     * rather than conn_new(), so the burst constant lives in exactly one
+     * place. CONN_SERVER links are exempt and never spend. */
     double      rate_tokens;
     uint64_t    rate_last_ms;
     char       *rbuf;              /* read buffer */

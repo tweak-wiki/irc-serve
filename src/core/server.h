@@ -517,6 +517,11 @@ struct server {
     int      *active_fds;
     size_t    nactive;
     size_t    active_cap;
+    /* #216: budget-cutoff dirty flag. conn_readable() caps a burst at 128
+     * lines per tick; when it stops with a full line still buffered it sets
+     * this, and the loop's pre-poll scan runs only then. Idle ticks skip the
+     * scan entirely. Zeroed by server_init()'s memset. */
+    int       lines_pending;
 
     /* Registries. Both are string -> pointer maps. The nick one is FOLDED
      * (ASCII, case-insensitive keys) and the channel one is EXACT -- for the

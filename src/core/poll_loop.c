@@ -234,7 +234,12 @@ static void conn_readable(server_t *s, conn_t *c)
         }
         message_free(&m);
         if (--budget == 0u) {
-            return; /* more buffered; the next POLLIN continues */
+            /* #216: more buffered; the next POLLIN continues. Mark the node
+             * so the pre-poll scan runs next tick instead of every tick. */
+            if (conn_has_line(c)) {
+                s->lines_pending = 1;
+            }
+            return;
         }
     }
 }
@@ -506,15 +511,21 @@ int poll_loop_step(server_t *s, int timeout_ms)
 
     /* Buffered lines produce no POLLIN. If the per-connection line budget
      * cut one off mid-burst, do not sleep on work already in hand. */
-    if (timeout_ms > 0) {
+    /* #216: gated behind lines_pending -- the scan walks every connection, so
+     * idle ticks skip it. The flag is re-armed only when a scan actually
+     * finds a buffered line. */
+    if (timeout_ms > 0 && s->lines_pending) {
+        int found = 0;
         for (i = 0; i < s->nactive; i++) {
             conn_t *c = s->by_fd[s->active_fds[i]];
 
             if (c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING && conn_has_line(c)) {
                 timeout_ms = 0;
+                found = 1;
                 break;
             }
         }
+        s->lines_pending = found;
     }
 
     /* --- 2. wait --- */
@@ -608,20 +619,11 @@ int poll_loop_step(server_t *s, int timeout_ms)
     (void)server_reap(s);
 
     /* --- 8. tick: the only place time advances --- */
-    {
-        uint64_t now_ms = server_now_ms();
-
-        /* #168: refill every live bucket on the tick, so a flooder's debt is
-         * measured in real time rather than in poll iterations. */
-        for (i = 0; i < s->nactive; i++) {
-            conn_t *c = s->by_fd[s->active_fds[i]];
-
-            if (c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING) {
-                rate_refill(c, now_ms);
-            }
-        }
-        server_tick(s, now_ms);
-    }
+    /* #216: refill is lazy -- conn_readable() refills the reader's bucket on
+     * entry, right before the token check, so an idle connection's bucket is
+     * never touched and a flooder's debt is still measured in real time. The
+     * per-tick walk over every connection is gone. */
+    server_tick(s, server_now_ms());
     return 0;
 }
 
