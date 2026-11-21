@@ -299,7 +299,9 @@ static void usage(FILE *out, const char *argv0)
                  "         one `authcid<TAB>password` record per line. A file\n"
                  "         that is unreadable, world-readable, malformed or\n"
                  "         empty is REFUSED and this node advertises no sasl\n"
-                 "         capability. Default: none.\n");
+                 "         capability. Replace it atomically (temp file +\n"
+                 "         fsync + rename): a half-written file reads as\n"
+                 "         malformed and refuses the whole store. Default: none.\n");
     fprintf(out, "\n");
     fprintf(out, "  --account-store PATH\n"
                  "         the ACCOUNT REGISTRY: `name<TAB>password<TAB>created`\n"
@@ -309,7 +311,8 @@ static void usage(FILE *out, const char *argv0)
                  "         exists. A client is identified to an account only when\n"
                  "         BOTH files agree on its name and password, so a node\n"
                  "         with neither keeps exactly the behaviour it has today.\n"
-                 "         Same secret-file rules, same refusals.\n");
+                 "         Same secret-file rules, same refusals; replace it\n"
+                 "         atomically too (temp file + fsync + rename).\n");
     fprintf(out, "\n");
     fprintf(out, "  --peer-tls NAME\n"
                  "         require that the link to peer NAME carries TLS. The\n"
