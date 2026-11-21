@@ -672,6 +672,31 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
                     "End of WHO list");
         return;
     }
+    /* Cost cap on the pattern, not just the replies (#217). The matcher
+    * backtracks per '*', so many wildcards turn one line into up to 1024
+    * expensive sweeps and stall the single-threaded loop. More than two
+    * wildcards, or a wildcard mask longer than 32 bytes, answers 315
+    * alone like a broad mask. An exact long mask still sweeps: with no
+    * wildcard there is nothing to backtrack on. */
+    {
+        size_t wild = 0u;
+        size_t mlen = 0u;
+
+        for (const char *q = mask; *q != '\0'; q++) {
+            mlen++;
+            if (*q == '*' || *q == '?') {
+                wild++;
+            }
+        }
+        if (wild > 2u || (wild != 0u && mlen > 32u)) {
+            printf("[observable] who_truncated: nick=%s mask_len=%zu "
+                   "reason=glob_cap replies=0\n",
+                   c->nick, mlen);
+            (void)reply(s, c, "315", (const char *const[]){ mask }, 1,
+                        "End of WHO list");
+            return;
+        }
+    }
     {
         size_t sent = 0u;
         size_t truncated = 0u;
