@@ -282,6 +282,13 @@ int tf_tls_send(tf_tls_t *t, const char *line)
     (void)line;
     return -1;
 }
+int tf_tls_send_raw(tf_tls_t *t, const void *buf, size_t n)
+{
+    (void)t;
+    (void)buf;
+    (void)n;
+    return -1;
+}
 
 int tf_tls_expect(tf_tls_t *t, const char *needle, int timeout_ms)
 {
