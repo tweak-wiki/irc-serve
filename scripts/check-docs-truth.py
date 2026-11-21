@@ -289,7 +289,7 @@ SHIPPED_SCRIPTS = sorted(
 RE_SCRIPT_TESTCOUNT = re.compile(
     r"\b(\d+)\s+(?:tests?|test binaries)\b")
 
-# A QUOTED MEASUREMENT IS NOT A CLAIM ABOUT NOW. `scripts/leaksweep.sh` records what a
+# A QUOTED MEASUREMENT IS NOT A CLAIM ABOUT NOW. A comment may record what a
 # named CI run on a named date reported -- `100% tests passed, 0 tests failed out of
 # 100` -- inside backticks. That is a quotation of a tool's output on a day, and it is
 # exactly what should be in a comment: it is falsifiable against that run and it stops
