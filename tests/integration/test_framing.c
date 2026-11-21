@@ -609,10 +609,10 @@ static void test_queue_compaction(void)
      * reclaiming it. */
     headroom = CONN_WQ_MAX - pending;
     TF_CHECK_MSG(headroom > 0, "no headroom left after the drain");
-    TF_CHECK_MSG(r.c->woff > 0,
+    TF_CHECK_MSG(atomic_load_explicit(&r.c->woff, memory_order_acquire) > 0,
                  "woff is %zu: without a sent head there is nothing to reclaim "
-                 "and this append needs no compaction", r.c->woff);
-    TF_CHECK_MSG(r.c->wlen + headroom > r.c->wcap,
+                 "and this append needs no compaction", atomic_load_explicit(&r.c->woff, memory_order_acquire));
+    TF_CHECK_MSG(atomic_load_explicit(&r.c->wlen, memory_order_acquire) + headroom > r.c->wcap,
                  "the append of %zu bytes would fit in the %zu byte allocation, "
                  "so it would not exercise compaction at all", headroom,
                  r.c->wcap);
