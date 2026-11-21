@@ -672,6 +672,34 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
                     "End of WHO list");
         return;
     }
+    /* #217: the matcher is cheap per nick, but a mask of many wildcards (or a
+     * very long one) burns it once per nickname with nothing to show: the
+     * reply cap below already bounds the ROWS, not the MATCHING. Count the
+     * pattern cost up front -- more than two wildcards or longer than a nick
+     * can ever need -- and answer 315 alone like the broad-mask arm above. */
+    {
+        size_t wilds = 0;
+        size_t mlen = 0;
+        for (const char *p = mask; *p != '\0'; p++) {
+            if (*p == '*' || *p == '?') {
+                wilds++;
+            }
+            mlen++;
+        }
+        if (wilds > 2u || mlen > 32u) {
+            /* 315 names '*' rather than echoing the mask: the mask is client
+             * bytes (overlong or control-carrying), and echoing them would
+             * push the refusal into reply()'s bad_param/text_too_long arms,
+             * which count on n_reply_refused -- the counter that stays zero.
+             * Same shape as the empty-mask arm above. */
+            printf("[observable] who_truncated: nick=%s mask_len=%zu reason=wild_mask "
+                   "replies=0\n",
+                   c->nick, mlen);
+            (void)reply(s, c, "315", (const char *const[]){ "*" }, 1,
+                        "End of WHO list");
+            return;
+        }
+    }
     {
         size_t sent = 0u;
         size_t truncated = 0u;

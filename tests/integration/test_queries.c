@@ -421,6 +421,27 @@ int main(void)
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO 0 terminates",
                      ":" BIN_NAME " 315 alice 0 :End of WHO list\r\n");
+    /* #217: a mask of many wildcards is a sweep with no cap on the matching
+     * itself, so it answers 315 alone like a broad mask -- no 352 rows, and
+     * the 315 names '*' rather than echoing client bytes. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHO *a*a*a*a*") == 0, "tc_send failed");
+    end = drain(&alice);
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
+                 "WHO *a*a*a*a* produced %zu 352 lines, expected 0 (#217 cap)",
+                 count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+    expect_in_window(&alice, from, end, "WHO *a*a*a*a* terminates",
+                     ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
+    /* A mask longer than any nick can need is the same refusal. */
+    from = open_window(&alice);
+    TF_CHECK_MSG(tc_send(&alice.c, "WHO abcdefghijklmnopqrstuvwxyz0123456789") == 0,
+                 "tc_send failed");
+    end = drain(&alice);
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
+                 "long WHO mask produced %zu 352 lines, expected 0 (#217 cap)",
+                 count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+    expect_in_window(&alice, from, end, "long WHO mask terminates",
+                     ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
 
     /* =======================================================================
      * 2. WHOIS <nick> -> 311, 312, 317, 318
