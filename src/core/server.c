@@ -2337,6 +2337,14 @@ int server_chan_attach(server_t *s, chan_t *ch)
     if (server_chan_get(s, ch->name) != NULL) {
         return -1; /* the name is taken */
     }
+    /* THE NODE-WIDE CAP (issues #169 and #223), enforced on the SHARED path so
+     * peer-driven creation (SJOIN, burst) cannot pass what the local JOIN path
+     * refuses. Only creation is refused: attaching what the node holds does not
+     * take this branch. Callers free the unattached channel, so a refusal here
+     * leaves no ghost. */
+    if (s->nchan_objs >= SERVER_MAX_CHANNELS) {
+        return -1;
+    }
     if (s->nchan_objs == s->chan_objs_cap) {
         size_t want = (s->chan_objs_cap == 0) ? 8u : s->chan_objs_cap * 2u;
         chan_t **grown = (chan_t **)realloc(s->chan_objs, want * sizeof *grown);
