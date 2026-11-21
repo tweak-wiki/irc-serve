@@ -210,6 +210,12 @@ irc_add_integration_test(test_writer_fault test_writer_fault.c)
 # cap queued ahead of a thin conn; the thin conn drains while the fat conn
 # has moved at most two slices, and the fat conn then drains byte-exact.
 irc_add_integration_test(test_writer_slice test_writer_slice.c)
+# Issue #294: writer interactions with no N=4 coverage. One file per gap, each
+# with writers=4: TLS handshakes racing the writer pump, a dispatch that
+# queues with no server_queue() kick, and a resume across the reap-deferral.
+irc_add_integration_test(test_tls_handshake_n4 test_tls_handshake_n4.c)
+irc_add_integration_test(test_writer_kick_connqueue test_writer_kick_connqueue.c)
+irc_add_integration_test(test_resume_deferred_close test_resume_deferred_close.c)
 # 3.4: explicit fd >= FD_SETSIZE rejection at the accept site.
 irc_add_integration_test(test_fdsize_reject test_fdsize_reject.c)
 
