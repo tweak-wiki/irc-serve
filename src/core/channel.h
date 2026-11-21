@@ -1118,9 +1118,10 @@ const chan_topic_t *server_topic_at(const server_t *s, size_t i);
  * ------------------------------------------------------------------------- */
 
 /* Register `ch` under its canonical name and append it to the node's ordered
- * channel index. Returns 0 on success, -1 if the name is already registered or
- * on allocation failure. This is the only way a chan_t enters the node; the
- * Phase 2 key-space probes in server.h cannot carry a value. */
+ * channel index. Returns 0 on success, -1 if the name is already registered,
+ * the node is at SERVER_MAX_CHANNELS, or on allocation failure. This is the
+ * only way a chan_t enters the node; the Phase 2 key-space probes in server.h
+ * cannot carry a value. */
 int server_chan_attach(server_t *s, chan_t *ch);
 
 /* Look a channel up by name, case-insensitively (the name is canonicalised
