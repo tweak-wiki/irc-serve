@@ -1244,7 +1244,7 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
                    c->nick, raw_reason_len, CHAN_MAX_PART_REASON);
             return;
         }
-        kept_reason = conn_text_strip(clean, sizeof clean, reason);
+        kept_reason = conn_text_strip(clean, sizeof clean, reason, STRIP_STORED);
         reason = (kept_reason != 0u) ? clean : NULL;
     }
     n = chan_split_list(store, sizeof store, m->params[0], names,
@@ -1413,7 +1413,7 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
                    "kept_len=0 forwarded=0 reason=TOO_LONG\n",
                    ch->name, c->nick, in_len);
         } else {
-            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1]);
+            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1], STRIP_STORED);
 
             params[0] = clean;
             deliver_state_change(s, c, ch, "TOPIC", prefix, params, 1);
@@ -1751,7 +1751,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * IT COSTS, and the cost is the same one the away message and the topic
      * accepted: the members see a shorter sentence than the kicker wrote, and the
      * log line below is the only record of the difference. */
-    kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason);
+    kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason, STRIP_STORED);
     reason = clean_reason;
 
     ch = resolve_joined(s, c, m->params[0]);
@@ -2411,7 +2411,7 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                        ch->name, c->nick, m->params[1], strlen(arg));
                 return;
             }
-            kept += conn_text_strip(clean[idx], sizeof clean[idx], arg);
+            kept += conn_text_strip(clean[idx], sizeof clean[idx], arg, STRIP_STORED);
             in_len += strlen(arg);
             fwd[nfwd] = clean[idx];
             nfwd++;
@@ -2615,7 +2615,7 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                 effective = mask;
                 kept_mask = strlen(mask);
             } else {
-                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask, mask);
+                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask, mask, STRIP_STORED);
                 effective = clean_mask;
             }
             if (plus) {
