@@ -203,6 +203,7 @@
  * written it, and a shortened one is a sentence nobody wrote. `handle_kick()`
  * refuses with `417` and leaves the roster untouched. */
 #define CHAN_MAX_KICK_REASON 255
+#define CHAN_MAX_PART_REASON 255
 
 /* 2.3: server_link_t::name is char[64], so a server name is at most this. */
 #define CHAN_MAX_SERVER 63
