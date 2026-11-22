@@ -96,7 +96,6 @@ endif()
 
 add_library(irc_core STATIC
   ircv3_tags.c
-  federation_handshake.c
   sasl_framework.c
   # Phase 12: the TLS BACKEND, and why it is two mutually exclusive files rather
   # than one #ifdef. `WITH_TLS` selects between them at configure time, so a
