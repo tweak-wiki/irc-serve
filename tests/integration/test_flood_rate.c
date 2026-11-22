@@ -32,6 +32,7 @@ int main(void)
     nf_node_t node;
     test_client_t honest;
     test_client_t flood;
+    test_client_t badflood;
     int i;
 
     TF_CHECK(nf_spawn_binary(&node) == 0);
@@ -110,10 +111,41 @@ int main(void)
                  "client was rate-limited: the limiter is not "
                  "per-connection.\n  saw: %s", tc_buffer(&honest));
 
+    /* #224: rejected lines spend too. "@" frames fine but fails
+     * message_parse_n (empty tag block), so 300 of them back-to-back must
+     * trip the same 417 and the same close as valid lines -- parser work is
+     * charged like dispatch work. */
+    tc_init(&badflood);
+    TF_CHECK_MSG(tc_connect(&badflood, node.port) == 0, "badflood connect failed");
+    TF_CHECK_MSG(tc_send(&badflood, "NICK badflooder") == 0, "badflood NICK failed");
+    TF_CHECK_MSG(tc_send(&badflood, "USER badflooder 0 * :Badflooder") == 0,
+                 "badflood USER failed");
+    TF_CHECK_MSG(tc_expect(&badflood, " 001 ", T_IO_MS) == 0,
+                 "the invalid-line client never registered");
+    for (i = 0; i < FLOOD_LINES; i++) {
+        TF_CHECK_MSG(tc_send(&badflood, "@") == 0,
+                     "badflood line %d of %d could not be sent", i, FLOOD_LINES);
+    }
+    TF_CHECK_MSG(tc_expect(&badflood, " 417 ", T_IO_MS) == 0,
+                 "the invalid-line flood was never refused with 417: rejected "
+                 "lines are not spending tokens.\n  saw: %s",
+                 tc_buffer(&badflood));
+    TF_CHECK_MSG(strstr(tc_buffer(&badflood), "Input rate limit exceeded") != NULL,
+                 "the 417 did not carry the rate-limit reason.\n  saw: %s",
+                 tc_buffer(&badflood));
+    {
+        int rc = tc_expect_eof(&badflood, T_IO_MS);
+
+        TF_CHECK_MSG(rc == 0 || rc == -3,
+                     "the invalid-line connection was not closed after the 417 "
+                     "(rc=%d)", rc);
+    }
+
     TF_CHECK_MSG(nf_stop(&node) == 0, "node did not exit cleanly");
 
     tc_close(&honest);
     tc_close(&flood);
+    tc_close(&badflood);
     nf_free(&node);
     tf_done("flood_rate");
     return 0;

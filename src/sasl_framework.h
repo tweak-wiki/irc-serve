@@ -146,16 +146,28 @@ typedef struct {
  * the only separator, because the alternative -- splitting on whitespace -- makes
  * a password with a space in it unrepresentable, and a store that cannot hold a
  * passphrase is a store that pushes operators to weak ones. A record with no
- * TAB is malformed and fails the whole load rather than being skipped. */
+ * TAB is malformed and fails the whole load rather than being skipped.
+ *
+ * ATOMIC REPLACE. The file is read line by line with no lock, and only once,
+ * at startup -- there is no reload that could keep a previous store, so a
+ * refused load lasts until the next restart. A non-atomic rewrite
+ * (`cp new.db store`) racing that read lands mid-file and reads as malformed,
+ * which refuses the WHOLE store. Replace it atomically instead: write a
+ * temporary file in the same directory, fsync() it, rename() it over the old
+ * path. A restart then sees the old file or the new one, never half of one.
+ */
 sasl_store_t *sasl_store_load(const char *path);
 
 /* An empty store, for a caller that wants to build one in memory. sasl_state_
  * machine() is that caller, and so is a future phase that loads credentials from
- * somewhere other than a file. Returns NULL only on allocation failure. */
+ * somewhere other than a file. Returns NULL on allocation failure or when no
+ * kernel RNG is available -- fail closed (#305): there is no store at all and
+ * the load path refuses. */
 sasl_store_t *sasl_store_new(void);
 
 /* Add or replace the record for `authcid`. Returns 0, or -1 on a NULL/empty or
- * over-long authcid, an over-long password, or a full store. `password` is
+ * over-long authcid, an over-long password, a full store, or when no kernel RNG
+ * is available (the record is refused and left untouched). `password` is
  * HASHED (iterated salted SHA-256 under the record's own salt) and never stored. */
 int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password);
 

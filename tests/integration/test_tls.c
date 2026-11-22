@@ -1136,6 +1136,96 @@ static void case_tls_multi_record_burst_writers(const char *cert,
     nf_free(&n);
 }
 
+/* TLS parity for the capped-unterminated-line refusal: 9000 newline-free
+ * bytes and only then the CRLF, sent raw in one flight, so the first fill
+ * caps the 8192-byte buffer with no complete line in it. Framing must refuse
+ * it at once (`reason=unterminated_line`) rather than after the peer stops
+ * sending -- the capped-buffer path the #230 audit walked, pinned on a TLS
+ * connection where the tail may still sit inside OpenSSL. */
+
+static void case_tls_oversize_unterminated_writers(const char *cert,
+                                                   const char *key,
+                                                   int writers)
+{
+    nf_node_t n;
+    char a0[] = "irc-serve";
+    char a1[] = "0";
+    char a2[] = "--name";
+    char a3[] = "irc.tls";
+    char a4[] = "--tls-port";
+    char a5[] = "0";
+    char a6[] = "--writers";
+    char a7[] = "4";
+    char *argv[13];
+    int tls_port = -1;
+
+    argv[0] = a0; argv[1] = a1; argv[2] = a2; argv[3] = a3;
+    argv[4] = "--tls-cert"; argv[5] = (char *)(uintptr_t)(const void *)cert;
+    argv[6] = "--tls-key"; argv[7] = (char *)(uintptr_t)(const void *)key;
+    argv[8] = a4; argv[9] = a5;
+    if (writers > 0) {
+        argv[10] = a6; argv[11] = a7; argv[12] = NULL;
+    } else {
+        argv[10] = NULL;
+    }
+    if (spawn_argv(&n, argv) != 0) {
+        check(0, "spawn a node for the unterminated fragment", NULL);
+        return;
+    }
+    {
+        const char *p = strstr(n.out, "tls_port=");
+
+        tls_port = (p != NULL) ? atoi(p + 9) : -1;
+    }
+    {
+        char what[96];
+
+        (void)snprintf(what, sizeof what,
+                       "the fragment node bound its own implicit-TLS port "
+                       "(writers=%d)", writers);
+        check(tls_port > 0, what, n.out);
+    }
+    if (tls_port > 0) {
+        tf_tls_t t;
+        const char *why = NULL;
+
+        if (tf_tls_connect(&t, tls_port, cert, "irc.tls", &why) != 0) {
+            check(0, "the fragment handshake succeeds",
+                  (why != NULL) ? why : "handshake failed");
+        } else {
+            /* 9000 bytes: past the 8192-byte cap with the completion pending,
+             * and newline-free until the last two, so the capped buffer holds
+             * no complete line. */
+            static char frag[9000];
+
+            check(tf_tls_send(&t, "NICK frag") == 0, "send NICK", NULL);
+            check(tf_tls_send(&t, "USER frag 0 * :Frag") == 0, "send USER",
+                  NULL);
+            check(tf_tls_expect(&t, " 001 ", 10000) == 0,
+                  "registration completes before the fragment",
+                  tf_tls_buffer(&t));
+            memset(frag, 'x', sizeof frag - 2u);
+            frag[sizeof frag - 2u] = '\r';
+            frag[sizeof frag - 1u] = '\n';
+            check(tf_tls_send_raw(&t, frag, sizeof frag) == 0,
+                  "send the over-long fragment in one flight", NULL);
+            check(nf_expect(&n, "reason=unterminated_line", 10000) == 0,
+                  "the capped unterminated line is refused with no further "
+                  "input from the client",
+                  n.out);
+            tf_tls_close(&t);
+        }
+    }
+    (void)nf_stop(&n);
+    nf_free(&n);
+}
+
+static void case_tls_oversize_unterminated(const char *cert, const char *key)
+{
+    case_tls_oversize_unterminated_writers(cert, key, 0);
+    case_tls_oversize_unterminated_writers(cert, key, 4);
+}
+
 static void case_peer_tls_sends_no_federate_in_clear(const char *cert,
                                                      const char *key)
 {
@@ -1183,7 +1273,7 @@ static void case_peer_tls_sends_no_federate_in_clear(const char *cert,
     snprintf(peer, sizeof peer, "irc.b,127.0.0.1,%d", raw_port);
     argv[0] = a0; argv[1] = a1;
     argv[2] = "--name"; argv[3] = "irc.a";
-    argv[4] = "--secret"; argv[5] = "shared";
+    argv[4] = "--secret"; argv[5] = "shared-tls-federation-secret";
     argv[6] = "--peer"; argv[7] = peer;
     argv[8] = "--peer-tls"; argv[9] = "irc.b";
     argv[10] = "--tls-cert"; argv[11] = (char *)(uintptr_t)(const void *)cert;
@@ -1520,6 +1610,7 @@ int main(void)
              * once at startup. */
             case_caps_vary_by_connection(g_cert, g_key, "15552000", 15552000ul);
             case_tls_multi_record_burst(g_cert, g_key);
+            case_tls_oversize_unterminated(g_cert, g_key);
             case_caps_vary_by_connection(g_cert, g_key, NULL, 0ul);
             /* The counters are published at SHUTDOWN, not per tick, so the check
              * has to come after nf_stop() rather than before it. Asking for a

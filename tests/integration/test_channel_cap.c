@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/channel.h"
 #include "core/connection.h"
 #include "core/msg_verbs.h"
 #include "core/server.h"
@@ -150,6 +151,51 @@ static void case_cap_refuses_the_next_join(void)
                  "`held=%d cap=%d` is what says this was the edge rather than "
                  "some earlier number.\n  node said: %s", SW_MAX_JOIN,
                  SW_MAX_JOIN, node.out);
+    /* AND NOTHING WAS CREATED (issue #274): the refused JOIN must not leave a
+     * zero-member ghost behind. The create-print precedes any reply, and the
+     * 405 above is already in hand, so the node's output is settled: a
+     * `chan_create` line for the refused name here means the refusal created
+     * the channel it refused, and repeated hits would fill the registry with
+     * ghosts until later JOINs fail with 437 on channels nobody is in. */
+    {
+        char nocreate[64];
+        test_client_t g;
+        char roster[128];
+
+        (void)snprintf(nocreate, sizeof nocreate, "chan_create: channel=%s",
+                       chan);
+        TF_CHECK_MSG(strstr(node.out, nocreate) == NULL,
+                     "a JOIN refused at the per-connection cap left a channel "
+                     "behind: there is a chan_create line for %s, so the "
+                     "registry now holds a zero-member ghost.\n  node said: %s",
+                     chan, node.out);
+        /* AND THE NAMES PROVE IT: a second client JOINing the refused name is
+         * its creator -- the 353 names it with @ -- which is only true if the
+         * refused JOIN created nothing. A ghost would admit this client as a
+         * plain member instead, with no @. */
+        tc_init(&g);
+        TF_CHECK_MSG(tc_connect(&g, node.port) == 0,
+                     "the prover client could not connect");
+        TF_CHECK_MSG(tc_send(&g, "NICK ghost2") == 0, "NICK send failed");
+        TF_CHECK_MSG(tc_send(&g, "USER ghost2 0 * :Ghost") == 0,
+                     "USER send failed");
+        TF_CHECK_MSG(tc_expect(&g, " 001 ", T_IO_MS) == 0,
+                     "the prover client never registered");
+        (void)snprintf(line, sizeof line, "JOIN %s", chan);
+        TF_CHECK_MSG(tc_send(&g, line) == 0,
+                     "the prover JOIN could not be sent");
+        (void)snprintf(echo, sizeof echo, " JOIN %s\r\n", chan);
+        TF_CHECK_MSG(tc_expect(&g, echo, T_IO_MS) == 0,
+                     "the prover JOIN never echoed.\n  saw: %s",
+                     tc_buffer(&g));
+        (void)snprintf(roster, sizeof roster, "353 ghost2 = %s @ghost2", chan);
+        TF_CHECK_MSG(tc_expect(&g, roster, T_IO_MS) == 0,
+                     "the prover client is not the creator of %s: the refused "
+                     "JOIN left a ghost channel behind and this client joined "
+                     "it as a plain member.\n  saw: %s", chan,
+                     tc_buffer(&g));
+        tc_close(&g);
+    }
     /* AND THE CLIENT IS STILL SERVED, which is the difference between a cap and
      * a disconnect: 1024 channels is a fact about the client, not an attack on
      * anybody else, and a node that closed the connection would be refusing to
@@ -170,6 +216,44 @@ static void case_cap_refuses_the_next_join(void)
                      "cap bounds a resource; it is not a reason to hang up on a "
                      "client that has done nothing else wrong.\n"
                      "  saw: %s", tc_buffer(&c));
+    }
+
+    /* AND THE REFUSED JOIN LEFT NO GHOST (#274). A JOIN refused at the cap
+     * must not create the channel object: this client is at the cap, so a
+     * second client joins the refused name, and the node must report
+     * `chan_create` for it -- the line it prints when a channel object is
+     * born. A zero-member ghost left behind by the refused JOIN would make
+     * this a join of an existing channel, and no `chan_create` would appear.
+     * The echo alone cannot say this: joining a ghost echoes exactly like
+     * joining a fresh channel, which is why the observable is the assertion
+     * rather than the wire. */
+    {
+        test_client_t d;
+        char ghost[32];
+
+        chan_name(ghost, sizeof ghost, SW_MAX_JOIN);
+        tc_init(&d);
+        TF_CHECK_MSG(tc_connect(&d, node.port) == 0,
+                     "the ghost-probe client could not connect");
+        TF_CHECK_MSG(tc_send(&d, "NICK ghostprobe") == 0,
+                     "ghost-probe NICK send failed");
+        TF_CHECK_MSG(tc_send(&d, "USER ghostprobe 0 * :Ghost") == 0,
+                     "ghost-probe USER send failed");
+        TF_CHECK_MSG(tc_expect(&d, " 001 ", T_IO_MS) == 0,
+                     "the ghost-probe client never registered");
+        (void)snprintf(line, sizeof line, "JOIN %s", ghost);
+        TF_CHECK_MSG(tc_send(&d, line) == 0,
+                     "the ghost-probe JOIN could not be sent");
+        (void)snprintf(echo, sizeof echo, " JOIN %s\r\n", ghost);
+        TF_CHECK_MSG(tc_expect(&d, echo, T_IO_MS) == 0,
+                     "a second client could not JOIN the refused channel "
+                     "name.\n  saw: %s", tc_buffer(&d));
+        (void)snprintf(line, sizeof line, "chan_create: channel=%s", ghost);
+        TF_CHECK_MSG(nf_expect(&node, line, T_IO_MS) == 0,
+                     "no `chan_create` for the refused name when a second client "
+                     "joined it, so the refused JOIN left a zero-member ghost "
+                     "behind (#274).\n  node said: %s", node.out);
+        tc_close(&d);
     }
 
     /* CASE 2 -- THE CAP IS ON MEMBERSHIP, NOT ON THE COMMAND. PART one channel
@@ -455,11 +539,248 @@ static void case_node_cap_refuses_creation(void)
     nf_free(&node);
 }
 
+/* ---------------------------------------------------------------------------
+ * CASE 5 -- A PEER CANNOT CREATE PAST THE CAP (issue #223)
+ * ---------------------------------------------------------------------------
+ * Case 4 pins the cap on the local JOIN path; this pins it on the peer-driven
+ * ones. Node A is filled to SERVER_MAX_CHANNELS exactly the way case 4 fills
+ * its node, then node B links to A and a client of B joins #PEERNEW -- which B
+ * creates locally (B is empty) and forwards as SJOIN. A must refuse the
+ * creation: the fix enforces the cap in server_chan_attach(), the path both
+ * SJOIN and the burst commit share, so the refusal is the attach failing the
+ * way an allocation failure would. The arrival marker is A's `fed_malformed`
+ * line for the SJOIN -- the attach failure surfaces there, which is the
+ * pre-existing shape of a creation that could not happen -- and the assertion
+ * is the absence of a `chan_create` line for #PEERNEW after it. A still serves
+ * its own channels, so the refusal is creation-only. */
+static void case_peer_creation_refused_at_cap(void)
+{
+    enum { NFILL = SERVER_MAX_CHANNELS / CONN_MAX_CHANNELS };
+    enum { NBATCH = CONN_MAX_CHANNELS / CHAN_MAX_LIST_ARGS };
+    static char secret[] = "cap-peer-secret-0123456789";
+    nf_node_t a;
+    nf_node_t b;
+    test_client_t f[NFILL];
+    test_client_t c;
+    test_client_t d;
+    char peer_arg[96];
+    char line[512];
+    char echo[96];
+    char chan[32];
+    unsigned fi;
+    unsigned bb;
+    unsigned k;
+
+    {
+        char *const argv[] = { (char *)"irc-serve", (char *)"--name",
+                               (char *)"irc.a",   (char *)"--secret",
+                               (char *)secret,    (char *)"0",
+                               NULL };
+
+        TF_CHECK_MSG(nf_spawn_binary_argv(&a, argv) == 0,
+                     "could not start node A from the shipped binary");
+    }
+    for (fi = 0; fi < NFILL; fi++) {
+        char nick[32];
+
+        tc_init(&f[fi]);
+        TF_CHECK_MSG(tc_connect(&f[fi], a.port) == 0,
+                     "filler %u could not connect", fi);
+        (void)snprintf(nick, sizeof nick, "fill%u", fi);
+        (void)snprintf(line, sizeof line, "NICK %s", nick);
+        TF_CHECK_MSG(tc_send(&f[fi], line) == 0, "filler %u NICK failed", fi);
+        (void)snprintf(line, sizeof line, "USER %s 0 * :Fill", nick);
+        TF_CHECK_MSG(tc_send(&f[fi], line) == 0, "filler %u USER failed", fi);
+        TF_CHECK_MSG(tc_expect(&f[fi], " 001 ", T_IO_MS) == 0,
+                     "filler %u never registered", fi);
+    }
+    /* The fill goes out batched like case 4's: 16 channels to a JOIN, and each
+     * batch's echoes are read before the next batch is sent, so the node's
+     * per-client output never grows past one batch. */
+    for (fi = 0; fi < NFILL; fi++) {
+        for (bb = 0; bb < NBATCH; bb++) {
+            size_t used = 5; /* "JOIN " */
+
+            memcpy(line, "JOIN ", 5);
+            for (k = 0; k < (unsigned)CHAN_MAX_LIST_ARGS; k++) {
+                unsigned idx = fi * (unsigned)CONN_MAX_CHANNELS +
+                               bb * (unsigned)CHAN_MAX_LIST_ARGS + k;
+
+                (void)snprintf(chan, sizeof chan, "#CP%04u", idx);
+                if (k != 0) {
+                    line[used++] = ',';
+                }
+                memcpy(line + used, chan, strlen(chan) + 1u);
+                used += strlen(chan);
+            }
+            TF_CHECK_MSG(tc_send(&f[fi], line) == 0,
+                         "filler %u batch %u could not be sent", fi, bb);
+            for (k = 0; k < (unsigned)CHAN_MAX_LIST_ARGS; k++) {
+                unsigned idx = fi * (unsigned)CONN_MAX_CHANNELS +
+                               bb * (unsigned)CHAN_MAX_LIST_ARGS + k;
+
+                (void)snprintf(chan, sizeof chan, "#CP%04u", idx);
+                (void)snprintf(echo, sizeof echo, " JOIN %s\r\n", chan);
+                TF_CHECK_MSG(tc_expect(&f[fi], echo, T_IO_MS) == 0,
+                             "filler %u channel %s never echoed -- the fill "
+                             "stopped short of the cap.\n  saw: %s",
+                             fi, chan, tc_buffer(&f[fi]));
+            }
+        }
+    }
+
+    /* Node B links to the full node A. B is empty, so the establishment burst
+     * carries nothing A would have to refuse; the refused creation comes next,
+     * over a live SJOIN. */
+    (void)snprintf(peer_arg, sizeof peer_arg, "irc.a,127.0.0.1,%d", a.port);
+    {
+        char *const argv[] = { (char *)"irc-serve", (char *)"--name",
+                               (char *)"irc.b",   (char *)"--secret",
+                               (char *)secret,    (char *)"--peer",
+                               peer_arg,          (char *)"0",
+                               NULL };
+
+        TF_CHECK_MSG(nf_spawn_binary_argv(&b, argv) == 0,
+                     "could not start node B with a --peer of %s", peer_arg);
+    }
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=irc.a", T_IO_MS) == 0,
+                 "node B never established its link to node A: %s", b.out);
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=irc.b", T_IO_MS) == 0,
+                 "node A never accepted the link from node B: %s", a.out);
+    tc_init(&d);
+    TF_CHECK_MSG(tc_connect(&d, b.port) == 0, "could not connect to node B");
+    TF_CHECK_MSG(tc_send(&d, "NICK peeruser") == 0, "NICK send failed");
+    TF_CHECK_MSG(tc_send(&d, "USER peeruser 0 * :Peer") == 0,
+                 "USER send failed");
+    TF_CHECK_MSG(tc_expect(&d, " 001 ", T_IO_MS) == 0,
+                 "the peer-side client never registered");
+    TF_CHECK_MSG(tc_send(&d, "JOIN #PEERNEW") == 0,
+                 "the peer-side JOIN could not be sent");
+    TF_CHECK_MSG(tc_expect(&d, " JOIN #PEERNEW\r\n", T_IO_MS) == 0,
+                 "node B refused a creation it has room for: B is empty, so "
+                 "this JOIN must succeed locally and only fail on A.\n  saw: %s",
+                 tc_buffer(&d));
+    /* THE SJOIN ARRIVED AND DIED AT THE CAP: the attach failure surfaces as a
+     * refused SJOIN line, which is the marker the absence below is read
+     * after -- without it the absence could mean the SJOIN never arrived. */
+    TF_CHECK_MSG(nf_expect(&a, "command=SJOIN", T_IO_MS) == 0,
+                 "node A never reported the SJOIN for #PEERNEW: the refusal "
+                 "below would be vacuous.\n  node said: %s", a.out);
+    TF_CHECK_MSG(strstr(a.out, "chan_create: channel=#PEERNEW") == NULL,
+                 "node A created #PEERNEW past SERVER_MAX_CHANNELS: a peer can "
+                 "push this node past the cap the local JOIN path refuses.\n"
+                 "  node said: %s", a.out);
+    /* AND A STILL SERVES WHAT IT HOLDS: joining an existing channel works, so
+     * the refusal is creation-only and the link is alive. */
+    tc_init(&c);
+    TF_CHECK_MSG(tc_connect(&c, a.port) == 0, "could not connect to node A");
+    TF_CHECK_MSG(tc_send(&c, "NICK capnode") == 0, "NICK send failed");
+    TF_CHECK_MSG(tc_send(&c, "USER capnode 0 * :CapNode") == 0,
+                 "USER send failed");
+    TF_CHECK_MSG(tc_expect(&c, " 001 ", T_IO_MS) == 0,
+                 "the overflow client never registered");
+    TF_CHECK_MSG(tc_send(&c, "JOIN #CP0000") == 0,
+                 "the JOIN of an existing channel could not be sent");
+    TF_CHECK_MSG(tc_expect(&c, " JOIN #CP0000\r\n", T_IO_MS) == 0,
+                 "a JOIN of a channel node A already holds was refused at the "
+                 "node cap.\n  saw: %s", tc_buffer(&c));
+
+    tc_close(&d);
+    tc_close(&c);
+    for (fi = 0; fi < NFILL; fi++) {
+        tc_close(&f[fi]);
+    }
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    nf_free(&a);
+    nf_free(&b);
+}
+
+/* ---------------------------------------------------------------------------
+ * CASE 6 -- THE SHARED PATH REFUSES AT THE CAP (unit level, issue #223)
+ * ---------------------------------------------------------------------------
+ * Case 5 proves a full node refuses a peer's creation end to end; this pins
+ * the mechanism to the attach call itself, through the same public entry
+ * points the SJOIN and burst paths use. A server is filled to exactly
+ * SERVER_MAX_CHANNELS with chan_new()/server_chan_attach(), the next attach
+ * fails, the count does not move, and after one detach the same name attaches
+ * again -- so the bound is on what the node holds, enforced where every
+ * creation path converges, and not on what it has ever held. No sockets, no
+ * children: the claim is about the registry, and the registry is observable
+ * without a wire. */
+static void case_attach_refuses_at_cap(void)
+{
+    server_t s;
+    char name[32];
+    unsigned i;
+
+    TF_CHECK_MSG(server_init(&s, "irc.a") == 0, "server_init failed");
+    for (i = 0; i < (unsigned)SERVER_MAX_CHANNELS; i++) {
+        chan_t *ch;
+
+        (void)snprintf(name, sizeof name, "#CU%04u", i);
+        ch = chan_new(name, "irc.a", s.epoch);
+        TF_CHECK_MSG(ch != NULL, "chan_new failed for %s", name);
+        TF_CHECK_MSG(server_chan_attach(&s, ch) == 0,
+                     "attach %u of %d failed before the cap", i,
+                     SERVER_MAX_CHANNELS);
+    }
+    TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS,
+                 "a filled node does not hold the cap");
+    {
+        chan_t *extra = chan_new("#CUOVER", "irc.a", s.epoch);
+
+        TF_CHECK_MSG(extra != NULL, "chan_new failed for the overflow channel");
+        TF_CHECK_MSG(server_chan_attach(&s, extra) != 0,
+                     "attach past SERVER_MAX_CHANNELS succeeded: the shared "
+                     "path does not enforce the node-wide cap");
+        chan_free(extra);
+    }
+    TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS,
+                 "a refused attach moved the count");
+    /* AND NOTHING WAS GROWN FOR IT: the index stays at exactly the cap. A
+     * refusal that doubled the vector first would be the old shape -- growth
+     * below the put that a full hash table then threw away -- and this is the
+     * assertion that tells the two apart. */
+    TF_CHECK_MSG(s.chan_objs_cap == (size_t)SERVER_MAX_CHANNELS,
+                 "a refused attach grew the channel index to %zu: the cap "
+                 "must fire before any allocation, not after it",
+                 s.chan_objs_cap);
+    /* AND A FREED SLOT TAKES THE SAME NAME AGAIN: detach drops the count, and
+     * the re-attach of the refused name succeeds -- the cap is on what the
+     * node holds, not on what it has ever held. */
+    {
+        /* Detach drops the object from the index without freeing it (the
+         * caller owns the channel either way): free it by hand, then the
+         * retry below proves the freed slot takes the same name again. */
+        chan_t *dropped = server_chan_at(&s, 0u);
+
+        TF_CHECK_MSG(dropped != NULL, "no channel at slot 0 to detach");
+        server_chan_detach(&s, dropped->name);
+        TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS - 1u,
+                     "a detach did not free a slot");
+        chan_free(dropped);
+    }
+    {
+        chan_t *retry = chan_new("#CUOVER", "irc.a", s.epoch);
+
+        TF_CHECK_MSG(retry != NULL, "chan_new failed for the retry");
+        TF_CHECK_MSG(server_chan_attach(&s, retry) == 0,
+                     "the retry past a freed slot was refused: the cap is "
+                     "supposed to count what the node holds");
+    }
+    TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS,
+                 "the retried attach did not restore the cap");
+    server_shutdown(&s);
+}
+
 int main(void)
 {
     case_cap_refuses_the_next_join();
     case_away_walk_is_bounded();
     case_node_cap_refuses_creation();
+    case_peer_creation_refused_at_cap();
+    case_attach_refuses_at_cap();
     tf_done("test_channel_cap");
     return 0;
 }

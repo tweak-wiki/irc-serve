@@ -171,6 +171,9 @@ endfunction()
 # Runs the SHIPPED BINARY over real TCP.
 irc_add_integration_test(test_conn_lifecycle test_conn_lifecycle.c)
 
+# #229: lines buffered past the 128-line budget must drain before an EOF close.
+irc_add_integration_test(test_final_drain test_final_drain.c)
+
 # 3.3: partial writes, drained across poll iterations, byte for byte.
 irc_add_integration_test(test_partial_write test_partial_write.c)
 
@@ -210,6 +213,15 @@ irc_add_integration_test(test_writer_fault test_writer_fault.c)
 # cap queued ahead of a thin conn; the thin conn drains while the fat conn
 # has moved at most two slices, and the fat conn then drains byte-exact.
 irc_add_integration_test(test_writer_slice test_writer_slice.c)
+# MT #366: sticky fd%N scheduling + demand steal of whole conns past
+# WRITER_STEAL_BYTES; idle writer drains the fat owner's conns, FIFO holds.
+irc_add_integration_test(test_writer_sticky test_writer_sticky.c)
+# Issue #294: writer interactions with no N=4 coverage. One file per gap, each
+# with writers=4: TLS handshakes racing the writer pump, a dispatch that
+# queues with no server_queue() kick, and a resume across the reap-deferral.
+irc_add_integration_test(test_tls_handshake_n4 test_tls_handshake_n4.c)
+irc_add_integration_test(test_writer_kick_connqueue test_writer_kick_connqueue.c)
+irc_add_integration_test(test_resume_deferred_close test_resume_deferred_close.c)
 # 3.4: explicit fd >= FD_SETSIZE rejection at the accept site.
 irc_add_integration_test(test_fdsize_reject test_fdsize_reject.c)
 
@@ -219,6 +231,11 @@ irc_add_integration_test(test_eintr test_eintr.c)
 # #168: per-connection flood rate limit (burst 256, 50 lines/sec); a flooder
 # gets one 417 and a close, an honest client is unaffected.
 irc_add_integration_test(test_flood_rate test_flood_rate.c)
+
+# #282: the two writer interactions with no N=4 coverage -- TLS pending-drain
+# under writers (byte-exact PONG oracle; TSan is the race oracle) and
+# 417-flush-deferred-to-writers (417 before close plus a short pump).
+irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
 
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
 # #368: loop/writer handoff fields share their own cache lines; a field
@@ -512,6 +529,10 @@ irc_add_integration_test(test_fed_relay test_fed_relay.c)
 # cannot reach these by construction -- it drives shapes this node acts on, and
 # these are the shapes it reports on while refusing -- so they need a fixture of
 # their own or they are unchecked.
+# #277: a burst-corrected holder survives the next live SJOIN. One node and two
+# scripted peers: the first plays irc.b (a burst naming irc.c as the holder,
+# then the SJOIN repeat), the second reads A's own burst off the wire.
+irc_add_integration_test(test_burst_unknown_holder test_burst_unknown_holder.c)
 irc_add_integration_test(test_burst_malformed_log test_burst_malformed_log.c)
 
 # #134: the "documented unreachable" claim in msg_verbs.c, CHECKED. A source
@@ -634,6 +655,8 @@ irc_add_integration_test(test_nick_duplicate test_nick_duplicate.c)
 # tests/loadbal/CMakeLists.txt for what is left of the three.
 irc_add_integration_test(test_reconnect test_reconnect.c)
 irc_add_integration_test(test_resume_future_stamp test_resume_future_stamp.c)
+irc_add_integration_test(test_resume_hold_two_windows test_resume_hold_two_windows.c)
+irc_add_integration_test(test_resume_tombstone_evict test_resume_tombstone_evict.c)
 
 # 7/Phase 9: 2.3's peer discovery -- ADVERTISE (a load figure, and a dial hint
 # this node records and NEVER dials) and SHUTDOWN (a goodbye that must not spend

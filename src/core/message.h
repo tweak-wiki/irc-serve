@@ -379,11 +379,10 @@ int message_tag_get(const message_t *m, const char *key, char *out, size_t cap);
 size_t message_tag_escape(const char *value, char *out, size_t cap);
 
 /* The inverse of message_tag_escape. Returns 0 on success, -1 if `value` does
- * not fit in `out`. Per the specification a '\' before any character OUTSIDE the
- * five-item set has its BACKSLASH DROPPED and yields that character (`\b` is
- * `b`), and a lone trailing '\' produces no output character at all. Refusing
- * such a block instead would make this node stricter than the specification and
- * would drop a peer's message over a byte that costs nothing. */
+ * not fit in `out` or ends in a lone trailing '\' (#278): decoding that would
+ * silently drop a byte, merging distinct wire values into one. Per the
+ * specification a '\' before any character OUTSIDE the five-item set has its
+ * BACKSLASH DROPPED and yields that character (`\b` is `b`). */
 int message_tag_unescape(const char *value, char *out, size_t cap);
 
 /* Serialize a whole block from key/value pairs: "k=v;k2=v2", NO leading '@'.

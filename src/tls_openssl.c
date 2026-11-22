@@ -274,10 +274,10 @@ static ssize_t tls_fail(conn_t *c, SSL *ssl, int ret, const char *what)
  *
  * MT 3.1 (#244): SERIALIZATION. Each SSL* is driven under its conn's wq_lock,
  * which the CALLER holds -- conn_pump() across transport_send(), conn_fill()
- * across transport_recv() (recv-side lock lands with #241). These ops take NO
- * lock themselves: wq_lock is non-recursive, so locking here would deadlock
- * on the only paths that reach it. The one-SSL-one-thread invariant is a
- * caller contract, verified by ci_tsan at --writers 4. */
+ * across transport_recv() on TLS conns (plaintext fill takes no lock: #280).
+ * These ops take NO lock themselves: wq_lock is non-recursive, so locking
+ * here would deadlock on the only paths that reach it. The one-SSL-one-thread
+ * invariant is a caller contract, verified by ci_tsan at --writers 4. */
 static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
 {
     SSL *ssl = (SSL *)c->t_ctx;
@@ -296,6 +296,9 @@ static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
      * second read into the SAME buf) is exactly what the advancing offset
      * avoids. Caller holds wq_lock throughout, so the drain is atomic with
      * the record that revealed it. */
+    /* Clear-before (#335): the ERR queue is per-thread and sticky, so a failure
+     * below must attribute THIS call's reason, not a stale one left behind. */
+    ERR_clear_error();
     int n = SSL_read(ssl, buf, (int)len);
     if (n > 0 && (size_t)n < len) {
         /* shortcut: only loop while OpenSSL says bytes remain; one extra call
@@ -306,6 +309,7 @@ static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
             if (room == 0u || room > (size_t)INT_MAX) {
                 break;
             }
+            ERR_clear_error();
             m = SSL_read(ssl, (char *)buf + n, (int)room);
             if (m <= 0) {
                 break; /* WANT_READ or error: report what we have; next call resumes */
@@ -356,6 +360,7 @@ static ssize_t tls_send(conn_t *c, const void *buf, size_t len)
      * that has just been handed over. Without this arm the loop would have nothing
      * to call, and readiness intent would have nothing to publish. */
     if (SSL_in_init(ssl) != 0) {
+        ERR_clear_error();
         int rc = SSL_do_handshake(ssl);
 
         if (rc != 1) {
@@ -383,6 +388,7 @@ static ssize_t tls_send(conn_t *c, const void *buf, size_t len)
         return TRANSPORT_FATAL;
     }
     {
+        ERR_clear_error();
         int n = SSL_write(ssl, buf, (int)len);
 
         if (n > 0) {
@@ -915,6 +921,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
     int reason_code = 0;
     int found = 0;
     int good = 0;
+    int revoked = 0;
     int rc;
     const char *peer = tls_peer_name_of(c);
     const char *verdict = "NO_CHECK";
@@ -925,6 +932,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
     char this_text[48];
     char next_text[48];
 
+    ERR_clear_error();
     leaf = SSL_get1_peer_certificate(ssl);
     if (leaf == NULL) {
         /* UNREACHABLE ON A VERIFIED LINK, and refused anyway for the reason
@@ -1070,6 +1078,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
          * still no. tests/integration/test_tls_revocation.c builds exactly that. */
         verdict = "REVOKED";
         why = OCSP_crl_reason_str((long)reason_code);
+        revoked = 1;
         goto done;
     }
     verdict = "GOOD";
@@ -1099,7 +1108,9 @@ done:
            tls_seconds_text(not_after_in, sizeof not_after_in,
                             (leaf != NULL) ? X509_get0_notAfter(leaf) : NULL),
            verdict);
-    rc = (good != 0 || node->staple_strict == 0) ? 0 : -1;
+    /* A REVOKED ANSWER IS NEVER TOLERATED, not even in permissive mode: the
+     * flag waives proof the certificate is still good, never proof it is bad. */
+    rc = (good != 0 || (node->staple_strict == 0 && revoked == 0)) ? 0 : -1;
     /* THE VERDICT. `action=` is what this node DID, not what it recommends, and it is
      * decided HERE rather than by the caller so the two cannot disagree. In
      * permissive mode this is the whole of what the insecure mode does: the link
@@ -1229,7 +1240,14 @@ static int tls_status_cb(SSL *ssl, void *arg)
     if (node == NULL || node->staple == NULL) {
         return SSL_TLSEXT_ERR_NOACK;
     }
-    (void)SSL_set_tlsext_status_ocsp_resp(ssl, node->staple, (long)node->staple_len);
+    /* THE RETURN IS CHECKED, because returning OK with nothing attached would
+     * send an empty CertificateStatus: a strict peer would read it as a broken
+     * staple rather than a missing one, and the operator here would never know
+     * this side caused it. NOACK is the honest answer either way. */
+    if (SSL_set_tlsext_status_ocsp_resp(ssl, node->staple, (long)node->staple_len) != 1) {
+        printf("[observable] tls_staple_serve: reason=ATTACH_FAILED action=NOACK\n");
+        return SSL_TLSEXT_ERR_NOACK;
+    }
     return SSL_TLSEXT_ERR_OK;
 }
 
@@ -1253,7 +1271,11 @@ static int tls_status_cb(SSL *ssl, void *arg)
  *
  * tests/integration/test_tls_revocation.c counts this function's callers to keep it
  * that way: two occurrences of the name means the definition and one call site. */
-static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen)
+/* `leaf` and `issuer` are this node's own certificate and its issuer, borrowed
+ * from the server context the caller already loaded -- never from the staple,
+ * which is the untrusted input. Both are needed to bind the response below. */
+static int tls_load_staple(const char *path, X509 *leaf, X509 *issuer,
+                           unsigned char **out, size_t *outlen)
 {
     BIO *bio = NULL;
     BIO *mem = NULL;
@@ -1269,15 +1291,19 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
     long body_len = 0L;
     int raw_len = 0;
     int der_len = 0;
+    OCSP_BASICRESP *bs = NULL;
+    OCSP_CERTID *cid = NULL;
+    int found = 0;
+    int pass = 0;
 
     *out = NULL;
     *outlen = 0u;
     /* ONE READ, BOUNDED. The file is an operator's, but an unbounded read of one is
      * still a thing to avoid, and OCSP_STAPLE_MAX is four times the largest DER that
      * could fit in a TLS CertificateStatus message -- so the cap cannot reject a
-     * staple that would have gone on the wire. A file that exceeds it fails to parse
-     * below and is refused by name, which is the right outcome rather than a
-     * truncation. */
+     * staple that would have gone on the wire. A file that fills the buffer is
+     * probed for one byte more: anything left means the read truncated, and a
+     * truncated staple is refused by name rather than kept short. */
     bio = BIO_new_file(path, "rb");
     if (bio == NULL) {
         ERR_clear_error();
@@ -1293,6 +1319,20 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
         return -1;
     }
     raw_len = BIO_read(bio, raw, OCSP_STAPLE_MAX);
+    if (raw_len >= OCSP_STAPLE_MAX) {
+        /* The buffer filled without reaching EOF: one byte more decides. */
+        unsigned char extra = 0;
+        int more = BIO_read(bio, &extra, 1);
+        if (more > 0) {
+            BIO_free(bio);
+            OPENSSL_free(raw);
+            ERR_clear_error();
+            printf("[observable] tls_init: state=FAILED path=%s "
+                   "reason=ocsp_staple_truncated\n",
+                   path);
+            return -1;
+        }
+    }
     BIO_free(bio);
     if (raw_len <= 0) {
         OPENSSL_free(raw);
@@ -1352,6 +1392,45 @@ static int tls_load_staple(const char *path, unsigned char **out, size_t *outlen
         OPENSSL_free(raw);
         printf("[observable] tls_init: state=FAILED path=%s "
                "reason=ocsp_staple_unreadable\n",
+               path);
+        return -1;
+    }
+    /* THE RESPONSE MUST BE ABOUT THIS NODE'S CERTIFICATE. A staple for another
+     * certificate parses fine and then fails on every peer at runtime, so it is
+     * refused here instead. Both digest arms are tried, mirroring the peer-side
+     * check -- the responder chose the algorithm, not this node. */
+    bs = OCSP_response_get1_basic(probe);
+    for (pass = 0;
+         pass < 2 && bs != NULL && leaf != NULL && issuer != NULL && found == 0;
+         pass++) {
+        const EVP_MD *md = (pass == 0) ? EVP_sha256() : EVP_sha1();
+
+        if (cid != NULL) {
+            OCSP_CERTID_free(cid);
+            cid = NULL;
+        }
+        cid = OCSP_cert_to_id(md, leaf, issuer);
+        if (cid == NULL) {
+            break;
+        }
+        if (OCSP_resp_find_status(bs, cid, NULL, NULL, NULL, NULL, NULL) == 1) {
+            found = 1;
+        }
+    }
+    if (cid != NULL) {
+        OCSP_CERTID_free(cid);
+        cid = NULL;
+    }
+    if (bs != NULL) {
+        OCSP_BASICRESP_free(bs);
+        bs = NULL;
+    }
+    if (found == 0) {
+        OCSP_RESPONSE_free(probe);
+        OPENSSL_free(raw);
+        ERR_clear_error();
+        printf("[observable] tls_init: state=FAILED path=%s "
+               "reason=ocsp_staple_cert_mismatch\n",
                path);
         return -1;
     }
@@ -1590,7 +1669,20 @@ int tls_backend_node_init(tls_node_t **out, const char *cert, const char *key,
      * to peers that do verify it, and refusing to staple because this node chose
      * not to check would break the other side of a one-directional mistake. */
     if (staple != NULL && staple[0] != '\0') {
-        if (tls_load_staple(staple, &node->staple, &node->staple_len) != 0) {
+        /* Leaf and issuer from the chain this node will serve, so the loader can
+         * bind the staple to them. The extra certs exclude the leaf itself. */
+        X509 *staple_leaf = SSL_CTX_get0_certificate(node->srv);
+        X509 *staple_issuer = NULL;
+        STACK_OF(X509) *staple_extra = NULL;
+
+        if (SSL_CTX_get0_chain_certs(node->srv, &staple_extra) == 1 &&
+            staple_extra != NULL &&
+            OPENSSL_sk_num((const OPENSSL_STACK *)(const void *)staple_extra) > 0) {
+            staple_issuer = (X509 *)OPENSSL_sk_value(
+                (const OPENSSL_STACK *)(const void *)staple_extra, 0);
+        }
+        if (tls_load_staple(staple, staple_leaf, staple_issuer, &node->staple,
+                            &node->staple_len) != 0) {
             tls_backend_node_free(node);
             return -1;
         }
@@ -1736,7 +1828,15 @@ int tls_backend_starttls_peer(conn_t *c, int as_server, const char *peer_host)
 
         if (strlen(peer_host) < sizeof sni) {
             memcpy(sni, peer_host, strlen(peer_host) + 1u);
-            (void)SSL_set_tlsext_host_name(ssl, sni);
+            /* THE RETURN IS CHECKED: without SNI the peer may present the wrong
+             * certificate for this link, which the NAME check would then refuse
+             * as a peer fault. Refusing here names the real cause. */
+            if (SSL_set_tlsext_host_name(ssl, sni) != 1) {
+                printf("[observable] tls_sni: fd=%d reason=SNI_SET_FAILED\n",
+                       c->fd);
+                SSL_free(ssl);
+                return -1;
+            }
         } else {
             printf("[observable] tls_sni: fd=%d reason=NAME_TOO_LONG "
                    "bytes=%zu\n", c->fd, strlen(peer_host));
@@ -1773,7 +1873,15 @@ int tls_backend_starttls_peer(conn_t *c, int as_server, const char *peer_host)
          * verifier for. A request with no extension would also be a request the
          * server's own CertID-matching (see tls_status_cb) could not satisfy for a
          * multi-certificate chain. */
-        (void)SSL_set_tlsext_status_type(ssl, TLSEXT_STATUSTYPE_ocsp);
+        /* THE RETURN IS CHECKED: without the status_request extension the peer
+         * staples nothing, and a strict self would then refuse its own link
+         * with MISSING_STAPLE. Refusing here names the real cause. */
+        if (SSL_set_tlsext_status_type(ssl, TLSEXT_STATUSTYPE_ocsp) != 1) {
+            printf("[observable] tls_error: fd=%d op=SSL_set_tlsext_status_type "
+                   "reason=failed\n", c->fd);
+            SSL_free(ssl);
+            return -1;
+        }
         if (tls_peer_verify(ssl, node, peer_host, c->fd) != 0) {
             /* THE SSL* IS RELEASED HERE RATHER THAN HANDED TO THE CONNECTION, and
              * this is the only place that can happen: c->t_ctx has NOT been assigned

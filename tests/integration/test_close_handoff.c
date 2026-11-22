@@ -80,6 +80,16 @@ int main(void)
     TF_CHECK_MSG(s.wq_close_at[fd] == 1,
                  "trylock skip reset the deadline (wq_close_at=%llu)",
                  (unsigned long long)s.wq_close_at[fd]);
+    /* #281(a): the bound fired even though the lock never freed. The conn is
+     * still attached -- #242 outranks the deadline -- but the socket is shut
+     * down, so the wedged writer's next pump fails instead of pinning the fd
+     * and its queue. The peer end reads end-of-stream. */
+    {
+        char b;
+
+        TF_CHECK_MSG(read(pair[1], &b, sizeof b) == 0,
+                     "past-deadline contention left the socket open");
+    }
     TF_CHECK_MSG(pthread_mutex_unlock(&c->wq_lock) == 0, "unlock failed");
 
     /* --- lock free and deadline expired: the bound holds, conn closes --- */
@@ -89,7 +99,38 @@ int main(void)
                  "closed conn still registered");
     TF_CHECK_MSG(s.by_fd[fd] == NULL, "by_fd not cleared on close");
     TF_CHECK_MSG(s.nactive == 0, "nactive=%zu after close", s.nactive);
+    TF_CHECK_MSG(s.wq_close_at[fd] == 0,
+                 "close left a deadline behind (wq_close_at=%llu)",
+                 (unsigned long long)s.wq_close_at[fd]);
 
+    /* --- #281(b): a recycled descriptor inherits no deadline --- */
+    {
+        int pair2[2];
+        conn_t *c2;
+        int fd2;
+
+        TF_CHECK_MSG(socketpair(AF_UNIX, SOCK_STREAM, 0, pair2) == 0,
+                     "socketpair failed");
+        c2 = conn_new(pair2[0], CONN_CLIENT);
+        TF_CHECK_MSG(c2 != NULL, "conn_new failed");
+        fd2 = pair2[0];
+        /* The stale state a reused fd would carry: a deadline this conn never
+         * armed. server_add_conn() must clear it, not inherit it. */
+        s.wq_close_at[fd2] = 777u;
+        TF_CHECK_MSG(server_add_conn(&s, c2) == 0, "server_add_conn failed");
+        TF_CHECK_MSG(s.wq_close_at[fd2] == 0,
+                     "add kept a stale deadline (wq_close_at=%llu)",
+                     (unsigned long long)s.wq_close_at[fd2]);
+        /* And a non-reaper closer clears it too. */
+        s.wq_close_at[fd2] = 777u;
+        server_close_conn(&s, fd2);
+        TF_CHECK_MSG(server_conn(&s, fd2) == NULL,
+                     "closed conn still registered");
+        TF_CHECK_MSG(s.wq_close_at[fd2] == 0,
+                     "non-reaper close left a deadline behind (wq_close_at=%llu)",
+                     (unsigned long long)s.wq_close_at[fd2]);
+        close(pair2[1]);
+    }
 
     close(pair[1]);
     server_shutdown(&s);

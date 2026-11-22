@@ -539,11 +539,14 @@ int fanout_line_fits_n(const char *prefix, const char *verb, size_t target_len,
      *           = 1 + prefix_len + 1 + verb_len + 1 + target_len + 1 + params
      *
      * so the test is the same subtraction, with 3.2's IRC_MAX_RELAY_LINE as the
-     * cap. prefix and target are charged at their MAXIMUM and written from the
-     * struct widths their values come from, so raising conn_t::nick or
-     * chan_t::name cannot leave the arithmetic short of a line that no longer
-     * fits. VERB is measured: it is a fixed short list in this node, and
-     * guessing at it would be a second opinion about code that already exists.
+     * cap. prefix and target are charged at their REAL lengths: the line that
+     * renders is built from these same strings, so measuring them cannot leave
+     * the arithmetic short of a line that no longer fits. The struct widths
+     * (CONN_HOSTMASK_MAX, CHAN_MAX_NAME + 1) survive only as the fallback for
+     * a NULL prefix, where there is no string to measure and the relay
+     * envelope still needs a worst-case bound. VERB is measured: it is a
+     * fixed short list in this node, and guessing at it would be a second
+     * opinion about code that already exists.
      *
      * `params_bytes` is the SUM of every parameter's length, separators
      * included by the fixed 1s above, and summing rather than charging only the
@@ -552,14 +555,17 @@ int fanout_line_fits_n(const char *prefix, const char *verb, size_t target_len,
      * 4.3 freezes for it -- come out the same size here as it would render. The
      * sum is a LOWER bound on the rendered size, never an over-estimate of it,
      * so the cap is approached from the conservative side. */
-    const size_t charge = 1u /* ':' */ + 1u /* ' ' */ + 1u /* ' ' */ + 1u /* ' ' */
-                          + CONN_HOSTMASK_MAX + (CHAN_MAX_NAME + 1u);
+    size_t prefix_len;
+    size_t charge;
 
-    (void)target_len;
     if (verb == NULL) {
         return 0;
     }
-    (void)prefix;
+    /* No string to measure, so assume the widest envelope the relay path can
+     * carry rather than the narrowest. */
+    prefix_len = (prefix != NULL) ? strlen(prefix) : (size_t)CONN_HOSTMASK_MAX;
+    charge = 1u /* ':' */ + 1u /* ' ' */ + 1u /* ' ' */ + 1u /* ' ' */
+             + prefix_len + target_len;
     return (params_bytes + charge + strlen(verb)) <= (size_t)IRC_MAX_RELAY_LINE;
 }
 
@@ -871,7 +877,7 @@ static void fanout_form_for(const conn_t *dst, const fanout_form_t *extended,
                             const char *const **params, int *nparams)
 {
     if (extended == NULL || extended->params == NULL ||
-        cap_extended_join_enabled(dst) == 0) {
+        cap_enabled(dst, CAP_EXTENDED_JOIN) == 0) {
         return;
     }
     *params = extended->params;
@@ -1050,6 +1056,27 @@ static const char *fanout_pick_block(const conn_t *m, const char *account,
     return NULL;
 }
 
+/* The block is always one of the three precomputed values (or NULL), so its
+ * length is SELECTED, not measured: three strlen calls per emission instead
+ * of one per member (#216). Pointer identity is exact here because
+ * fanout_pick_block() returns exactly these pointers. */
+static size_t fanout_block_len(const char *block,
+                               const char *tag_msgid, size_t msgid_len,
+                               const char *tag_acct, size_t acct_len,
+                               const char *tag_both, size_t both_len)
+{
+    if (block == tag_both) {
+        return both_len;
+    }
+    if (block == tag_msgid) {
+        return msgid_len;
+    }
+    if (block == tag_acct) {
+        return acct_len;
+    }
+    return 0;
+}
+
 /* Does this member's line carry per-destination label/batch state, which only
  * the per-member path can render? The three fields are the ones the two hooks
  * read: a live label owed a response (a self-message suppresses it with no
@@ -1168,6 +1195,9 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
     char tag_msgid[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_acct[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_both[FANOUT_TAG_BLOCK_MAX + 1u];
+    size_t tag_msgid_len = 0;
+    size_t tag_acct_len = 0;
+    size_t tag_both_len = 0;
     int tags_ok = 0;
 
     if (t->chan == NULL || nparams < 0 || nparams >= IRC_MAX_PARAMS) {
@@ -1189,6 +1219,10 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
                                          tag_msgid, sizeof tag_msgid,
                                          tag_acct, sizeof tag_acct,
                                          tag_both, sizeof tag_both);
+        /* #216: measured once per emission, selected per member below. */
+        tag_msgid_len = strlen(tag_msgid);
+        tag_acct_len = strlen(tag_acct);
+        tag_both_len = strlen(tag_both);
     }
     for (size_t i = 0; i < t->chan->nmembers; i++) {
         conn_t *m = t->chan->members[i].c;
@@ -1280,7 +1314,10 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
             if (ready != 0) {
                 const char *block = fanout_pick_block(m, account, tag_msgid,
                                                       tag_acct, tag_both);
-                const size_t taglen = (block != NULL) ? strlen(block) : 0u;
+                /* #216: length selected, not measured (see fanout_block_len). */
+                const size_t taglen = fanout_block_len(block, tag_msgid, tag_msgid_len,
+                                                       tag_acct, tag_acct_len,
+                                                       tag_both, tag_both_len);
 
                 /* Unfailable for bytes the hoist produced -- the body fits
                  * IRC_MAX_LINE by render and the block fits its own bound --
@@ -1459,6 +1496,9 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
     char tag_msgid[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_acct[FANOUT_TAG_BLOCK_MAX + 1u];
     char tag_both[FANOUT_TAG_BLOCK_MAX + 1u];
+    size_t tag_msgid_len = 0;
+    size_t tag_acct_len = 0;
+    size_t tag_both_len = 0;
     int tags_ok = 0;
     /* #171: the union de-duplication set -- one bit per registrable fd, cleared
      * once per emission below and set channel-by-channel in the walk. */
@@ -1508,6 +1548,10 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
                                          tag_msgid, sizeof tag_msgid,
                                          tag_acct, sizeof tag_acct,
                                          tag_both, sizeof tag_both);
+        /* #216: measured once per emission, selected per member below. */
+        tag_msgid_len = strlen(tag_msgid);
+        tag_acct_len = strlen(tag_acct);
+        tag_both_len = strlen(tag_both);
     }
 
     for (size_t i = 0; i < nchans; i++) {
@@ -1627,7 +1671,10 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
                 if (ready != 0) {
                     const char *block = fanout_pick_block(m, account, tag_msgid,
                                                           tag_acct, tag_both);
-                    const size_t taglen = (block != NULL) ? strlen(block) : 0u;
+                    /* #216: length selected, not measured (see fanout_block_len). */
+                    const size_t taglen = fanout_block_len(block, tag_msgid, tag_msgid_len,
+                                                           tag_acct, tag_acct_len,
+                                                           tag_both, tag_both_len);
 
                     if (taglen <= (size_t)FANOUT_TAG_BLOCK_MAX &&
                         shapelen + taglen + 4u <= sizeof line) {

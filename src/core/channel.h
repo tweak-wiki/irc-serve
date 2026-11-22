@@ -1051,11 +1051,11 @@ int chan_rekey(chan_t *ch, const char *origin, uint64_t origin_epoch);
  * one at a time, with no single line asking for a lot of work. That is the same
  * reason CHAN_MAX_BANS is a real limit rather than a formality.
  *
- * At the bound a topic is NOT remembered, s->n_topic_cache_full counts the loss,
- * and the topic is then lost exactly as it would have been without this cache.
- * The cache therefore never refuses a client command and never makes the node
- * slower; it can only fail to help. That is the right direction for a cache whose
- * bound is reached by traffic rather than by a bug.
+ * At the bound the OLDEST entry is evicted to make room, so the cache holds the
+ * most-recently-used names; s->n_topic_cache_full counts the evictions. The
+ * cache therefore never refuses a client command and never makes the node
+ * slower; it can only forget a stale topic. That is the right direction for a
+ * cache whose bound is reached by traffic rather than by a bug.
  *
  * 64 is not derived from anything: it is a judgement, and it is a judgement about
  * NAMES rather than about topics, because the entry is keyed by channel name. 64
@@ -1080,8 +1080,9 @@ typedef struct chan_topic {
 } chan_topic_t;
 
 /* How many channels this node will remember a topic for. See the note above:
- * reached by client input, and a loss at the bound is reported rather than
- * refused. */
+ * reached by client input, and an eviction at the bound is reported rather
+ * than refused. Index 0 is the least-recently-used entry: a rewrite moves its
+ * entry to the end, and a new name past the bound drops index 0. */
 #define SERVER_TOPIC_MAX 64
 
 /* Copy `ch`'s topic, setter and time into the cache, replacing any entry for the
@@ -1094,11 +1095,11 @@ typedef struct chan_topic {
  * value would need a "remembered but empty" state to be told apart from "never
  * remembered", and the ABSENCE of an entry is already that state.
  *
- * A no-op when the channel has no topic and nothing is remembered for it: a
  * channel that never had a topic is not a cache write. Returns 1 when an entry
  * was stored, 0 when there was nothing to do or when an entry was removed, and
- * -1 when the cache was full or an allocation failed -- the case
- * s->n_topic_cache_full counts, and which leaves everything else untouched. */
+ * -1 only when an allocation failed -- a full cache evicts its oldest entry
+ * instead, which s->n_topic_cache_full counts, and which leaves everything
+ * else untouched. */
 int server_topic_remember(server_t *s, const chan_t *ch);
 
 /* Copy a remembered topic into a channel that has just been CREATED. A no-op
@@ -1118,9 +1119,10 @@ const chan_topic_t *server_topic_at(const server_t *s, size_t i);
  * ------------------------------------------------------------------------- */
 
 /* Register `ch` under its canonical name and append it to the node's ordered
- * channel index. Returns 0 on success, -1 if the name is already registered or
- * on allocation failure. This is the only way a chan_t enters the node; the
- * Phase 2 key-space probes in server.h cannot carry a value. */
+ * channel index. Returns 0 on success, -1 if the name is already registered,
+ * the node is at SERVER_MAX_CHANNELS, or on allocation failure. This is the
+ * only way a chan_t enters the node; the Phase 2 key-space probes in server.h
+ * cannot carry a value. */
 int server_chan_attach(server_t *s, chan_t *ch);
 
 /* Look a channel up by name, case-insensitively (the name is canonicalised

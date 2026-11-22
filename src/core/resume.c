@@ -386,7 +386,7 @@ void resume_note(server_t *s, const conn_t *c, uint64_t now_ms)
 {
     struct resume_window *w;
     size_t i;
-
+    size_t k;
     if (s == NULL || c == NULL) {
         return;
     }
@@ -435,17 +435,29 @@ void resume_note(server_t *s, const conn_t *c, uint64_t now_ms)
         return;
     }
     if (s->nresume_used >= IRC_RESUME_MAX) {
-        /* THE OLDEST GOES, and the oldest rather than the newest because the
-         * newest is the one somebody is about to come back for. The alternative
-         * -- refusing the new window -- would mean a node under a scripted
-         * connect/disconnect loop stops resuming for EVERYBODY, which is the
-         * failure mode 2.2's topic-cache rule is written against: a store that
-         * can refuse is a store that can break a client command. So the pressure
-         * is answered by forgetting, and the forgetting is counted so an
-         * operator can see that the window is too small for this node. */
+        /* A TOMBSTONE GOES FIRST, and the oldest live window only if there is
+         * none: a retired window can never resume again -- its owner was
+         * already told -- so dropping it loses nothing, while dropping the
+         * oldest live window loses a session somebody may still come back
+         * for. The table is in note order, so the first retired entry is the
+         * oldest dead one. The alternative -- refusing the new window -- would
+         * mean a node under a scripted connect/disconnect loop stops resuming
+         * for EVERYBODY, which is the failure 2.2's topic-cache rule is
+         * written against: a store that can refuse is a store that can break
+         * a client command. So the pressure is answered by forgetting, and
+         * the forgetting is counted so an operator can see that the window
+         * is too small for this node. */
+        size_t victim = 0;
+
+        for (k = 0; k < s->nresume_used; k++) {
+            if (s->resume_windows[k].retired_ms != 0u) {
+                victim = k;
+                break;
+            }
+        }
         s->n_resume_evicted++;
         printf("[observable] session_resume_evict: bound=%zu\n", IRC_RESUME_MAX);
-        resume_drop_at(s, 0);
+        resume_drop_at(s, victim);
     }
     /* The slot is at nresume_used after any eviction, and it is CLEARED before
      * the copies rather than overwritten field by field: an eviction shifts a

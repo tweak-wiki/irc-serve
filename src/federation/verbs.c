@@ -327,13 +327,13 @@ static int fed_queue_refuse(fed_queue_why_t *why_out, fed_queue_why_t why)
  *      keep in step, and this file has now shipped two divergences from exactly
  *      that cause: SMODES applying modes the client path refuses, and the log
  *      values bypassing `fed_obs()`.
- *   3. IT NAMES `conn_text_strip_relay()` AND `conn_text_strip()` IN THE TABLE
- *      rather than reimplementing either. Those two ARE the single implementations
- *      of "what a relayed message may contain" and "what a stored value may
- *      contain"; the client relay path in core/msg_verbs.c calls the first for
- *      PRIVMSG text. This table is a statement about WHICH FIELD and WHICH POLICY,
- *      and nothing else -- the byte rules live in one place per policy and a change
- *      to either is a change to both surfaces.
+ *   3. IT NAMES STRIP_RELAY AND STRIP_STORED IN THE TABLE rather than
+ *      reimplementing either. Those two ARE the single implementations of "what
+ *      a relayed message may contain" and "what a stored value may contain";
+ *      the client relay path in core/msg_verbs.c passes the first for PRIVMSG text.
+ *      This table is a statement about WHICH FIELD and WHICH POLICY, and nothing
+ *      else -- the byte rules live in one place per policy and a change to either
+ *      is a change to both surfaces.
  *
  * WHY TWO POLICIES IN ONE TABLE. Because the client path has two, and a peer relay
  * carries both kinds of field. A message's text is RELAYED, and `relay_byte_kept()`
@@ -354,25 +354,23 @@ static int fed_queue_refuse(fed_queue_why_t *why_out, fed_queue_why_t why)
  * refused anyway -- and it is reported rather than truncated, because a truncated
  * parameter is a lie about what the peer sent.
  */
-typedef size_t (*fed_clean_fn)(char *dst, size_t cap, const char *src);
-
 static const struct {
     const char *verb;
-    int at;             /* which parameter carries the text */
-    fed_clean_fn clean; /* WHICH policy, named as the function that owns it */
+    int at;                          /* which parameter carries the text */
+    conn_text_strip_policy_t policy; /* WHICH policy: message text or stored value */
 } OUTBOUND_TEXT[] = {
     /* The two message verbs: index 1 is the text, and it is the same field and the
      * same policy as PRIVMSG's on the client relay path. */
-    { "SPRIVMSG", 1, conn_text_strip_relay },
-    { "SNOTICE",  1, conn_text_strip_relay },
+    { "SPRIVMSG", 1, STRIP_RELAY },
+    { "SNOTICE",  1, STRIP_RELAY },
     /* The state verbs' free-text fields, all of which the receiving node STORES or
      * renders to clients rather than relays. 4.3's frozen shapes put the channel in
      * the second slot for all three and the evaluating server in the first, which is
      * why these indices are what they are -- and why getting one wrong is a field
      * read from the wrong place rather than a visible error. */
-    { "STOPIC",   2, conn_text_strip },
-    { "SKICK",    3, conn_text_strip },
-    { "SMODES",   2, conn_text_strip }
+    { "STOPIC",   2, STRIP_STORED },
+    { "SKICK",    3, STRIP_STORED },
+    { "SMODES",   2, STRIP_STORED }
 };
 #define OUTBOUND_TEXT_COUNT \
     ((int)(sizeof OUTBOUND_TEXT / sizeof OUTBOUND_TEXT[0]))
@@ -425,7 +423,7 @@ static int fed_relay_clean(const char *verb, const char *const *params,
         for (int k = 0; k < nparams; k++) {
             cleaned[k] = params[k];
         }
-        *kept_len = OUTBOUND_TEXT[i].clean(arena, cap, src);
+        *kept_len = conn_text_strip(arena, cap, src, OUTBOUND_TEXT[i].policy);
         cleaned[OUTBOUND_TEXT[i].at] = arena;
         return 1;
     }
@@ -1155,13 +1153,19 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
      * account -- and the same direction 4.3.1 chose for `<server>`, which was added
      * before a second implementation existed rather than after. */
     if (nparams != 4 || fed_parse_flags(params[2], &flags) != 0 ||
-        /* link->name TWICE, and that is the whole of what an SJOIN can say about a
-         * member's HOLDER: 4.3's SJOIN carries no server field, so the member's
-         * holder is inferred from the link the record arrived on -- exact on a
-         * two-node mesh and a relaying peer's best guess on a larger one, which is
-         * why the BURST format grew a <server> field and this one has not. See
-         * channel.h's chan_remote_t for the two-server split. */
-        chan_remote_add(ch, link->name, link->name, params[1], params[3], flags) != 0) {
+        /* NULL for the HOLDER, and that absence is the whole of what an SJOIN can
+         * say about one: 4.3's SJOIN carries no server field, so the holder is
+         * unknown and is recorded as such ("not told", which chan_remote_add()
+         * stores as empty). Writing the link's name here would file a guess as a
+         * fact: exact on a two-node mesh, a relay's name on a larger one, and a
+         * fact the next burst from whoever holds the member then has to
+         * overwrite. The burst corrects it -- SBURSTM carries the holder, and
+         * install overwrites the empty one -- and a repeat SJOIN must not clobber
+         * what the burst established. It does not: chan_remote_add() only
+         * overwrites the holder when the repeat carries one, and the send path's
+         * fallback to the key stays a best effort that a burst replaces rather
+         * than a stored answer. */
+        chan_remote_add(ch, link->name, NULL, params[1], params[3], flags) != 0) {
         /* The `nparams > 1` guard is why the measurement comes from the SAME ternary
          * rather than from `params[1]`: on the branch where the guard failed,
          * params[1] does not exist. */
@@ -1180,10 +1184,11 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
      * node's mesh ten minutes after the last one would be unknown to a registry
      * fed only by SBURST, and 2.1's scoped `nick@server` would 401 a user who is
      * right there. SJOIN is the only verb that reports a user joining, so it is
-     * the only place a live registry entry can come from. The holder is the LINK
-     * for the same reason the roster's is -- 4.3's SJOIN carries no server field
-     * -- and the two disagree only for a relaying peer's own best guess, which
-     * the next burst corrects. */
+     * the only place a live registry entry can come from. The registry's holder
+     * is the LINK -- 4.3's SJOIN carries no server field, and a registry with no
+     * answer cannot route, so the link is the best available -- while the roster
+     * above records the absence and waits for a burst. The two disagree only for
+     * a relaying peer's own best guess, which the next burst corrects. */
     fed_nickreg_learn_member(s, params[1], link->name, link->name, server_now_ms());
     /* 2.1's POLICY, ON THE LEARNING SIDE, and the reason it is a second call site
      * rather than a detail of the learn above: a user can register `zed` on a node
@@ -1781,6 +1786,17 @@ static void fed_in_shutdown(server_t *s, server_link_t *link, const char *prefix
         s->n_fed_shutdown_refused++;
         fed_obs("[observable] fed_shutdown_refused: peer=%s reason=ARITY nparams=%d\n",
                link->name, nparams);
+        /* The line is unusable, but the LINK carried it: a peer speaking the
+         * wrong SHUTDOWN shape is a peer this node can no longer trust to
+         * speak 4.3, so the link goes down with the line instead of staying
+         * ESTABLISHED with a stale roster until T4. */
+        {
+            conn_t *c = server_link_conn(s, link);
+
+            if (c != NULL) {
+                conn_mark_closing(c);
+            }
+        }
         return;
     }
     if (nparams == 1) {
@@ -2182,7 +2198,7 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
                     size_t mask_kept = 0;
 
                     if (strlen(mask) <= (size_t)CHAN_MAX_BAN) {
-                        mask_kept = conn_text_strip(clean, sizeof clean, mask);
+                        mask_kept = conn_text_strip(clean, sizeof clean, mask, STRIP_STORED);
                         effective = clean;
                     }
                     /* The raw length binds, exactly as the client path's does: a
@@ -2348,6 +2364,15 @@ static void fed_in_squit(server_t *s, server_link_t *link,
         fed_obs("[observable] fed_malformed: command=SQUIT field=arity nparams=%d "
                "want=1..2\n",
                nparams);
+        /* Same as SHUTDOWN's ARITY arm above: the line is refused AND the link
+         * that carried it goes down, or a departed peer haunts the roster. */
+        if (link != NULL) {
+            conn_t *c = server_link_conn(s, link);
+
+            if (c != NULL) {
+                conn_mark_closing(c);
+            }
+        }
         return;
     }
     gone = params[0];
@@ -3028,9 +3053,9 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
          * filters already existed and none of them is on this path:
          *
          *   - `msg_verbs.c` filters a CLIENT's message text before fanning it out,
-         *     with `conn_text_strip_relay()`;
+         *     with `conn_text_strip()` under STRIP_RELAY;
          *   - `fed_relay_clean()` below `fed_queue_line()` filters the same text
-         *     again on the way to a PEER, with the same function;
+         *     again on the way to a PEER, with the same policy;
          *   - `write_to_members()` -> `send_line_tagged()` filters NOTHING, and it
          *     is what writes to a local client.
          *
@@ -3096,7 +3121,7 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
         {
             char clean[IRC_MAX_LINE];
             const size_t in_len = strlen(sp[0]);
-            const size_t kept = conn_text_strip_relay(clean, sizeof clean, sp[0]);
+            const size_t kept = conn_text_strip(clean, sizeof clean, sp[0], STRIP_RELAY);
 
             sp[0] = clean;
             if (kept != in_len) {

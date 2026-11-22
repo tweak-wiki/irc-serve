@@ -385,7 +385,12 @@ conn_realname_verdict_t conn_realname_check(const char *name);
  */
 size_t conn_text_bad_count(const char *s);
 
-/* Copy `src` into `dst`, dropping every byte the set contains, and
+typedef enum {
+    STRIP_STORED = 0, /* stored value: every C0 control goes, nothing kept */
+    STRIP_RELAY = 1, /* message text: the eight mIRC bytes stay */
+} conn_text_strip_policy_t;
+
+/* Copy `src` into `dst` under `policy`, dropping what the policy drops, and
  * NUL-terminate. Returns the number of bytes KEPT.
  *
  * `cap` counts the terminator, as everywhere else in this header. `src` shorter
@@ -401,16 +406,17 @@ size_t conn_text_bad_count(const char *s);
  * SILENT MUTATION IS ITS OWN DEFECT, which is why nothing in this node strips
  * without also logging that it did. A caller that uses this MUST emit a line
  * saying so; the byte count it returns is what that line reports. */
-size_t conn_text_strip(char *dst, size_t cap, const char *src);
+size_t conn_text_strip(char *dst, size_t cap, const char *src, conn_text_strip_policy_t policy);
 
 /* ---------------------------------------------------------------------------
- * conn_text_strip_relay(): THE SAME STRIP, FOR A FIELD THAT IS *MESSAGE TEXT*
+ * STRIP_RELAY vs STRIP_STORED: the same strip, two policies
  * ---------------------------------------------------------------------------
  * Strip what can CONTROL A TERMINAL. Keep what is IRC MESSAGE SEMANTICS.
  *
- * This is NOT conn_text_strip() and the difference is load-bearing, so it is a
- * separate function rather than a flag. BOTH now share one UTF-8 walk -- see the
- * block at connection.c's `text_step()` -- and they differ in exactly one thing: the
+ * STRIP_RELAY is for a field that IS *MESSAGE TEXT*; STRIP_STORED is the same
+ * walk with nothing kept, and the difference is load-bearing. BOTH share one
+ * UTF-8 walk -- see the block at connection.c's `text_step()` -- and they differ
+ * in exactly one thing: the
  * eight mIRC bytes below, which message text keeps and nothing else does. They used
  * to differ in two things: this one, and a narrower understanding of "control" that
  * let a raw `0x80`-`0x9F` byte through BOTH of them. A stored topic holding one was
@@ -505,47 +511,10 @@ size_t conn_text_strip(char *dst, size_t cap, const char *src);
  * whether anything was removed compares the return value against strlen() of the
  * input, which is exact because this only ever removes bytes and never reorders
  * them. */
-size_t conn_text_strip_relay(char *dst, size_t cap, const char *src);
-
-/* ---------------------------------------------------------------------------
- * conn_text_strip_wire(): A VALUE RENDERED BACK INTO A FIELD ITS SENDER WILL READ
- * ---------------------------------------------------------------------------
- * The STRICT half of the split. Removes every C0 control, DEL, a raw C1
- * (`0x80`-`0x9F` with nothing expecting a continuation) and the encoded C1 pair
- * `0xC2 0x80`-`0xC2 0x9F`. Keeps every VALID multi-byte sequence, for the reason
- * `conn_text_strip_relay()`'s own header gives at length: a filter over the range
- * `0x80`-`0x9F` removes every accented, Greek and Cyrillic character on the node,
- * and it does it silently.
- *
- * IT IS NOT `conn_text_strip_relay()`, and the difference is eight named bytes. A
- * relayed message is IRC message text, where `0x01` is CTCP and `0x02`/`0x03`/
- * `0x0F`/`0x11`/`0x16`/`0x1D`/`0x1F` are mIRC's colour and style codes -- removing
- * them CORRUPTS rather than sanitises. A numeric's parameter is not message text:
- * there is no client rendering formatting codes out of a `401`, so the strict policy
- * is right there and the split is a real difference rather than an accident of
- * which function somebody reached for.
- *
- * WHY IT EXISTS, and the argument is a POLICY rather than an observation: a value
- * echoed back to the client that sent it is still filtered. The argument this tree
- * used for a long time was "there is no second reader", and that argument is
- * WRONG -- a client that writes numerics to a log file, or a bouncer relaying them
- * to a human's terminal, is the second reader, and it is downstream of the client
- * rather than of this node. The decisive argument is simpler and it is
- * INFORMATION: **the echo carries nothing the sender does not already have.** The
- * client sent the value on the line before. So filtering it costs no information at
- * all and removes a real hazard, which makes it a decision rather than a trade-off.
- * See `SECURITY.md`'s control-byte section for the policy in full.
- *
- * IT REMOVES BYTES AND KEEPS THE FIELD. A parameter that becomes empty is still a
- * parameter, and a positional parser still finds it where the RFC says it is -- which
- * is the whole reason this is a strip and not the placeholder substitution the `472`
- * uses. The placeholder is a different case: there the value is a single byte that is
- * structurally not a mode character, so there is nothing to strip and something has
- * to stand in its place.
- *
- * COST: one pass over one value, on a path that runs once per numeric. The caller
- * supplies the destination. */
-size_t conn_text_strip_wire(char *dst, size_t cap, const char *src);
+/* A value rendered back into a field its sender will read (a numeric echoing the
+ * client's own argument) uses STRIP_STORED: the echo carries nothing the sender
+ * does not already have, so filtering it costs no information. See
+ * `SECURITY.md`'s control-byte section for the policy in full. */
 
 /* ---------------------------------------------------------------------------
  * conn_text_display_check(): MAY THIS STRING BE STORED AND RENDERED TO OTHER PEOPLE
@@ -1165,18 +1134,25 @@ typedef struct conn {
      * history and nothing reads it except STARTTLS's refusal. */
     int         credential_seen;
     /* Flood token bucket (#168), owned by poll_loop.c. rate_tokens starts at
-     * the burst (256) and refills at 50/sec on the tick path; each
-     * dispatched client line spends one. rate_last_ms == 0 means "never
-     * refilled", which the tick initialises rather than conn_new(), so the
-     * burst constant lives in exactly one place. CONN_SERVER links are
-     * exempt and never spend. */
+     * the burst (256) and refills lazily at 50/sec on the read path (#216:
+     * conn_readable() refills before the token check, so idle connections
+     * cost nothing); each dispatched client line spends one. rate_last_ms
+     * == 0 means "never refilled", which the first refill initialises
+     * rather than conn_new(), so the burst constant lives in exactly one
+     * place. CONN_SERVER links are exempt and never spend. */
     double      rate_tokens;
     uint64_t    rate_last_ms;
     char       *rbuf;              /* read buffer */
     size_t      rlen;
     size_t      rcap;
-    /* MT 2.1 (#240): guards wbuf/wlen/woff/wcap + want_write ONLY. Single-threaded
-     * loop calls conn_queue()/conn_pump() exactly as before, so no behavior change. */
+    /* MT 2.1 (#240): guards wbuf/wcap + want_write AND the queue it points
+     * at. wlen/woff themselves are atomic (#280): a transport's publish
+     * snapshots the pending tail without taking this lock, so the read path
+     * no longer contends with a writer's drain. Mutation still happens only
+     * under the lock, which is what keeps the pair consistent; the snapshot
+     * can be stale by a concurrent drain, and only in the harmless
+     * direction -- a drain removes bytes, so a stale read over-reports and
+     * the next publish corrects it. Single-threaded, no behavior change. */
     /* -----------------------------------------------------------------------
      * #368 HANDOFF: THE FIELDS THE LOOP SHARES WITH WRITER THREADS.
      * -----------------------------------------------------------------------
@@ -1202,8 +1178,8 @@ typedef struct conn {
     atomic_int  want_read;         /* poll() must include POLLIN; release/acquire */
     atomic_int  want_write;        /* poll() must include POLLOUT; release/acquire */
     char       *wbuf;              /* write queue; wbuf[woff..wlen) is unsent */
-    size_t      woff;
-    size_t      wlen;
+    atomic_size_t woff;
+    atomic_size_t wlen;
     size_t      wcap;
 } conn_t;
 
@@ -1327,7 +1303,10 @@ int conn_pump_locked(conn_t *c);
  * are distinguishable. */
 void conn_want(conn_t *c, int read, int write);
 
-/* Bytes still unsent: wlen - woff. */
+/* Bytes still unsent: wlen - woff. CALLER HOLDS wq_lock: every transport and
+ * pump path calls this with the lock held (its publish runs inside), so this
+ * never takes it -- taking it would deadlock. Cross-thread readers without
+ * the lock use conn_write_pending_locked() instead (#293). */
 size_t conn_write_pending(const conn_t *c);
 
 /* MT 2.2 (#241): locked pending read; takes wq_lock. For cross-thread

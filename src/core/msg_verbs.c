@@ -74,14 +74,14 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
     }
 
     /* ------------------------------------------------------------------------
-     * THE RELAY STRIP, AND WHY IT IS NOT conn_text_strip()
+     * THE RELAY STRIP, AND WHY IT IS NOT STRIP_STORED
      * ------------------------------------------------------------------------
-     * THE TWO NOW SHARE ONE UTF-8 WALK -- connection.c's `text_step()` -- and they
-     * differ in ONE thing, which is this one. Everything below about `0x01` and the
-     * mIRC codes is still the whole reason this function exists rather than being
-     * `conn_text_strip()`, and it used to be one reason of two.
+     * THE TWO SHARE ONE UTF-8 WALK -- connection.c's `text_step()` -- and differ
+     * in ONE thing, the policy argument, which is this one. Everything below about
+     * `0x01` and the mIRC codes is still the whole reason STRIP_RELAY exists rather
+     * than this call passing STRIP_STORED, and it used to be one reason of two.
      *
-     * conn_text_strip() refuses every C0 control and DEL, which is right for every
+     * STRIP_STORED refuses every C0 control and DEL, which is right for every
      * field this node STORES -- an away message, a topic, a kick reason. It would be
      * wrong here, because two groups of C0 bytes are IRC message semantics rather
      * than terminal control, and stripping either group is a regression that buys
@@ -120,7 +120,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
      */
     {
         size_t in_len = strlen(text);
-        size_t kept = conn_text_strip_relay(clean, sizeof clean, text);
+        size_t kept = conn_text_strip(clean, sizeof clean, text, STRIP_RELAY);
 
         if (kept != in_len) {
             s->n_msg_stripped++;
@@ -428,7 +428,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
      * the echo-message copy of a CHANNEL message too, and a labelled `PRIVMSG #chan` came
      * back unlabelled followed by an `ACK`. */
     c->label_self = ((t.kind == FANOUT_LOCAL_USER) && (t.user == c)) ? 1 : 0;
-    exclude = ((is_notice != 0) && (cap_echo_message_enabled(c) == 0)) ? c : NULL;
+    exclude = ((is_notice != 0) && (cap_enabled(c, CAP_ECHO_MESSAGE) == 0)) ? c : NULL;
     {
         const char *sp[1];
 
@@ -575,7 +575,7 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
     /* ONE ANSWER FOR THE WHOLE REPLY, asked once because a WHO is answered to a
      * single client and asking per entry would ask the same question once per row
      * of a reply this node builds in a loop. See who_flags(). */
-    const int multiprefix = cap_multiprefix_enabled(c);
+    const int multiprefix = cap_enabled(c, CAP_MULTIPREFIX);
     /* RFC 2812 3.3.4: WHO [<mask> ["o"]]. The second parameter selects only
      * channel operators; anything else there is refused like any bad arity. */
     int ops_only = 0;
@@ -671,6 +671,34 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
         (void)reply(s, c, "315", (const char *const[]){ eomask }, 1,
                     "End of WHO list");
         return;
+    }
+    /* #217: the matcher is cheap per nick, but a mask of many wildcards (or a
+     * very long one) burns it once per nickname with nothing to show: the
+     * reply cap below already bounds the ROWS, not the MATCHING. Count the
+     * pattern cost up front -- more than two wildcards or longer than a nick
+     * can ever need -- and answer 315 alone like the broad-mask arm above. */
+    {
+        size_t wilds = 0;
+        size_t mlen = 0;
+        for (const char *p = mask; *p != '\0'; p++) {
+            if (*p == '*' || *p == '?') {
+                wilds++;
+            }
+            mlen++;
+        }
+        if (wilds > 2u || mlen > 32u) {
+            /* 315 names '*' rather than echoing the mask: the mask is client
+             * bytes (overlong or control-carrying), and echoing them would
+             * push the refusal into reply()'s bad_param/text_too_long arms,
+             * which count on n_reply_refused -- the counter that stays zero.
+             * Same shape as the empty-mask arm above. */
+            printf("[observable] who_truncated: nick=%s mask_len=%zu reason=wild_mask "
+                   "replies=0\n",
+                   c->nick, mlen);
+            (void)reply(s, c, "315", (const char *const[]){ "*" }, 1,
+                        "End of WHO list");
+            return;
+        }
     }
     {
         size_t sent = 0u;
@@ -1450,7 +1478,7 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
         return;
     }
 
-    kept = conn_text_strip(c->away, sizeof c->away, message);
+    kept = conn_text_strip(c->away, sizeof c->away, message, STRIP_STORED);
     /* ------------------------------------------------------------------------
      * A MESSAGE THAT WAS NOTHING BUT BAD BYTES IS NOT AN AWAY MESSAGE (#121)
      * ------------------------------------------------------------------------

@@ -47,7 +47,6 @@ been one.
 |---|---|
 | Tests | **100 passing, 0 skipped**, 0 failing |
 | Warnings | **0**, on gcc-16, upstream Clang 23 and Apple clang 21 (`-Weverything`), Release **and** Debug |
-| Fortify cell | `-D_FORTIFY_SOURCE=2` (`IRC_FORTIFY=1 ./local-ci.sh`) — a **no-op on macOS**, see below |
 | Sanitizers | ASan + UBSan clean locally; **ASan + LeakSanitizer + UBSan clean on Linux**, on the CI job and in `scripts/gate-linux-cell.sh` |
 | Code scanning | **0 open alerts** (CodeQL) |
 | Language | strict C11, **no required third-party libraries**; TLS (`-DWITH_TLS=ON`) adds the optional one |
@@ -305,35 +304,6 @@ not exist on Darwin — an ASan binary run with `detect_leaks=1` there aborts wi
 the local ASan cell runs with leak detection off. The **only** dynamic leak check
 for `SSL*` and `SSL_CTX*` in this project is `ci_sanitizers`' `WITH_TLS=ON` cell on
 Linux.
-
-### The fortify cell, and what it does not buy
-
-`IRC_FORTIFY=1 ./local-ci.sh` adds `-D_FORTIFY_SOURCE=2` to a whole
-build-and-test run. It is worth being precise about it, because the reason it
-exists is a diagnostic it **cannot** catch.
-
-glibc declares `read()`, `write()`, `fread()` and `pipe()` with `__wur` —
-`__attribute__((warn_unused_result))` — and GCC honours that attribute only when
-the result is genuinely used, so `(void)read(...)` is an error
-(`-Werror=unused-result`), not a discard. A test did exactly that, every Linux
-CI job went red, and every macOS cell had built it clean: macOS does not declare
-`read()` with that attribute at all, and Clang exempts an explicit `(void)` cast
-even when it does.
-
-So the fortify cell was measured before it was trusted, at `-O0` and `-O2`, on
-gcc-16 and Apple clang: **it changes nothing**, because the macOS SDK declares no
-`__*_chk` entry points for fortify to select. This class of defect lives in the
-platform's *declaration* of a function, and no `-D` flag on macOS can produce a
-glibc declaration. **`ci_macos` is not a slower version of the Linux gate for
-this class — it is blind to it**, and `ci_test` (hosted Linux, GCC against glibc)
-is the gate.
-
-`scripts/check-wur-discards.sh`, which runs in `ci_test`, greps for `(void)` casts
-of the libc functions glibc marks `__wur` and fails on any host. It does **not**
-replace that build and does not claim to — it is a tripwire for one pattern, added
-because the audit that found the original was a one-time manual pass over 1162
-sites and nothing stopped the next one. Note that `fwrite` is deliberately absent
-from its list: glibc declares it with `__nonnull` and no `__wur`.
 
 ### Platforms
 

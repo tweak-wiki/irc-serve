@@ -1097,6 +1097,23 @@ static void test_registry_refused(const char *sasl, const char *path,
     tc_close(&alice.c);
 }
 
+/* Issue #311: a TORN write (a non-atomic rewrite racing a restart) reads as a
+ * malformed record, so the refusal names the atomic-replace remedy and not
+ * just the reason. */
+static void test_torn_registry_names_remedy(const char *sasl, const char *path)
+{
+    nf_node_t node;
+
+    spawn_node(&node, sasl, path, "a torn registry rewrite");
+    TF_CHECK_MSG(nf_expect(&node, "reason=malformed_record", T_READY_MS) == 0,
+                 "a torn registry was not refused as malformed");
+    TF_CHECK_MSG(nf_expect(&node, "remedy=write-tmp+fsync+rename", T_READY_MS) == 0,
+                 "a torn registry's refusal did not name the atomic remedy");
+
+    nf_stop(&node);
+    nf_free(&node);
+}
+
 /* ==========================================================================
  * CASE 6: A REGISTRY AND NO CREDENTIAL STORE
  * ==========================================================================
@@ -1631,14 +1648,13 @@ static void test_account_tag_does_not_cross_to_peers(const char *sasl,
  * `account` while a forwarded line carries only 2.4's internal block.
  *
  * WHY THIS IS A DERIVATION AND NOT A WIRE TEST. Every wire version of this
- * property runs from a test client on loopback, whose hostmask is 25 bytes --
- * which leaves about 280 bytes of slack between what the cap charges and what the
- * line actually occupies. A cap that had stopped charging the tag would therefore
- * pass every wire test and still lose a message: `fanout_line_fits_n()` charges
- * the prefix and target at their MAXIMUM widths, so the real envelope is far
- * smaller than the charge, and a client whose host is a long FQDN is exactly the
- * case where the two meet. `conn_t::host` is 128 bytes wide and this node records
- * what accept() OBSERVED, so such a client is not hypothetical.
+ * property runs from a test client on loopback, whose hostmask is short, so a
+ * cap that had stopped charging the tag would pass every wire test and still
+ * lose a message for a client with a long host: `conn_t::host` is 128 bytes
+ * wide and this node records what accept() OBSERVED, so such a client is not
+ * hypothetical. `fanout_line_fits_n()` charges the prefix and target at their
+ * REAL lengths, so this probe -- run with the widest possible hostmask --
+ * exercises the widest envelope the cap accepts.
  *
  * So the assertion is the property itself: take the largest body the node's cap
  * accepts for the widest possible hostmask, add the widest possible tag block and
@@ -2528,6 +2544,7 @@ int main(void)
                           "a FIFO registry");
     test_registry_refused(sasl_good, acct_long, "reason=line_too_long",
                           "an over-long registry line");
+    test_torn_registry_names_remedy(sasl_good, acct_bad);
 
     /* ---- accounts without logins ---- */
     test_registry_without_credentials(acct_good);
