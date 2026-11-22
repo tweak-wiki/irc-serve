@@ -1674,10 +1674,7 @@ static int burst_fold_cmp(const char *a, const char *b)
 
 /* Index order for the commit: folded nick first, staging position second so
  * that the first-staged record among equals sorts first. Takes the shadow
- * explicitly: qsort's comparator takes no context, and a file-static holding
- * this node's shadow across the call would be the module global this file
- * just stopped having (issue #173). The single caller sorts the index itself
- * below instead, which keeps the ordering in one place with its context. */
+ * explicitly; nick_qcmp adapts it to qsort below. */
 static int nick_idx_cmp(const burst_shadow_t *sh, size_t ia, size_t ib)
 {
     int c = burst_fold_cmp(sh->nicks[ia].nick, sh->nicks[ib].nick);
@@ -1694,25 +1691,24 @@ static int nick_idx_cmp(const burst_shadow_t *sh, size_t ia, size_t ib)
     return 0;
 }
 
-/* Sort the commit's nick index in place: a stable insertion sort over the
- * order above. The array is bounded by the byte budget (a few hundred entries
- * at the shipped sizes) and built once per commit, so quadratic here costs
- * less than the commit's own walks; what it buys is a sort with a context,
- * which qsort cannot express portably. */
+/* qsort context: set only for the duration of nick_order_sort(). Total order
+ * (ties broken by staging position) makes qsort's instability irrelevant. */
+static const burst_shadow_t *nick_sort_sh;
+
+static int nick_qcmp(const void *pa, const void *pb)
+{
+    size_t ia = *(const size_t *)pa;
+    size_t ib = *(const size_t *)pb;
+
+    return nick_idx_cmp(nick_sort_sh, ia, ib);
+}
+
+/* Sort the commit's nick index in place with qsort over the order above. */
 static void nick_order_sort(const burst_shadow_t *sh, size_t *order, size_t n)
 {
-    size_t i;
-
-    for (i = 1u; i < n; i++) {
-        size_t key = order[i];
-        size_t j = i;
-
-        while (j > 0u && nick_idx_cmp(sh, key, order[j - 1u]) < 0) {
-            order[j] = order[j - 1u];
-            j--;
-        }
-        order[j] = key;
-    }
+    nick_sort_sh = sh;
+    qsort(order, n, sizeof *order, nick_qcmp);
+    nick_sort_sh = NULL;
 }
 
 /* The staged record for `nick`, or NULL on the "never announced" rule above.
