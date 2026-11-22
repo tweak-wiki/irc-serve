@@ -2253,6 +2253,13 @@ int server_reap(server_t *s)
                             i++;
                             continue;
                         }
+                        /* #292: deadline expired with bytes still queued (the
+                         * 417 at N > 0). One last synchronous pump before the
+                         * close below -- conn_pump takes wq_lock itself, so it
+                         * cannot race a writer's slice, and it runs at most
+                         * once per conn. The close still happens; the point is
+                         * the reason goes out first. */
+                        (void)conn_pump(c);
                     }
                 }
             }
