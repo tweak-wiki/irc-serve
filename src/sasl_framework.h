@@ -66,7 +66,7 @@
  *   file is. The file is a secret store, so it is required to be a SECRET
  *   FILE -- see sasl_store_load() -- and that requirement, not a hash, is the
  *   control on what is on disk. What is hashed is the HEAP copy: each record
- *   holds SHA-256(salt || password) under a per-boot salt, so a core dump or
+ *   holds iterated SHA-256(salt || password) under a per-record salt, so a core dump or
  *   an allocator reuse reads back digests rather than passwords.
  */
 #ifndef IRC_SASL_FRAMEWORK_H
@@ -156,7 +156,7 @@ sasl_store_t *sasl_store_new(void);
 
 /* Add or replace the record for `authcid`. Returns 0, or -1 on a NULL/empty or
  * over-long authcid, an over-long password, or a full store. `password` is
- * HASHED (salted SHA-256 under the store's per-boot salt) and never stored. */
+ * HASHED (iterated salted SHA-256 under the record's own salt) and never stored. */
 int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password);
 
 /* Number of records loaded. 0 on a NULL store, which is the honest answer for
@@ -212,7 +212,7 @@ int sasl_plain_parse(const char *payload, size_t len,
  * SASL_MAX_CREDENTIALS, so the worst case is 64 short comparisons on a
  * connection that has not registered. That is noise next to the base64 decode
  * that precedes it. The password itself is never stored -- each record holds
- * SHA-256(salt || password) under a per-boot salt -- so the comparison is
+ * iterated SHA-256(salt || password) under a per-record salt -- so the comparison is
  * hash-against-hash and a heap dump reads back digests. */
 int sasl_plain_verify(const sasl_store_t *store,
                       const char *authzid, const char *authcid, const char *passwd);

@@ -6,11 +6,11 @@ macron` is C4 81 -- and writes it. This fault must make the accented character
 INVALID and nothing else, which is what makes it a test of the SEQUENCE state rather
 than of a set.
 """
+from util import apply_fault
+
 p = "src/core/connection.c"
-s = open(p).read()
 old = """    if (*need > 0u) {
         if (u >= 0x80u && u <= 0xbfu) {"""
 new = """    if (*need > 0u) {
         if (u >= 0x80u && u <= 0x9fu) {"""
-assert old in s, "the continuation-byte range not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the continuation-byte range")

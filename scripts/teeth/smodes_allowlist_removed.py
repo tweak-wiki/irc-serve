@@ -9,11 +9,11 @@ That is the whole argument for the peer sweep, and it is why this fault names on
 `test_peer_terminal_sweep`: a fault invisible from the client path is not a gap in the
 client tests, it is the peer path being a different path.
 """
+from util import apply_fault
+
 p = "src/federation/verbs.c"
-s = open(p).read()
 old = """            verdict = chan_mode_implemented(m);
             if (verdict == 0) {"""
 new = """            verdict = 1;
             if (verdict == 0) {"""
-assert old in s, "the peer-side allowlist ask not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the peer-side allowlist ask")

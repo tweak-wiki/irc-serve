@@ -63,9 +63,7 @@ static void link_rig(server_t *s, conn_t **peer_out, int *peer_fd_out)
     l = &s->links[0];
     memcpy(l->name, PEER_NAME, strlen(PEER_NAME) + 1u);
     l->fd = pair[0];
-    handshake_init(&l->hs);
-    l->hs.state = ESTABLISHED;
-    l->state = (int)l->hs.state;
+    l->state = (int)ESTABLISHED;
     *peer_out = peer;
     *peer_fd_out = pair[1];
 }
