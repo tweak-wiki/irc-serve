@@ -1102,16 +1102,25 @@ int tf_tls_expect(tf_tls_t *t, const char *needle, int timeout_ms)
         if (t->buf != NULL && strstr(t->buf, needle) != NULL) {
             return 0;
         }
-        FD_ZERO(&rd);
-        FD_SET(t->fd, &rd);
-        tv.tv_sec = 0;
-        tv.tv_usec = TF_POLL_MS * 1000;
-        rc = select(t->fd + 1, &rd, NULL, NULL, &tv);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                continue;
+        /* Buffered records need no socket wait. A multi-record burst can leave
+         * complete records inside OpenSSL with nothing left on the socket, and
+         * select() would block on that empty socket until new traffic -- or
+         * the deadline -- while the answer sits buffered. The server drains
+         * SSL_pending() in exactly this spot for the same reason. */
+        if (t->ssl != NULL && SSL_pending((SSL *)t->ssl) > 0) {
+            rc = 1;
+        } else {
+            FD_ZERO(&rd);
+            FD_SET(t->fd, &rd);
+            tv.tv_sec = 0;
+            tv.tv_usec = TF_POLL_MS * 1000;
+            rc = select(t->fd + 1, &rd, NULL, NULL, &tv);
+            if (rc < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
             }
-            return -1;
         }
         /* THE PARENT KEEPS READING, once per iteration. See tc_pump()'s comment:
          * this loop cannot use tc_expect(), so it has to drive the same hook
