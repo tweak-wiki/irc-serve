@@ -205,10 +205,9 @@ static void account_wipe(void *p, size_t n)
     }
 }
 
-/* One salt per registry, generated in account_store_new(): every *_load()
- * builds its registry there, so every boot hashes under a fresh salt, and the
- * in-memory *_add() path hashes under the same one -- which is what makes the
- * two agree. Salt per boot is enough because the registries are per node. */
+/* One salt per RECORD, drawn fresh in account_store_add(): two records with the
+ * same password hash differently, so the registry no longer reveals who shares
+ * a password. store->salt below survives only as the dummy-compare salt. */
 static void account_gen_salt(unsigned char salt[ACCOUNT_SALT_LEN])
 {
 #if defined(__APPLE__)
@@ -260,19 +259,30 @@ static void account_gen_salt(unsigned char salt[ACCOUNT_SALT_LEN])
 #endif
 }
 
-/* SHA-256(salt || password). The heap's only copy of the secret is this
- * digest; the password bytes themselves are never stored. */
+/* Iterated SHA-256(salt || password): one fast round is GPU-brute-forceable,
+ * so the hash stretches over ACCOUNT_HASH_ROUNDS rounds. 8192 rounds cost a
+ * login well under a millisecond and a full 64-record load a few of them,
+ * while forcing the same factor onto every offline guess. */
+#define ACCOUNT_HASH_ROUNDS 8192u
 static void account_hash_password(const unsigned char salt[ACCOUNT_SALT_LEN],
                                   const char *password,
                                   unsigned char out[ACCOUNT_HASH_LEN])
 {
     account_sha256_t ctx;
+    size_t plen = strlen(password);
+    unsigned int r;
 
     account_sha256_init(&ctx);
     account_sha256_update(&ctx, salt, ACCOUNT_SALT_LEN);
-    account_sha256_update(&ctx, (const unsigned char *)password,
-                          strlen(password));
+    account_sha256_update(&ctx, (const unsigned char *)password, plen);
     account_sha256_final(&ctx, out);
+    for (r = 1u; r < ACCOUNT_HASH_ROUNDS; r++) {
+        account_sha256_init(&ctx);
+        account_sha256_update(&ctx, out, ACCOUNT_HASH_LEN);
+        account_sha256_update(&ctx, salt, ACCOUNT_SALT_LEN);
+        account_sha256_update(&ctx, (const unsigned char *)password, plen);
+        account_sha256_final(&ctx, out);
+    }
     /* The tail of the password may still sit in the context's block. */
     account_wipe(&ctx, sizeof ctx);
 }
@@ -282,7 +292,9 @@ static void account_hash_password(const unsigned char salt[ACCOUNT_SALT_LEN],
  * gone too, upgrade to a salted file format. */
 struct account_record {
     char name[ACCOUNT_MAX_NAME + 1];
-    unsigned char phash[ACCOUNT_HASH_LEN]; /* SHA-256(salt || password) */
+    unsigned char salt[ACCOUNT_SALT_LEN]; /* fresh per record, so identical
+                                           * passwords hash differently */
+    unsigned char phash[ACCOUNT_HASH_LEN]; /* iterated SHA-256(salt||password) */
     long created;
 };
 
@@ -507,7 +519,8 @@ int account_store_add(account_store_t *store, const char *name,
         store->n++;
     }
     memcpy(store->rec[at].name, name, nlen + 1u);
-    account_hash_password(store->salt, password, store->rec[at].phash);
+    account_gen_salt(store->rec[at].salt);
+    account_hash_password(store->rec[at].salt, password, store->rec[at].phash);
     store->rec[at].created = created;
     return 0;
 }
@@ -535,12 +548,15 @@ int account_store_verify(const account_store_t *store, const char *name,
     if (store == NULL || store->n == 0u) {
         return 0;
     }
-    /* The offered password is hashed ONCE, under the registry's salt; every
-     * comparison below is hash-against-hash. */
-    account_hash_password(store->salt, password, want);
+    /* Each record carries its own salt, so the offered password is hashed under
+     * the candidate record's salt; every comparison is still hash-against-hash.
+     * The dummy keeps the registry salt so a miss still pays a hash and a
+     * compare. Names are unique (add overwrites), so at most one record hashes
+     * per call. */
     account_hash_password(store->salt, k_dummy_pass, dummy);
     for (size_t i = 0; i < store->n; i++) {
         if (name_eq(store->rec[i].name, name) != 0) {
+            account_hash_password(store->rec[i].salt, password, want);
             saw_match |= (unsigned)secret_const_time_eq(store->rec[i].phash, want,
                                                  ACCOUNT_HASH_LEN);
         }
