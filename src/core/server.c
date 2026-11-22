@@ -2172,8 +2172,11 @@ int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
      * buffered. Marking CLOSING is all the send path is allowed to do; the
      * reaper closes the fd at the next fixed point. */
     s->n_writeq_overflow++;
+    /* The depth is sampled LOCKED (#293): this runs on the loop thread while a
+     * writer may be advancing woff under wq_lock, and a torn size_t here is a
+     * C11 race even though it is only a log line. */
     printf("[observable] writeq_overflow: fd=%d pending=%zu cap=%zu\n",
-           c->fd, conn_write_pending(c), CONN_WQ_MAX);
+           c->fd, conn_write_pending_locked(c), CONN_WQ_MAX);
     conn_mark_closing(c);
     return -1;
 }
