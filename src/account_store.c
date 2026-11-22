@@ -416,7 +416,7 @@ int account_name_wire_safe(const char *name)
      *                      sites discard -- so the roster ended up holding a
      *                      DIFFERENT NAME from the one the peer reported, under a
      *                      name that peer will never be asked about again.
-     *   burst.c's apply_member()  burst_copy() REFUSES rather than truncating, and
+     *   burst.c's apply_member()  bounded_copy() REFUSES rather than truncating, and
      *                      writes NOTHING -- into a slot of a realloc'd array that
      *                      nothing zeroes. So what the resync went on to install
      *                      was whatever the allocator had left there.

@@ -29,7 +29,7 @@
  *                      (void) -- so the roster holds a DIFFERENT NAME than the
  *                      peer reported, under a name the peer will never be asked
  *                      about again.
- *   burst.c's apply_member()  burst_copy() REFUSES and writes NOTHING, into a
+ *   burst.c's apply_member()  bounded_copy() REFUSES and writes NOTHING, into a
  *                      slot that apply_member() never zeroes -- so what lands on
  *                      the roster is whatever the allocator left there. Its two
  *                      siblings in the same file (apply_nick(), apply_chan()) DO
@@ -536,7 +536,7 @@ static void case_burst_at_bound(nf_node_t *node, int *peer_fd)
  * WITH THE BOUND IN PLACE THIS LAST HALF HAS NO RUNTIME TEETH, and it is worth
  * saying why rather than quietly leaving an assertion that passes either way.
  *
- * `burst_copy()` REFUSES rather than truncating, and all three of its calls in
+ * `bounded_copy()` REFUSES rather than truncating, and all three of its calls in
  * apply_member() discard the result. With account_name_wire_safe() refusing an
  * over-long name, none of the three can refuse -- <nick> is bounded by
  * valid_nick(), <server> by irc_serve_server_name_valid(), <account> by the rule.
@@ -595,7 +595,7 @@ static void case_slot_is_zeroed(void)
                              "apply_member() writes a slot of a realloc'd array and "
                              "never zeroes it. Its two siblings in the same file both "
                              "do -- apply_nick() memsets and apply_chan() zeroes the "
-                             "region it grows into -- and all three of its burst_copy() "
+                             "region it grows into -- and all three of its bounded_copy() "
                              "calls discard the result, so a copy that refused would "
                              "leave the previous member's bytes in a field this "
                              "function then publishes: %s",

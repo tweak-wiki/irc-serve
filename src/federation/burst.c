@@ -207,26 +207,6 @@ void fed_burst_set_max_bytes(server_t *s, size_t max_bytes)
     }
 }
 
-/* A bounded copy. The same rule as channel.c's copy_bounded() -- refuse, never
- * truncate -- for the reason 3.2 gives: a truncated host is a hostmask that is
- * not the one the peer reported. It is a copy rather than an export because
- * channel.c's is static, and a shared helper for two strings is a header
- * dependency this file does not otherwise have. */
-static int burst_copy(char *dst, size_t cap, const char *src)
-{
-    size_t n;
-
-    if (dst == NULL || cap == 0u || src == NULL) {
-        return 0;
-    }
-    n = strlen(src);
-    if (n >= cap) {
-        return 0;
-    }
-    memcpy(dst, src, n + 1u);
-    return 1;
-}
-
 /* An unsigned decimal in 2.4's grammar: 1..20 digits, no leading zero unless
  * the value is exactly "0", no sign. The same rule the epoch and id tags use, for
  * the same reason -- a grammar stated once in this tree and used twice cannot
@@ -364,7 +344,7 @@ static int stage_line(burst_stage_t *st, server_t *s, const char *origin,
      * counter. hops is 0 because every line of a burst is born on this node --
      * a burst is not a relayed thing, which is the reason one line per record is
      * affordable. */
-    if (!burst_copy(tags.origin, sizeof tags.origin, origin)) {
+    if (!bounded_copy(tags.origin, sizeof tags.origin, origin)) {
         return -1;
     }
     tags.epoch = s->epoch;
@@ -1144,7 +1124,7 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
                link->name, tags.origin);
         return -1;
     }
-    if (!burst_copy(sh->origin, sizeof sh->origin, link->name)) {
+    if (!bounded_copy(sh->origin, sizeof sh->origin, link->name)) {
         return -1;
     }
     sh->epoch = epoch;
@@ -1260,7 +1240,7 @@ static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
     }
     slot = &sh->nicks[sh->nnicks];
     memset(slot, 0, sizeof *slot);
-    (void)burst_copy(slot->nick, sizeof slot->nick, m->params[0]);
+    (void)bounded_copy(slot->nick, sizeof slot->nick, m->params[0]);
     /* A host longer than conn_t::host is TRUNCATED rather than refused, and that
      * is the one place in this file where a value is cut. The alternative -- a
      * refusal -- would abandon the whole transaction over a field the receiver
@@ -1362,7 +1342,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     (void)chan_name_upper(canonical, sizeof canonical, m->params[0]);
     /* THE TWO FIELDS THAT CANNOT FAIL ARE NOT `(void)`-ED (#122). Both are
      * validated above -- chan_name_valid() against the width chan_name_upper()
-     * writes, irc_serve_server_name_valid() against the width burst_copy() is
+     * writes, irc_serve_server_name_valid() against the width bounded_copy() is
      * given -- so a refusal here would mean one of those two predicates had
      * started accepting something the other rejects. That is a divergence between
      * two rules rather than a peer input, and it is reported here for the reason
@@ -1370,8 +1350,8 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
      * copy whose source is already validated is a way for the field to keep
      * whatever the realloc left in it, with nothing on the wire or in the log to
      * say so. */
-    if (!burst_copy(sc->name, sizeof sc->name, canonical) ||
-        !burst_copy(sc->origin, sizeof sc->origin, m->params[1])) {
+    if (!bounded_copy(sc->name, sizeof sc->name, canonical) ||
+        !bounded_copy(sc->origin, sizeof sc->origin, m->params[1])) {
         shadow_discard(s, "BAD_CHAN_RECORD", sh->origin, sh->nnicks,
                        sh->nchans, sh->nmembers);
         return -1;
@@ -1415,7 +1395,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
      * asking what was lost needs the answer to name it. The `[observable]` line
      * below prints the three as separate numbers rather than the mask for the
      * same reason: a mask on the wire is a number only this file can decode. */
-    if (!burst_copy(sc->topic, sizeof sc->topic, m->params[5])) {
+    if (!bounded_copy(sc->topic, sizeof sc->topic, m->params[5])) {
         sc->refused |= BURST_CHAN_REFUSED_TOPIC;
     }
     /* THE `<topic_who>` BYTE RULE, AND IT IS A DIFFERENT RULE FROM THE TOPIC'S (#142).
@@ -1445,7 +1425,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     {
         const char *who = (m->params[2][0] == '-') ? "" : m->params[2];
 
-        if (!burst_copy(sc->topic_who, sizeof sc->topic_who, who) ||
+        if (!bounded_copy(sc->topic_who, sizeof sc->topic_who, who) ||
             (who[0] != '\0' && !valid_nick(who))) {
             sc->refused |= BURST_CHAN_REFUSED_TOPIC_WHO;
             sc->topic_who[0] = '\0';
@@ -1460,7 +1440,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
      * anything `chan_mode_implemented()` does not name. A peer sending
      * `SBURSTC ... +` gets the letter dropped at the only place the value is
      * turned into channel state, and `ch->modes[]` -- which is what 324 renders -- can
-     * therefore never hold it. The shadow copy is bounded by `burst_copy()` and the
+     * therefore never hold it. The shadow copy is bounded by `bounded_copy()` and the
      * only other thing this file does with it is `strlen()` it for the withheld report,
      * so it never reaches a terminal either.
      *
@@ -1469,7 +1449,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
      * that already has one downstream. `tests/integration/test_fed_burst.c` carries the
      * assertion that the allowlist is what closes it, so the claim is a check rather
      * than a comment. */
-    if (!burst_copy(sc->modes, sizeof sc->modes,
+    if (!bounded_copy(sc->modes, sizeof sc->modes,
                     ((m->params[4][0] == '-') ? "" : m->params[4]))) {
         sc->refused |= BURST_CHAN_REFUSED_MODES;
     }
@@ -1554,7 +1534,7 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
      *
      * `<account>` GOES THROUGH account_name_wire_safe(), and that is the SECOND
      * bound on it: the predicate refuses a name wider than the field it is about
-     * to be copied into, so the burst_copy() of it below cannot fail. That is the
+     * to be copied into, so the bounded_copy() of it below cannot fail. That is the
      * half of the rule that makes this function's own slot well-defined -- with
      * only a byte check here, a value too long for the field reached a copy whose
      * result is discarded, and the field kept whatever the realloc left in it. */
@@ -1665,12 +1645,12 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
      * bound every value to its field, so a refusal here is unreachable, but
      * an unchecked one would silently keep "" and leave the two nodes
      * disagreeing about the roster with no malformed count to show for it. */
-    if (!burst_copy(slot->nick, sizeof slot->nick, m->params[2]) ||
-        !burst_copy(slot->server, sizeof slot->server, m->params[1]) ||
+    if (!bounded_copy(slot->nick, sizeof slot->nick, m->params[2]) ||
+        !bounded_copy(slot->server, sizeof slot->server, m->params[1]) ||
         /* `*` BECOMES "" on the way in, for the reason channel.h's
          * chan_remote_add() gives: `*` is a rendering of the absence, and
          * storing it would make an account named "*" representable. */
-        !burst_copy(slot->account, sizeof slot->account,
+        !bounded_copy(slot->account, sizeof slot->account,
                     (m->params[4][0] == '*') ? "" : m->params[4])) {
         s->n_fed_malformed++;
         shadow_discard(s, "BAD_MEMBER_RECORD", sh->origin, sh->nnicks,
@@ -1878,7 +1858,7 @@ static void replace_modes(chan_t *ch, const char *modes)
 {
     char old[CHAN_MAX_MODES + 1];
 
-    (void)burst_copy(old, sizeof old, ch->modes);
+    (void)bounded_copy(old, sizeof old, ch->modes);
     for (size_t i = 0; old[i] != '\0'; i++) {
         (void)chan_mode_set(ch, old[i], 0);
     }
@@ -1933,9 +1913,9 @@ static chan_t *resolve_shadow_chan(server_t *s, const burst_chan_t *sc,
  * THE `too_long` ARM BELOW CANNOT BE REACHED FROM THE BURST PATH, and the reason
  * is worth recording because it is not the one it looks like (#122). It is not
  * that a refused copy left the field empty -- that WAS true until apply_chan()
- * started reading burst_copy()'s result, and it is why this function's arm was
+ * started reading bounded_copy()'s result, and it is why this function's arm was
  * thought to be the reporting point for a field the receiver could not store. It
- * is that `sc->topic` is char[CHAN_MAX_TOPIC + 1] and burst_copy() enforces
+ * is that `sc->topic` is char[CHAN_MAX_TOPIC + 1] and bounded_copy() enforces
  * strlen(src) < sizeof dst, so the value handed to chan_set_topic() can never
  * exceed what chan_set_topic() accepts. The shadow field and the setter's bound
  * are the same width BY CONSTRUCTION, which is the right relationship for a cache
