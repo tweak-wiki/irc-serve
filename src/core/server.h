@@ -263,20 +263,15 @@ typedef struct dial {
  * can disagree is the failure this arrangement is chosen to make impossible, so
  * nothing routes by the copy.
  *
- * WHY THE HANDSHAKE CONTEXT IS EMBEDDED BY VALUE
- * ------------------------------------------------
- * federation_handshake.h is a per-peer FSM with an explicitly caller-owned
- * context and no module state, and this is that caller. Embedding rather than
- * pointing at it means a link cannot outlive its FSM or have one replaced under
- * it: there is no allocation to leak and no second owner to keep alive.
- *
- * `state` mirrors handshake_state_t and exists because the routing predicates
- * (server_find_peer) and the future link tick both want an int comparison in a
+ * WHY THE STATE IS ONE INT
+ * --------------------------
+ * `state` holds a handshake_state_t (federation_handshake.h names the values
+ * for spec tracking) and exists because the routing predicates
+ * (server_find_peer) and the link tick both want an int comparison in a
  * hot path, and because -Weverything objects to comparing an enum against
- * anything but an enumerator in a switch. The mirror is the thing that can go
- * stale, so it is written in exactly one place -- fed_link_set_state() -- and
- * never assigned at a call site. hs.state is the truth; `state` is a copy kept
- * honest by that one writer.
+ * anything but an enumerator in a switch. There is no mirror: the FSM lives
+ * in link.c and writes this field through fed_link_set_state() alone (issue
+ * #284), so there is no second copy to go stale.
  */
 typedef struct server_link {
     /* The peer's server name, validated with irc_serve_server_name_valid()
@@ -290,9 +285,7 @@ typedef struct server_link {
      * by_fd[fd] would hand back some OTHER connection. */
     int      fd;
 
-    int      state;             /* mirrors handshake_state_t; see the header */
-
-    handshake_ctx_t hs;         /* the FSM context; hs is the truth, state mirrors */
+    int      state;             /* a handshake_state_t; written only by link.c */
 
     /* The PRE-RESOLVED target (3.4). It is on the link rather than in a
      * configuration array so that a link which is re-dialled after a failure
@@ -1272,9 +1265,10 @@ struct server {
      * ever been staged on this node. */
     struct burst_shadow *burst;
     /* MT 1.5 (issue #239): per-node stop flag, checked alongside the
-     * process-wide g_stop in core/poll_loop.c. Plain int: the loop is still
-     * single-threaded (3.4), so no atomics yet. server_init() clears it. */
-    int       stop;
+     * process-wide g_stop in core/poll_loop.c. _Atomic (issue #283): the
+     * signal handler stores it while loop/writer threads load it.
+     * server_init() clears it via the struct-wide zeroing. */
+    atomic_int  stop;
 
     /* The session window length for THIS node (resume.h default), in
      * milliseconds. resume_set_window() writes it; the sweep, the hold and
