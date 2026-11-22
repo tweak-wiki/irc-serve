@@ -48,6 +48,17 @@ int main(void)
     assert(strcmp(m.params[1], "hello there") == 0); /* the ':' marker is gone */
     assert(m.raw != NULL);
     message_free(&m);
+    /* #303: extra whitespace between tags and prefix must not drop origin. */
+    assert(message_parse("@a=b  :nick!u@h PRIVMSG #c :hi", &m) == 0);
+    assert(strcmp(m.prefix, "nick!u@h") == 0);
+    assert(strcmp(m.command, "PRIVMSG") == 0);
+    assert(m.nparams == 2);
+    assert(strcmp(m.params[1], "hi") == 0);
+    message_free(&m);
+    assert(message_parse("@a=b \t :nick!u@h PRIVMSG #c :hi", &m) == 0);
+    assert(strcmp(m.prefix, "nick!u@h") == 0);
+    assert(strcmp(m.command, "PRIVMSG") == 0);
+    message_free(&m);
 
     /* A minimal message: no tags, no prefix, no params. */
     assert(message_parse("PING", &m) == 0);

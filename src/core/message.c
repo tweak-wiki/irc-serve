@@ -351,7 +351,11 @@ int message_parse_n(const char *line, size_t len, message_t *out)
         }
         tags = field_put(&f, block, blocklen);
         if (p < end) {
-            p++;
+            /* Tags end at a separator; skip all of them so extra SP/HTAB
+             * before a ':' prefix doesn't drop the origin. */
+            do {
+                p++;
+            } while (p < end && is_sep(*p));
         }
     }
 
