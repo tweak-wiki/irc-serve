@@ -1037,14 +1037,46 @@ static void *writer_main(void *arg)
 
     for (;;) {
         /* Drain first: queued work is handled without waiting for a wakeup.
-         * Re-scan while the previous pass moved bytes (bounded: a pass that
-         * moves nothing parks, and OPEN backlogs stop after the first
-         * re-scan). A kick landing mid-drain is already paid for by the
-         * re-scan, and a CLOSING backlog (the 417-flush shape) does not wait
-         * one scheduling round per slice while its reply sits queued behind
-         * PONGs. Each pass is still one bounded slice per conn, so a fat
-         * conn cannot hold the writer. */
-        (void)writer_drain_slot(s, wid);
+         * Re-scan while a CLOSING conn still holds queued bytes (the
+         * 417-flush shape): the reply the client waits for sits behind the
+         * backlog, so an idle pass must not park between slices. OPEN
+         * backlogs stop after the first extra pass -- one re-scan pays for
+         * a kick that landed mid-drain, then the writer parks instead of
+         * spinning on a live flood. Each pass is still one bounded slice
+         * per conn, so a fat conn cannot hold the writer. */
+        {
+            int extra = 0;
+
+            (void)writer_drain_slot(s, wid);
+            for (;;) {
+                size_t k;
+                int closing = 0;
+
+                for (k = 0; k < s->nactive; k++) {
+                    conn_t *c;
+
+                    if (k >= s->nactive) {
+                        break;
+                    }
+                    c = writer_resolve(s, s->active_fds[k]);
+                    if (c != NULL &&
+                        atomic_load_explicit(&c->state,
+                                             memory_order_acquire) ==
+                            CONN_CLOSING &&
+                        conn_write_pending_locked(c) > 0u) {
+                        closing = 1;
+                        break;
+                    }
+                }
+                if (!closing || extra >= 8) {
+                    break;
+                }
+                if (writer_drain_slot(s, wid) == 0u) {
+                    break;
+                }
+                extra++;
+            }
+        }
         pthread_mutex_lock(&s->wq_mu);
         for (;;) {
             if (s->wq_stop) {
