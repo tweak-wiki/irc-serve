@@ -148,16 +148,25 @@ int conn_fill(conn_t *c)
         }
 
         room = c->rcap - c->rlen;
-        /* MT 2.2 (#241, from MT31SSL's deadlock question): transport_recv()
-         * (notably TLS's SSL_read) runs under wq_lock here, matching
-         * conn_pump()'s hold around transport_send. Once writers exist the
-         * loop's SSL_read would otherwise race writers' SSL_write on the same
-         * SSL* with no serialization; OpenSSL needs external locking per
-         * SSL*. tls_send/tls_recv take no lock themselves (caller-holds
-         * precondition); this hold plus the pump's is the whole invariant. */
-        pthread_mutex_lock(&c->wq_lock);
+        /* MT 2.2 (#241, from MT31SSL's deadlock question) narrowed by #280:
+         * transport_recv() runs under wq_lock ONLY for the SSL* call. TLS's
+         * SSL_read must serialize against writers' SSL_write on the same
+         * SSL* -- OpenSSL needs external locking per SSL*, tls_send/tls_recv
+         * take no lock themselves (caller-holds precondition), and this hold
+         * plus the pump's is the whole invariant. A plaintext recv touches
+         * nothing a writer touches -- rbuf is the loop thread's alone, and
+         * the publish snapshots the queue tail atomically -- so taking the
+         * write-queue lock around it only contends full-duplex peer traffic
+         * against a drain for no reason. tls_active is loop-thread-only
+         * (set in transport_starttls, read here), so the branch itself races
+         * with nothing. */
+        if (c->tls_active != 0) {
+            pthread_mutex_lock(&c->wq_lock);
+        }
         n = transport_recv(c, c->rbuf + c->rlen, room);
-        pthread_mutex_unlock(&c->wq_lock);
+        if (c->tls_active != 0) {
+            pthread_mutex_unlock(&c->wq_lock);
+        }
         if (n > 0) {
             c->rlen += (size_t)n;
             /* Bytes arrived, so the connection is not idle. This is the only
@@ -227,10 +236,17 @@ int conn_next_line(conn_t *c, char *dst, size_t dstcap, size_t *len)
 int conn_queue(conn_t *c, const char *data, size_t len)
 {
     size_t pending;
+    size_t wlen;
+    size_t woff;
     int rc = 0;
 
     pthread_mutex_lock(&c->wq_lock);
-    pending = c->wlen - c->woff;
+    /* The pair is loaded once, under the lock that owns mutation; the
+     * transport's publish may read it lock-free, which is why the fields
+     * are atomic rather than merely lock-guarded. */
+    wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+    pending = wlen - woff;
 
     if (len == 0) {
         goto out;
@@ -255,26 +271,28 @@ int conn_queue(conn_t *c, const char *data, size_t len)
      *
      * With woff == 0 the allocation is the tail, so the cap check above already
      * guarantees the growth fits and this cannot trigger. */
-    if (c->woff > 0 && (c->woff == c->wlen || c->woff >= CONN_WQ_COMPACT ||
-                        c->wlen + len > CONN_WQ_MAX)) {
-        if (c->woff == c->wlen) {
-            c->wlen = 0;
-            c->woff = 0;
+    if (woff > 0 && (woff == wlen || woff >= CONN_WQ_COMPACT ||
+                     wlen + len > CONN_WQ_MAX)) {
+        if (woff == wlen) {
+            wlen = 0;
+            woff = 0;
         } else {
-            memmove(c->wbuf, c->wbuf + c->woff, c->wlen - c->woff);
-            c->wlen -= c->woff;
-            c->woff = 0;
+            memmove(c->wbuf, c->wbuf + woff, wlen - woff);
+            wlen -= woff;
+            woff = 0;
         }
     }
 
-    if (c->wlen + len > c->wcap) {
-        if (buf_grow(&c->wbuf, &c->wcap, c->wlen + len, CONN_WQ_MAX) != 0) {
+    if (wlen + len > c->wcap) {
+        if (buf_grow(&c->wbuf, &c->wcap, wlen + len, CONN_WQ_MAX) != 0) {
             rc = -1;
             goto out;
         }
     }
-    memcpy(c->wbuf + c->wlen, data, len);
-    c->wlen += len;
+    memcpy(c->wbuf + wlen, data, len);
+    wlen += len;
+    atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+    atomic_store_explicit(&c->woff, woff, memory_order_release);
     /* Phase 12: the queue grew, so poll() must be asked for POLLOUT. This is the
      * ONE place outside a transport that may set the intent, and the reason is
      * in connection.h: a transport's last publish predates these bytes, so it
@@ -296,11 +314,13 @@ void conn_want(conn_t *c, int read, int write)
 
 int conn_pump_locked(conn_t *c)
 {
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
     int rc = 0;
 
     /* MT 2.1: loop still calls queue/pump single-threaded; lock changes nothing. */
     for (;;) {
-        size_t pending = c->wlen - c->woff;
+        size_t pending = wlen - woff;
 
         /* Phase 12: the EMPTY pass. A TLS handshake writes before this node has
          * any application bytes to send, so the transport gets one unconditional
@@ -317,10 +337,11 @@ int conn_pump_locked(conn_t *c)
          * EPIPE, never as a process-killing SIGPIPE, whichever transport is
          * carrying the bytes. */
         {
-            ssize_t n = transport_send(c, c->wbuf + c->woff, pending);
+            ssize_t n = transport_send(c, c->wbuf + woff, pending);
 
             if (n > 0) {
-                c->woff += (size_t)n;
+                woff += (size_t)n;
+                atomic_store_explicit(&c->woff, woff, memory_order_release);
                 continue;
             }
             if (n == TRANSPORT_RETRY) {
@@ -331,9 +352,11 @@ int conn_pump_locked(conn_t *c)
         }
     }
 
-    if (c->woff == c->wlen) {
-        c->wlen = 0;
-        c->woff = 0;
+    if (woff == wlen) {
+        wlen = 0;
+        woff = 0;
+        atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+        atomic_store_explicit(&c->woff, woff, memory_order_release);
     }
     /* Phase 12: a STARTTLS whose 670 has now been fully written may start its
      * handshake. Doing it HERE rather than in the handler is the whole of the
@@ -342,7 +365,7 @@ int conn_pump_locked(conn_t *c)
      * flight racing the 670 down the same socket -- a client that received a
      * ServerHello before the line that authorised it would have no way to know
      * the ordering was intended. See transport_starttls(). */
-    if (c->starttls_pending && c->woff == c->wlen) {
+    if (c->starttls_pending && woff == wlen) {
         c->starttls_pending = 0;
         if (transport_starttls(c, 1) != 0) {
             printf("[observable] starttls_failed: fd=%d reason=HANDSHAKE_START\n",
@@ -359,11 +382,13 @@ out:
  * for its whole backlog. The caller already holds wq_lock (see _locked). */
 int conn_pump_slice_locked(conn_t *c)
 {
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
     size_t moved = 0u;
     int rc = 0;
 
     for (;;) {
-        size_t pending = c->wlen - c->woff;
+        size_t pending = wlen - woff;
         size_t budget;
         ssize_t n;
 
@@ -378,9 +403,10 @@ int conn_pump_slice_locked(conn_t *c)
         if (budget < pending) {
             pending = budget;
         }
-        n = transport_send(c, c->wbuf + c->woff, pending);
+        n = transport_send(c, c->wbuf + woff, pending);
         if (n > 0) {
-            c->woff += (size_t)n;
+            woff += (size_t)n;
+            atomic_store_explicit(&c->woff, woff, memory_order_release);
             moved += (size_t)n;
             continue;
         }
@@ -391,13 +417,15 @@ int conn_pump_slice_locked(conn_t *c)
         goto out;
     }
 
-    if (c->woff == c->wlen) {
-        c->wlen = 0;
-        c->woff = 0;
+    if (woff == wlen) {
+        wlen = 0;
+        woff = 0;
+        atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+        atomic_store_explicit(&c->woff, woff, memory_order_release);
     }
     /* Same STARTTLS ordering as conn_pump_locked(): the handshake starts only
      * once the 670 is fully written. Arm on the drained queue, as there. */
-    if (c->starttls_pending && c->woff == c->wlen) {
+    if (c->starttls_pending && woff == wlen) {
         c->starttls_pending = 0;
         if (transport_starttls(c, 1) != 0) {
             printf("[observable] starttls_failed: fd=%d reason=HANDSHAKE_START\n",
@@ -422,7 +450,17 @@ int conn_pump(conn_t *c)
 
 size_t conn_write_pending(const conn_t *c)
 {
-    return c->wlen - c->woff;
+    /* The lock-free snapshot (#280): the fields are atomic, so a transport's
+     * publish can read the pending tail without taking wq_lock -- which is
+     * what lets the read path stop contending with a writer's drain. Exact
+     * under the lock; outside it stale by a concurrent drain at worst, and
+     * only upward (a drain removes bytes), which the next publish corrects.
+     * A concurrent queue cannot make it stale downward: queueing happens on
+     * the same thread that publishes, and it raises want_write itself. */
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+
+    return (wlen >= woff) ? wlen - woff : 0u;
 }
 
 /* MT 2.2 (#241): locked read of the pending tail, for threads that already
@@ -437,7 +475,8 @@ size_t conn_write_pending_locked(conn_t *c)
         return 0;
     }
     pthread_mutex_lock(&c->wq_lock);
-    n = c->wlen - c->woff;
+    n = atomic_load_explicit(&c->wlen, memory_order_acquire) -
+        atomic_load_explicit(&c->woff, memory_order_acquire);
     pthread_mutex_unlock(&c->wq_lock);
     return n;
 }

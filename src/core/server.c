@@ -2238,7 +2238,8 @@ int server_reap(server_t *s)
                     i++;
                     continue;
                 }
-                pending = c->wlen - c->woff;
+                pending = atomic_load_explicit(&c->wlen, memory_order_acquire) -
+                    atomic_load_explicit(&c->woff, memory_order_acquire);
                 pthread_mutex_unlock(&c->wq_lock);
                 if (pending > 0) {
                     uint64_t now = server_now_ms();
