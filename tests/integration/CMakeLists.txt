@@ -213,6 +213,12 @@ irc_add_integration_test(test_writer_slice test_writer_slice.c)
 # MT #366: sticky fd%N scheduling + demand steal of whole conns past
 # WRITER_STEAL_BYTES; idle writer drains the fat owner's conns, FIFO holds.
 irc_add_integration_test(test_writer_sticky test_writer_sticky.c)
+# Issue #294: writer interactions with no N=4 coverage. One file per gap, each
+# with writers=4: TLS handshakes racing the writer pump, a dispatch that
+# queues with no server_queue() kick, and a resume across the reap-deferral.
+irc_add_integration_test(test_tls_handshake_n4 test_tls_handshake_n4.c)
+irc_add_integration_test(test_writer_kick_connqueue test_writer_kick_connqueue.c)
+irc_add_integration_test(test_resume_deferred_close test_resume_deferred_close.c)
 # 3.4: explicit fd >= FD_SETSIZE rejection at the accept site.
 irc_add_integration_test(test_fdsize_reject test_fdsize_reject.c)
 
