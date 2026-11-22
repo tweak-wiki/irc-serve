@@ -146,8 +146,10 @@ int main(void)
     /* Writers start with a nonzero generation, so exactly one pass is already
      * due; the test process and the writer race after that, so a second pass
      * may visit fat before this thread observes the thin drain. Either way
-     * the bound holds: fat moved at most two slices, not the whole backlog.
-     * (A full socket buffer stops every slice early, so fewer is common.) */
+     * the bound holds: fat moved at most three slices, not the whole
+     * backlog. (A full socket buffer stops every slice early, so fewer is
+     * common; and a trylock-skip under contention defers one slice to the
+     * next pass.) */
     deadline = now_us() + (long long)T_DRAIN_MS * 1000LL;
     for (;;) {
         thin_pending = conn_write_pending_locked(thin);
@@ -160,7 +162,7 @@ int main(void)
         (void)usleep(1000);
     }
     fat_pending = conn_write_pending_locked(fat);
-    TF_CHECK_MSG(fat_pending >= CONN_WQ_MAX - 2u * CONN_WQ_SLICE,
+    TF_CHECK_MSG(fat_pending >= CONN_WQ_MAX - 3u * CONN_WQ_SLICE,
                  "thin was served only after fat moved %zu bytes (more than "
                  "two %zu-byte slices): the writer drained the whole backlog "
                  "before moving on",
