@@ -2467,12 +2467,13 @@ conn_t *server_link_conn(const server_t *s, const server_link_t *link)
  * server_find_peer() in the header, which is where a caller of this function
  * will be reading.
  *
- * The ESTABLISHED comparison is an int against a mirror field rather than a
- * switch on handshake_state_t, deliberately: hs.state is an enum, and
- * -Weverything's -Wswitch-default and -Wcovered-switch-default cannot both be
- * satisfied by a switch over it, and a two-way test does not need one. The
- * mirror is written in exactly one place, so the comparison cannot be reading a
- * field nothing has updated. */
+ * The ESTABLISHED comparison is an int against the link's single state field
+ * rather than a switch on handshake_state_t, deliberately: the state is an
+ * enum value held in an int, and -Weverything's -Wswitch-default and
+ * -Wcovered-switch-default cannot both be satisfied by a switch over it, and
+ * a two-way test does not need one. The field is written in exactly one
+ * place (fed_link_set_state() in link.c), so the comparison cannot be reading
+ * a field nothing has updated. */
 conn_t *server_find_peer(const server_t *s, const char *name)
 {
     const server_link_t *link;
