@@ -171,6 +171,9 @@ endfunction()
 # Runs the SHIPPED BINARY over real TCP.
 irc_add_integration_test(test_conn_lifecycle test_conn_lifecycle.c)
 
+# #229: lines buffered past the 128-line budget must drain before an EOF close.
+irc_add_integration_test(test_final_drain test_final_drain.c)
+
 # 3.3: partial writes, drained across poll iterations, byte for byte.
 irc_add_integration_test(test_partial_write test_partial_write.c)
 
