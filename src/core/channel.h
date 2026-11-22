@@ -133,10 +133,41 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #include "core/connection.h"
 #include "core/server.h"
+
+/* ---------------------------------------------------------------------------
+ * Bounded copy
+ * ------------------------------------------------------------------------- */
+
+/* Copy `src` into `dst`, refusing rather than truncating: returns 1 when the
+ * whole value fitted, 0 when it did not (or `dst` is NULL/`cap` is 0), leaving
+ * `dst` empty on any refusal so a caller that ignores the result cannot keep a
+ * half-built name. A NULL `src` stores "" and returns 1: an absent value is an
+ * empty field, not a refusal. The one shared copy for burst.c, nickreg.c,
+ * resume.c and verbs.c (issue #314), so the NULL policy is stated exactly once. */
+static inline int bounded_copy(char *dst, size_t cap, const char *src)
+{
+    size_t n;
+
+    if (dst == NULL || cap == 0u) {
+        return 0;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return 1;
+    }
+    n = strlen(src);
+    if (n >= cap) {
+        dst[0] = '\0';
+        return 0;
+    }
+    memcpy(dst, src, n + 1u);
+    return 1;
+}
 
 /* ---------------------------------------------------------------------------
  * Widths, all derived from a struct the design fixes elsewhere rather than
