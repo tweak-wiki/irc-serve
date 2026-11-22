@@ -385,7 +385,12 @@ conn_realname_verdict_t conn_realname_check(const char *name);
  */
 size_t conn_text_bad_count(const char *s);
 
-/* Copy `src` into `dst`, dropping every byte the set contains, and
+typedef enum {
+    STRIP_STORED = 0, /* stored value: every C0 control goes, nothing kept */
+    STRIP_RELAY = 1, /* message text: the eight mIRC bytes stay */
+} conn_text_strip_policy_t;
+
+/* Copy `src` into `dst` under `policy`, dropping what the policy drops, and
  * NUL-terminate. Returns the number of bytes KEPT.
  *
  * `cap` counts the terminator, as everywhere else in this header. `src` shorter
@@ -401,16 +406,17 @@ size_t conn_text_bad_count(const char *s);
  * SILENT MUTATION IS ITS OWN DEFECT, which is why nothing in this node strips
  * without also logging that it did. A caller that uses this MUST emit a line
  * saying so; the byte count it returns is what that line reports. */
-size_t conn_text_strip(char *dst, size_t cap, const char *src);
+size_t conn_text_strip(char *dst, size_t cap, const char *src, conn_text_strip_policy_t policy);
 
 /* ---------------------------------------------------------------------------
- * conn_text_strip_relay(): THE SAME STRIP, FOR A FIELD THAT IS *MESSAGE TEXT*
+ * STRIP_RELAY vs STRIP_STORED: the same strip, two policies
  * ---------------------------------------------------------------------------
  * Strip what can CONTROL A TERMINAL. Keep what is IRC MESSAGE SEMANTICS.
  *
- * This is NOT conn_text_strip() and the difference is load-bearing, so it is a
- * separate function rather than a flag. BOTH now share one UTF-8 walk -- see the
- * block at connection.c's `text_step()` -- and they differ in exactly one thing: the
+ * STRIP_RELAY is for a field that IS *MESSAGE TEXT*; STRIP_STORED is the same
+ * walk with nothing kept, and the difference is load-bearing. BOTH share one
+ * UTF-8 walk -- see the block at connection.c's `text_step()` -- and they differ
+ * in exactly one thing: the
  * eight mIRC bytes below, which message text keeps and nothing else does. They used
  * to differ in two things: this one, and a narrower understanding of "control" that
  * let a raw `0x80`-`0x9F` byte through BOTH of them. A stored topic holding one was
@@ -505,7 +511,10 @@ size_t conn_text_strip(char *dst, size_t cap, const char *src);
  * whether anything was removed compares the return value against strlen() of the
  * input, which is exact because this only ever removes bytes and never reorders
  * them. */
-size_t conn_text_strip_relay(char *dst, size_t cap, const char *src);
+/* A value rendered back into a field its sender will read (a numeric echoing the
+ * client's own argument) uses STRIP_STORED: the echo carries nothing the sender
+ * does not already have, so filtering it costs no information. See
+ * `SECURITY.md`'s control-byte section for the policy in full. */
 
 /* ---------------------------------------------------------------------------
  * conn_text_display_check(): MAY THIS STRING BE STORED AND RENDERED TO OTHER PEOPLE

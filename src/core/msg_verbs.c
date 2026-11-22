@@ -74,14 +74,14 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
     }
 
     /* ------------------------------------------------------------------------
-     * THE RELAY STRIP, AND WHY IT IS NOT conn_text_strip()
+     * THE RELAY STRIP, AND WHY IT IS NOT STRIP_STORED
      * ------------------------------------------------------------------------
-     * THE TWO NOW SHARE ONE UTF-8 WALK -- connection.c's `text_step()` -- and they
-     * differ in ONE thing, which is this one. Everything below about `0x01` and the
-     * mIRC codes is still the whole reason this function exists rather than being
-     * `conn_text_strip()`, and it used to be one reason of two.
+     * THE TWO SHARE ONE UTF-8 WALK -- connection.c's `text_step()` -- and differ
+     * in ONE thing, the policy argument, which is this one. Everything below about
+     * `0x01` and the mIRC codes is still the whole reason STRIP_RELAY exists rather
+     * than this call passing STRIP_STORED, and it used to be one reason of two.
      *
-     * conn_text_strip() refuses every C0 control and DEL, which is right for every
+     * STRIP_STORED refuses every C0 control and DEL, which is right for every
      * field this node STORES -- an away message, a topic, a kick reason. It would be
      * wrong here, because two groups of C0 bytes are IRC message semantics rather
      * than terminal control, and stripping either group is a regression that buys
@@ -120,7 +120,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
      */
     {
         size_t in_len = strlen(text);
-        size_t kept = conn_text_strip_relay(clean, sizeof clean, text);
+        size_t kept = conn_text_strip(clean, sizeof clean, text, STRIP_RELAY);
 
         if (kept != in_len) {
             s->n_msg_stripped++;
@@ -1478,7 +1478,7 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
         return;
     }
 
-    kept = conn_text_strip(c->away, sizeof c->away, message);
+    kept = conn_text_strip(c->away, sizeof c->away, message, STRIP_STORED);
     /* ------------------------------------------------------------------------
      * A MESSAGE THAT WAS NOTHING BUT BAD BYTES IS NOT AN AWAY MESSAGE (#121)
      * ------------------------------------------------------------------------
