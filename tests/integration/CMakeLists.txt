@@ -515,6 +515,10 @@ irc_add_integration_test(test_fed_relay test_fed_relay.c)
 # cannot reach these by construction -- it drives shapes this node acts on, and
 # these are the shapes it reports on while refusing -- so they need a fixture of
 # their own or they are unchecked.
+# #277: a burst-corrected holder survives the next live SJOIN. One node and two
+# scripted peers: the first plays irc.b (a burst naming irc.c as the holder,
+# then the SJOIN repeat), the second reads A's own burst off the wire.
+irc_add_integration_test(test_burst_unknown_holder test_burst_unknown_holder.c)
 irc_add_integration_test(test_burst_malformed_log test_burst_malformed_log.c)
 
 # #134: the "documented unreachable" claim in msg_verbs.c, CHECKED. A source
