@@ -573,8 +573,9 @@ size_t conn_hostmask(const conn_t *c, char *out, size_t cap)
  *
  * IT WAS LATENT rather than live, and the reason is worth stating because it is the
  * only reason this survived: `311` renders the realname through
- * `emit_numeric_ex()`, which runs `conn_text_strip()`, so the byte was removed
- * before it could reach a third party. What was left was a stored value this node
+ * `emit_numeric_ex()`, which runs `conn_text_strip()` under STRIP_STORED, so
+ * the byte was removed before it could reach a third party. What was left was
+ * a stored value this node
  * had accepted and would then quietly mangle -- `Ma<0x9F>llory` shown to every
  * member of every channel as `Mallory`-with-a-hole, and a realname that no longer
  * matched the one the user typed, on a field whose whole policy is "refuse rather
@@ -678,24 +679,24 @@ size_t conn_text_bad_count(const char *s)
 }
 
 /* ---------------------------------------------------------------------------
- * conn_text_strip: A STORED VALUE, made safe to render to other people
+ * conn_text_strip: A STORED VALUE (STRIP_STORED) or MESSAGE TEXT (STRIP_RELAY)
  * ---------------------------------------------------------------------------
- * THE STRICT POLICY, through the same walk as the two strippers below, and this is the
+ * THE STRICT POLICY, through the same walk as the switch below, and this is the
  * one that found the last live leak: a TOPIC whose stored value held a bare
  * `0x80`-`0x9F` byte was broadcast to every member, because the old version of this
  * function only understood `conn_byte_is_bad()` -- C0 and DEL -- and let the whole
  * C1 range through. A raw `0x9B` is CSI on an 8-bit terminal, so a topic is exactly as
  * dangerous as a nickname and was being filtered against a narrower set.
  *
- * It is the SAME set the numeric-echo filter uses (`conn_text_strip()`), and they
- * are the same function for the same reason `valid_nick()` and the nickname check share
- * one walk: two functions answering "which bytes are dangerous" is how they come to
- * disagree, and this tree has now been bitten by that three times.
+ * The numeric-echo filter passes STRIP_STORED, for the same reason `valid_nick()`
+ * and the nickname check share one walk: two functions answering "which bytes are
+ * dangerous" is how they come to disagree, and this tree has now been bitten by
+ * that three times.
  *
- * IT IS NOT `conn_text_strip_relay()`, which keeps the eight mIRC bytes. A stored topic
+ * STRIP_STORED is not STRIP_RELAY, which keeps the eight mIRC bytes. A stored topic
  * or away message is not message text: no client renders formatting codes out of a
  * topic, so keeping them would be keeping bytes that only look meaningful. The
- * difference is named at the walk's own enum rather than being discovered.
+ * difference is the policy argument rather than a second function.
  *
  * ONE PASS, two outputs: the kept bytes go to `dst` and the KEPT COUNT comes back to
  * the caller, which derives "how many were dropped" by subtracting the input's own
@@ -709,7 +710,7 @@ size_t conn_text_bad_count(const char *s)
  * which is what makes their `bad_bytes=` figure a measurement of what the client sent
  * rather than of what survived. */
 /* ---------------------------------------------------------------------------
- * conn_text_strip_relay: the KEEP half of the split, as a switch
+ * relay_byte_kept: the KEEP half of the split, as a switch
  * ---------------------------------------------------------------------------
  * EIGHT BYTES, NAMED, rather than a range test -- because a range test is the
  * mistake waiting to happen here. `u >= 0x02 && u <= 0x1F` looks like the keep list
@@ -741,12 +742,8 @@ static int relay_byte_kept(unsigned char u)
 /* WHICH ASCII BYTES SURVIVE, and it is two answers rather than one because the
  * hazard and the semantics overlap in exactly eight bytes. `connection.h` states the
  * two policies and why they differ; this is the switch that implements the RELAY half,
- * and the WIRE half is "none of them", which is what makes the strict policy strict
+ * and the STORED half is "none of them", which is what makes the strict policy strict
  * rather than merely different. */
-typedef enum {
-    CONN_TEXT_WIRE = 0,  /* every C0 control goes: nothing is kept for cause */
-    CONN_TEXT_RELAY = 1  /* the eight mIRC bytes stay: they are message semantics */
-} conn_text_policy_t;
 
 /* WHAT TO DO WITH ONE BYTE. Split out of the loop so the walk below is a walk and
  * not a decision tree, and so the rule for a single byte can be read in one place. */
@@ -771,11 +768,11 @@ enum {
  *
  * THREE ANSWERS BECAUSE THREE CALLERS NEED THREE DIFFERENT VERDICTS:
  *
- *   CONN_TEXT_WIRE   strip: a byte that can control a terminal goes, everything
+ *   STRIP_STORED     strip: a byte that can control a terminal goes, everything
  *                    else stays. Used where a value is RENDERED into a field the
  *                    sender will read again -- a numeric that echoes the client's
- *                    own argument back to it.
- *   CONN_TEXT_RELAY  strip, but the eight mIRC bytes STAY, because in message text
+ *                    own argument back to it -- and for every other stored value.
+ *   STRIP_RELAY      strip, but the eight mIRC bytes STAY, because in message text
  *                    they are semantics rather than hazard.
  *   `verdict`        non-NULL: report instead of strip, and stop at the first fault.
  *                    Used where the value is STORED, so the caller can refuse rather
@@ -796,7 +793,7 @@ enum {
  * why every range tested below excludes `0x00`.
  */
 static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip,
-                     conn_text_policy_t policy, conn_display_verdict_t *verdict)
+                     conn_text_strip_policy_t policy, conn_display_verdict_t *verdict)
 {
     *skip = 0;
 
@@ -822,7 +819,7 @@ static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip
     /* ASCII. The deny half of the split, plus DEL. ESC and BEL arrive here. */
     if (u < 0x80u) {
         if (u < 0x20u) {
-            if (policy == CONN_TEXT_RELAY && relay_byte_kept(u) != 0) {
+            if (policy == STRIP_RELAY && relay_byte_kept(u) != 0) {
                 return TEXT_EMIT;
             }
             if (verdict != NULL) {
@@ -980,7 +977,7 @@ static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip
  * function rather than three so that the order above cannot be got right in one
  * place and wrong in another. */
 static size_t conn_text_walk(char *dst, size_t cap, const char *src,
-                             conn_text_policy_t policy,
+                             conn_text_strip_policy_t policy,
                              conn_display_verdict_t *verdict)
 {
     size_t kept = 0;
@@ -1038,14 +1035,10 @@ static size_t conn_text_walk(char *dst, size_t cap, const char *src,
     return kept;
 }
 
-size_t conn_text_strip(char *dst, size_t cap, const char *src)
+size_t conn_text_strip(char *dst, size_t cap, const char *src,
+                       conn_text_strip_policy_t policy)
 {
-    return conn_text_walk(dst, cap, src, CONN_TEXT_WIRE, NULL);
-}
-
-size_t conn_text_strip_relay(char *dst, size_t cap, const char *src)
-{
-    return conn_text_walk(dst, cap, src, CONN_TEXT_RELAY, NULL);
+    return conn_text_walk(dst, cap, src, policy, NULL);
 }
 
 conn_display_verdict_t conn_text_display_check(const char *s)
@@ -1055,7 +1048,7 @@ conn_display_verdict_t conn_text_display_check(const char *s)
     if (s == NULL) {
         return CONN_DISPLAY_OK;
     }
-    (void)conn_text_walk(NULL, 0u, s, CONN_TEXT_WIRE, &verdict);
+    (void)conn_text_walk(NULL, 0u, s, STRIP_STORED, &verdict);
     return verdict;
 }
 

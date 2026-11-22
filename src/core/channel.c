@@ -463,7 +463,7 @@ int chan_set_topic(chan_t *ch, const char *topic, const char *who)
      * still reads the RAW input and still happens first. Checking after the strip
      * would accept a 400-byte topic whose stripped form was 250 bytes, and 3.2's
      * refusal would have become a function of which bytes were in it. */
-    (void)conn_text_strip(ch->topic, sizeof ch->topic, topic);
+    (void)conn_text_strip(ch->topic, sizeof ch->topic, topic, STRIP_STORED);
     if (topic[0] == '\0') {
         /* A cleared topic has no setter and no time: 331 says "no topic is
          * set", and leaving a stale 333 behind would claim a topic that is not
