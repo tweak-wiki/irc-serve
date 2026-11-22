@@ -732,7 +732,7 @@ no *length*, because both of its callers were local and each bounded the length
 separately. The two receivers Phase 10.3 added had nothing to bound it with, and
 they failed in opposite ways: `chan_remote_add()` truncated an over-long SJOIN
 account into the roster -- a name the peer never reported -- and `apply_member()`'s
-`burst_copy()` **refused** one, writing nothing into a `burst_member_t` slot that
+`bounded_copy()` **refused** one, writing nothing into a `burst_member_t` slot that
 nothing zeroes, so the resync installed whatever the allocator had left there. Both
 are closed by one bound in the one predicate, because "a name it refuses" has to
 mean "a name no field can hold" and not only "a name no parameter can carry".
