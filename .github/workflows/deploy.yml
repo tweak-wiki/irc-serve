@@ -1,18 +1,31 @@
-name: Deploy to CachyOS
+name: Deploy stable + staging
 on:
   workflow_dispatch:
     inputs:
-      port:
-        description: "IRC port (bare positional arg)"
+      target:
+        description: "Which slot to deploy"
+        type: choice
+        options: [staging, stable, promote]
+        default: staging
+      stable_port:
+        description: "Stable IRC port"
         default: "6667"
         required: false
-      name:
+      staging_port:
+        description: "Staging IRC port"
+        default: "6668"
+        required: false
+      server_name:
         description: "Server name (--name)"
         default: "irc.test"
         required: false
 
+env:
+  STABLE_PORT: ${{ inputs.stable_port }}
+  STAGING_PORT: ${{ inputs.staging_port }}
+
 jobs:
-  deploy:
+  build:
     runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 15
     steps:
@@ -27,19 +40,101 @@ jobs:
         run: |
           set -euo pipefail
           ./build/src/irc-serve --help 2>&1 | head -8
-      - name: Run server
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: irc-serve-release
+          path: build/src/irc-serve
+          if-no-files-found: error
+
+  deploy-staging:
+    needs: build
+    if: inputs.target == 'staging'
+    runs-on: [self-hosted, tweak-ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: irc-serve-release
+          path: /tmp/irc-deploy
+      - name: Run staging server
         run: |
           set -euo pipefail
-          pkill -f "irc-serve --name" || true
+          chmod +x /tmp/irc-deploy/irc-serve
+          pkill -f "irc-serve --name .* ${{ env.STAGING_PORT }}$" || true
           sleep 1
-          nohup ./build/src/irc-serve --name "${{ inputs.name }}" "${{ inputs.port }}" > /tmp/irc-serve.log 2>&1 &
-          echo $! > /tmp/irc-serve.pid
+          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STAGING_PORT }}" > /tmp/irc-serve-staging.log 2>&1 &
+          echo $! > /tmp/irc-serve-staging.pid
           sleep 3
-          if (exec 3<>/dev/tcp/127.0.0.1/${{ inputs.port }}) 2>/dev/null; then
-            echo "IRC listening on port ${{ inputs.port }} (pid $(cat /tmp/irc-serve.pid))"
-            head -20 /tmp/irc-serve.log
+          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STAGING_PORT }}) 2>/dev/null; then
+            echo "STAGING listening on port ${{ env.STAGING_PORT }} (pid $(cat /tmp/irc-serve-staging.pid))"
+            head -20 /tmp/irc-serve-staging.log
           else
-            echo "server did not come up:"
-            cat /tmp/irc-serve.log
+            echo "staging server did not come up:"
+            cat /tmp/irc-serve-staging.log
+            exit 1
+          fi
+
+  deploy-stable:
+    needs: build
+    if: inputs.target == 'stable'
+    runs-on: [self-hosted, tweak-ci]
+    timeout-minutes: 5
+    environment:
+      name: stable
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: irc-serve-release
+          path: /tmp/irc-deploy
+      - name: Run stable server
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/irc-deploy/irc-serve
+          pkill -f "irc-serve --name .* ${{ env.STABLE_PORT }}$" || true
+          sleep 1
+          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STABLE_PORT }}" > /tmp/irc-serve-stable.log 2>&1 &
+          echo $! > /tmp/irc-serve-stable.pid
+          sleep 3
+          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
+            echo "STABLE listening on port ${{ env.STABLE_PORT }} (pid $(cat /tmp/irc-serve-stable.pid))"
+            head -20 /tmp/irc-serve-stable.log
+          else
+            echo "stable server did not come up:"
+            cat /tmp/irc-serve-stable.log
+            exit 1
+          fi
+
+  promote:
+    needs: build
+    if: inputs.target == 'promote'
+    runs-on: [self-hosted, tweak-ci]
+    timeout-minutes: 5
+    environment:
+      name: stable
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: irc-serve-release
+          path: /tmp/irc-deploy
+      - name: Swap staging into stable
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/irc-deploy/irc-serve
+          if ! (exec 3<>/dev/tcp/127.0.0.1/${{ env.STAGING_PORT }}) 2>/dev/null; then
+            echo "staging is not up on ${{ env.STAGING_PORT }} -- deploy it first"
+            exit 1
+          fi
+          pkill -f "irc-serve --name .* ${{ env.STABLE_PORT }}$" || true
+          sleep 1
+          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STABLE_PORT }}" > /tmp/irc-serve-stable.log 2>&1 &
+          echo $! > /tmp/irc-serve-stable.pid
+          sleep 3
+          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
+            echo "PROMOTED to stable on port ${{ env.STABLE_PORT }} (pid $(cat /tmp/irc-serve-stable.pid))"
+            head -20 /tmp/irc-serve-stable.log
+          else
+            echo "promoted server did not come up:"
+            cat /tmp/irc-serve-stable.log
             exit 1
           fi
