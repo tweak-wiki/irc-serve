@@ -41,14 +41,14 @@
  *
  * ---------------------------------------------------------------------------
  * UNESCAPING IS NOT SYMMETRIC WITH ESCAPING, AND THAT IS THE SPEC
- * ---------------------------------------------------------------------------
  * A '\' before a character outside the five-item set has its BACKSLASH DROPPED
- * and the character yielded literally (`\b` unescapes to `b`), and a lone
- * trailing '\' produces no output character at all. So `\:` and `\;` BOTH
- * unescape to ';': the second is not a valid encoding, and the rule for an
- * invalid escape is "drop the backslash", not "reject the block". Rejecting
- * would be a stricter server than the specification and would refuse a peer
- * rather than relay its message.
+ * and the character yielded literally (`\b` unescapes to `b`), but a lone
+ * trailing '\' is malformed and refuses with -1 (#278): decoding it would
+ * silently drop a byte, merging distinct wire values into one. So `\:` and
+ * `\;` BOTH unescape to ';': the second is not a valid encoding, and the rule
+ * for an invalid escape is "drop the backslash", not "reject the block".
+ * Rejecting a MID-value invalid escape would be a stricter server than the
+ * specification and would refuse a peer rather than relay its message.
  *
  * The consequence for a literal backslash is the one that bites: it is SENT as
  * `\\` and there is no shorter form that survives. A round trip that treats
@@ -129,8 +129,9 @@ size_t ircv3_escape_value(const char *value, char *out, size_t cap);
 
 /* The inverse. Unescape exactly `len` bytes of `value` (which is NOT
  * necessarily NUL-terminated -- it is a span inside a parsed block) into `out`.
- * Returns 0 on success, -1 if `value` does not fit in `out`. Never grows the
- * value, so `len` bytes plus a NUL always suffices. */
+ * Returns 0 on success, -1 if `value` does not fit in `out` or ends in a lone
+ * trailing '\' (#278). Never grows the value, so `len` bytes plus a NUL always
+ * suffices. */
 int ircv3_unescape_value(const char *value, size_t len, char *out, size_t cap);
 
 /*
