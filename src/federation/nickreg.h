@@ -96,10 +96,10 @@
  *
  * THE COST, in bytes, because a bound with no size is a bound with no cost: one
  * entry is nick (64) + server (64) + user (64) + host (128) + signon (8) +
- * seen_ms (8) = 336 bytes, so the table is 86 KiB when full. That is a THIRD of
- * the dedup table's 416 KiB and is allocated LAZILY -- NULL until the first
- * learned nick, which is never on a node with no peers and is why a single-node
- * deployment pays nothing at all.
+ * seen_ms (8) + lru_prev (8) + lru_next (8) = 352 bytes, so the table is 88 KiB
+ * when full. That is less than a QUARTER of the dedup table's 416 KiB and is
+ * allocated LAZILY -- NULL until the first learned nick, which is never on a
+ * node with no peers and is why a single-node deployment pays nothing at all.
  *
  * OVERFLOW IS AN EVICTION AND A COUNT, never a refusal, for the reason 2.2 gives
  * about the topic cache: "the cache can therefore only fail to help; it never
@@ -238,7 +238,7 @@ size_t fed_nickreg_count(const server_t *s);
  * because the table is a heap vector whose owner is this module while the pointer
  * that holds it is server_t -- the same arrangement as 4.3's resync shadow and for
  * the same reason. A single node that has been sent a burst and then stopped
- * would otherwise hand 86 KiB to the kernel, and LeakSanitizer runs only on the
+ * would otherwise hand 88 KiB to the kernel, and LeakSanitizer runs only on the
  * Linux CI job, so the free is invisible locally and real there.
  *
  * IT IS CALLED FROM server_shutdown() next to the other federation arms, and it
@@ -271,7 +271,7 @@ const char *fed_nickreg_holder(const server_t *s, const char *nick, char *out,
  *
  * THE AWAY TEXT IS NOT STORED, and that is a stated limit rather than an
  * oversight: `away` is char[CONN_MAX_AWAY] (256), and storing it on every entry
- * would take the table from 86 KiB to 200 KiB for a field nothing renders yet
+ * would take the table from 88 KiB to 152 KiB for a field nothing renders yet
  * (there is no remote WHOIS in this build, so 311 for a remote user is a
  * separate piece of work). The capability is what Phase 6 was right to put on the
  * wire: the field is there for the implementation that does render it, and its
