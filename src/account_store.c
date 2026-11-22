@@ -19,11 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
-#if defined(__APPLE__)
 #include <sys/random.h>
-#endif
 
 /* --------------------------------------------------------------------------
  * SHA-256, bundled so the default build stays dependency-free
@@ -207,20 +203,23 @@ static void account_wipe(void *p, size_t n)
 
 /* One salt per RECORD, drawn fresh in account_store_add(): two records with the
  * same password hash differently, so the registry no longer reveals who shares
- * a password. store->salt below survives only as the dummy-compare salt. */
-static void account_gen_salt(unsigned char salt[ACCOUNT_SALT_LEN])
+ * a password. store->salt below survives only as the dummy-compare salt.
+ * Returns 0 when no kernel RNG is available; the caller refuses the record
+ * rather than hashing under a predictable salt (#305). */
+static int account_gen_salt(unsigned char salt[ACCOUNT_SALT_LEN])
 {
 #if defined(__APPLE__)
     if (getentropy(salt, ACCOUNT_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     /* getentropy() cannot fail for 16 bytes short of a broken libc, but the
      * salt decides whether two boots' hashes can be told apart, so the
      * fallback is the call that cannot fail rather than a zeroed salt. */
     arc4random_buf(salt, ACCOUNT_SALT_LEN);
+    return 1;
 #else
     if (getentropy(salt, ACCOUNT_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     {
         FILE *f = fopen("/dev/urandom", "re");
@@ -230,32 +229,14 @@ static void account_gen_salt(unsigned char salt[ACCOUNT_SALT_LEN])
 
             (void)fclose(f);
             if (got == ACCOUNT_SALT_LEN) {
-                return;
+                return 1;
             }
         }
     }
-    /* Last resort: no kernel RNG and no urandom device. Time, pid and a stack
-     * address vary per boot; hashed, they are a unique salt, and uniqueness
-     * (not secrecy) is all the record below needs from it. */
-    {
-        char mix[96];
-        account_sha256_t ctx;
-        unsigned char digest[ACCOUNT_HASH_LEN];
-        int n = snprintf(mix, sizeof mix, "%llu-%ld-%p",
-                         (unsigned long long)time(NULL), (long)getpid(),
-                         (void *)mix);
-
-        if (n < 0) {
-            mix[0] = '\0';
-        }
-        account_sha256_init(&ctx);
-        account_sha256_update(&ctx, (const unsigned char *)mix, strlen(mix));
-        account_sha256_final(&ctx, digest);
-        memcpy(salt, digest, ACCOUNT_SALT_LEN);
-        account_wipe(&ctx, sizeof ctx);
-        account_wipe(digest, sizeof digest);
-        account_wipe(mix, sizeof mix);
-    }
+    /* Fail closed: a time/pid hash here would be ~30 guessable bits shared
+     * per boot window, silently degrading the whole store. */
+    memset(salt, 0, ACCOUNT_SALT_LEN);
+    return 0;
 #endif
 }
 
@@ -362,8 +343,11 @@ account_store_t *account_store_new(void)
 {
     account_store_t *store = (account_store_t *)calloc(1, sizeof(account_store_t));
 
-    if (store != NULL) {
-        account_gen_salt(store->salt);
+    /* No RNG, no registry: a zeroed or predictable salt would hash every boot
+     * alike, so the load path refuses instead (reason=no_rng below). */
+    if (store != NULL && account_gen_salt(store->salt) == 0) {
+        account_store_free(store);
+        return NULL;
     }
     return store;
 }
@@ -476,6 +460,7 @@ int account_store_add(account_store_t *store, const char *name,
     size_t nlen;
     size_t plen;
     size_t at = 0;
+    unsigned char salt[ACCOUNT_SALT_LEN];
 
     if (store == NULL || name == NULL || password == NULL || name[0] == '\0' ||
         password[0] == '\0') {
@@ -505,6 +490,12 @@ int account_store_add(account_store_t *store, const char *name,
     if (strchr(password, '\t') != NULL || account_name_wire_safe(name) == 0) {
         return -1;
     }
+    /* The salt is drawn before the record is touched, so an RNG failure
+     * refuses the add with the previous record (or none) intact rather
+     * than hashing under a predictable salt (#305). */
+    if (account_gen_salt(salt) == 0) {
+        return -1;
+    }
     for (size_t i = 0; i < store->n; i++) {
         if (name_eq(store->rec[i].name, name) != 0) {
             at = i;
@@ -519,8 +510,9 @@ int account_store_add(account_store_t *store, const char *name,
         store->n++;
     }
     memcpy(store->rec[at].name, name, nlen + 1u);
-    account_gen_salt(store->rec[at].salt);
+    memcpy(store->rec[at].salt, salt, ACCOUNT_SALT_LEN);
     account_hash_password(store->rec[at].salt, password, store->rec[at].phash);
+    account_wipe(salt, sizeof salt);
     store->rec[at].created = created;
     return 0;
 }
@@ -687,6 +679,10 @@ account_store_t *account_store_load(const char *path)
 
     store = account_store_new();
     if (store == NULL) {
+        /* Only account_gen_salt() fails this path short of a failed calloc,
+         * and either way there is no salted registry to load into. */
+        printf("[observable] account_store: state=REFUSED path=%s reason=no_rng\n",
+               path);
         (void)fclose(f);
         return NULL;
     }

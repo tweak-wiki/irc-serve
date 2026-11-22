@@ -16,11 +16,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
-#if defined(__APPLE__)
 #include <sys/random.h>
-#endif
 
 #include "sasl_framework.h"
 #include "core/secret_util.h"
@@ -211,20 +207,23 @@ static void sasl_wipe(void *p, size_t n)
 
 /* One salt per RECORD, drawn fresh in sasl_store_add(): two records with the
  * same password hash differently, so the store no longer reveals who shares a
- * password. store->salt below survives only as the dummy-compare salt. */
-static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
+ * password. store->salt below survives only as the dummy-compare salt.
+ * Returns 0 when no kernel RNG is available; the caller refuses the record
+ * rather than hashing under a predictable salt (#305). */
+static int sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 {
 #if defined(__APPLE__)
     if (getentropy(salt, SASL_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     /* getentropy() cannot fail for 16 bytes short of a broken libc, but the
      * salt decides whether two boots' hashes can be told apart, so the
      * fallback is the call that cannot fail rather than a zeroed salt. */
     arc4random_buf(salt, SASL_SALT_LEN);
+    return 1;
 #else
     if (getentropy(salt, SASL_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     {
         FILE *f = fopen("/dev/urandom", "re");
@@ -234,32 +233,14 @@ static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 
             (void)fclose(f);
             if (got == SASL_SALT_LEN) {
-                return;
+                return 1;
             }
         }
     }
-    /* Last resort: no kernel RNG and no urandom device. Time, pid and a stack
-     * address vary per boot; hashed, they are a unique salt, and uniqueness
-     * (not secrecy) is all the record below needs from it. */
-    {
-        char mix[96];
-        sasl_sha256_t ctx;
-        unsigned char digest[SASL_HASH_LEN];
-        int n = snprintf(mix, sizeof mix, "%llu-%ld-%p",
-                         (unsigned long long)time(NULL), (long)getpid(),
-                         (void *)mix);
-
-        if (n < 0) {
-            mix[0] = '\0';
-        }
-        sasl_sha256_init(&ctx);
-        sasl_sha256_update(&ctx, (const unsigned char *)mix, strlen(mix));
-        sasl_sha256_final(&ctx, digest);
-        memcpy(salt, digest, SASL_SALT_LEN);
-        sasl_wipe(&ctx, sizeof ctx);
-        sasl_wipe(digest, sizeof digest);
-        sasl_wipe(mix, sizeof mix);
-    }
+    /* Fail closed: a time/pid hash here would be ~30 guessable bits shared
+     * per boot window, silently degrading the whole store. */
+    memset(salt, 0, SASL_SALT_LEN);
+    return 0;
 #endif
 }
 
@@ -311,8 +292,11 @@ sasl_store_t *sasl_store_new(void)
 {
     sasl_store_t *store = (sasl_store_t *)calloc(1, sizeof(sasl_store_t));
 
-    if (store != NULL) {
-        sasl_gen_salt(store->salt);
+    /* No RNG, no store: a zeroed or predictable salt would hash every boot
+     * alike, so the load path refuses instead (reason=no_rng below). */
+    if (store != NULL && sasl_gen_salt(store->salt) == 0) {
+        sasl_store_free(store);
+        return NULL;
     }
     return store;
 }
@@ -384,6 +368,7 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
     size_t alen;
     size_t plen;
     size_t at = 0;
+    unsigned char salt[SASL_SALT_LEN];
 
     if (store == NULL || authcid == NULL || password == NULL ||
         authcid[0] == '\0' || password[0] == '\0') {
@@ -397,6 +382,12 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
     /* A TAB or a NUL cannot appear in either field: the first is the separator,
      * the second would end the C string and take the rest of the record with it. */
     if (strchr(authcid, '\t') != NULL || strchr(password, '\t') != NULL) {
+        return -1;
+    }
+    /* The salt is drawn before the record is touched, so an RNG failure
+     * refuses the add with the previous record (or none) intact rather
+     * than hashing under a predictable salt (#305). */
+    if (sasl_gen_salt(salt) == 0) {
         return -1;
     }
 
@@ -414,8 +405,9 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
         store->n++;
     }
     memcpy(store->rec[at].authcid, authcid, alen + 1u);
-    sasl_gen_salt(store->rec[at].salt);
+    memcpy(store->rec[at].salt, salt, SASL_SALT_LEN);
     sasl_hash_password(store->rec[at].salt, password, store->rec[at].phash);
+    sasl_wipe(salt, sizeof salt);
     return 0;
 }
 
@@ -480,6 +472,9 @@ sasl_store_t *sasl_store_load(const char *path)
     }
     store = sasl_store_new();
     if (store == NULL) {
+        /* Only sasl_gen_salt() fails this path short of a failed calloc, and
+         * either way there is no salted store to load into. */
+        printf("[observable] sasl_store: state=REFUSED path=%s reason=no_rng\n", path);
         (void)fclose(f);
         return NULL;
     }
