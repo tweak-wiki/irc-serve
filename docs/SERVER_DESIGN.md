@@ -244,10 +244,11 @@ looking:
 - **`topic_who` and `topic_when` travel with it**, because 333 reports both. A
   cache holding only the text would make 333 name whoever rejoined and the moment
   they rejoined, which is a lie about two facts at once.
-- **It is bounded, and a loss is counted rather than refused.** Past the bound
-  the topic is lost exactly as it would have been without the cache, and
-  `server_t::n_topic_cache_full` records it. The cache can therefore only fail to
-  help; it never refuses a client command.
+- **It is bounded, and evictions are counted rather than refused.** Past the
+  bound the oldest entry is evicted to make room, so the cache holds the
+  most-recently-used names, and `server_t::n_topic_cache_full` records the
+  evictions. The cache can therefore only forget a stale topic; it never
+  refuses a client command.
 
 ### 2.3 Servers and peers
 
