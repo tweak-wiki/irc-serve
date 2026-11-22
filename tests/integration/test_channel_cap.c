@@ -150,6 +150,51 @@ static void case_cap_refuses_the_next_join(void)
                  "`held=%d cap=%d` is what says this was the edge rather than "
                  "some earlier number.\n  node said: %s", SW_MAX_JOIN,
                  SW_MAX_JOIN, node.out);
+    /* AND NOTHING WAS CREATED (issue #274): the refused JOIN must not leave a
+     * zero-member ghost behind. The create-print precedes any reply, and the
+     * 405 above is already in hand, so the node's output is settled: a
+     * `chan_create` line for the refused name here means the refusal created
+     * the channel it refused, and repeated hits would fill the registry with
+     * ghosts until later JOINs fail with 437 on channels nobody is in. */
+    {
+        char nocreate[64];
+        test_client_t g;
+        char roster[128];
+
+        (void)snprintf(nocreate, sizeof nocreate, "chan_create: channel=%s",
+                       chan);
+        TF_CHECK_MSG(strstr(node.out, nocreate) == NULL,
+                     "a JOIN refused at the per-connection cap left a channel "
+                     "behind: there is a chan_create line for %s, so the "
+                     "registry now holds a zero-member ghost.\n  node said: %s",
+                     chan, node.out);
+        /* AND THE NAMES PROVE IT: a second client JOINing the refused name is
+         * its creator -- the 353 names it with @ -- which is only true if the
+         * refused JOIN created nothing. A ghost would admit this client as a
+         * plain member instead, with no @. */
+        tc_init(&g);
+        TF_CHECK_MSG(tc_connect(&g, node.port) == 0,
+                     "the prover client could not connect");
+        TF_CHECK_MSG(tc_send(&g, "NICK ghost2") == 0, "NICK send failed");
+        TF_CHECK_MSG(tc_send(&g, "USER ghost2 0 * :Ghost") == 0,
+                     "USER send failed");
+        TF_CHECK_MSG(tc_expect(&g, " 001 ", T_IO_MS) == 0,
+                     "the prover client never registered");
+        (void)snprintf(line, sizeof line, "JOIN %s", chan);
+        TF_CHECK_MSG(tc_send(&g, line) == 0,
+                     "the prover JOIN could not be sent");
+        (void)snprintf(echo, sizeof echo, " JOIN %s\r\n", chan);
+        TF_CHECK_MSG(tc_expect(&g, echo, T_IO_MS) == 0,
+                     "the prover JOIN never echoed.\n  saw: %s",
+                     tc_buffer(&g));
+        (void)snprintf(roster, sizeof roster, "353 ghost2 = %s @ghost2", chan);
+        TF_CHECK_MSG(tc_expect(&g, roster, T_IO_MS) == 0,
+                     "the prover client is not the creator of %s: the refused "
+                     "JOIN left a ghost channel behind and this client joined "
+                     "it as a plain member.\n  saw: %s", chan,
+                     tc_buffer(&g));
+        tc_close(&g);
+    }
     /* AND THE CLIENT IS STILL SERVED, which is the difference between a cap and
      * a disconnect: 1024 channels is a fact about the client, not an attack on
      * anybody else, and a node that closed the connection would be refusing to
@@ -170,6 +215,44 @@ static void case_cap_refuses_the_next_join(void)
                      "cap bounds a resource; it is not a reason to hang up on a "
                      "client that has done nothing else wrong.\n"
                      "  saw: %s", tc_buffer(&c));
+    }
+
+    /* AND THE REFUSED JOIN LEFT NO GHOST (#274). A JOIN refused at the cap
+     * must not create the channel object: this client is at the cap, so a
+     * second client joins the refused name, and the node must report
+     * `chan_create` for it -- the line it prints when a channel object is
+     * born. A zero-member ghost left behind by the refused JOIN would make
+     * this a join of an existing channel, and no `chan_create` would appear.
+     * The echo alone cannot say this: joining a ghost echoes exactly like
+     * joining a fresh channel, which is why the observable is the assertion
+     * rather than the wire. */
+    {
+        test_client_t d;
+        char ghost[32];
+
+        chan_name(ghost, sizeof ghost, SW_MAX_JOIN);
+        tc_init(&d);
+        TF_CHECK_MSG(tc_connect(&d, node.port) == 0,
+                     "the ghost-probe client could not connect");
+        TF_CHECK_MSG(tc_send(&d, "NICK ghostprobe") == 0,
+                     "ghost-probe NICK send failed");
+        TF_CHECK_MSG(tc_send(&d, "USER ghostprobe 0 * :Ghost") == 0,
+                     "ghost-probe USER send failed");
+        TF_CHECK_MSG(tc_expect(&d, " 001 ", T_IO_MS) == 0,
+                     "the ghost-probe client never registered");
+        (void)snprintf(line, sizeof line, "JOIN %s", ghost);
+        TF_CHECK_MSG(tc_send(&d, line) == 0,
+                     "the ghost-probe JOIN could not be sent");
+        (void)snprintf(echo, sizeof echo, " JOIN %s\r\n", ghost);
+        TF_CHECK_MSG(tc_expect(&d, echo, T_IO_MS) == 0,
+                     "a second client could not JOIN the refused channel "
+                     "name.\n  saw: %s", tc_buffer(&d));
+        (void)snprintf(line, sizeof line, "chan_create: channel=%s", ghost);
+        TF_CHECK_MSG(nf_expect(&node, line, T_IO_MS) == 0,
+                     "no `chan_create` for the refused name when a second client "
+                     "joined it, so the refused JOIN left a zero-member ghost "
+                     "behind (#274).\n  node said: %s", node.out);
+        tc_close(&d);
     }
 
     /* CASE 2 -- THE CAP IS ON MEMBERSHIP, NOT ON THE COMMAND. PART one channel
