@@ -638,6 +638,7 @@ irc_add_integration_test(test_nick_duplicate test_nick_duplicate.c)
 irc_add_integration_test(test_reconnect test_reconnect.c)
 irc_add_integration_test(test_resume_future_stamp test_resume_future_stamp.c)
 irc_add_integration_test(test_resume_hold_two_windows test_resume_hold_two_windows.c)
+irc_add_integration_test(test_resume_tombstone_evict test_resume_tombstone_evict.c)
 
 # 7/Phase 9: 2.3's peer discovery -- ADVERTISE (a load figure, and a dial hint
 # this node records and NEVER dials) and SHUTDOWN (a goodbye that must not spend
