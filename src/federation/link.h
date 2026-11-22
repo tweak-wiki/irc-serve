@@ -466,6 +466,15 @@
 #define IRC_FED_MAX_SECRET 128
 #endif
 
+/* The floor on a configured shared secret. Below 16 bytes an online guesser
+ * with no lockout to beat (the FEDERATE endpoint is socket-reachable) breaks
+ * it; fed_open() REFUSES a shorter non-empty secret rather than warning, with
+ * IRC_SERVE_ALLOW_SHORT_SECRET=1 as the only bypass, kept for tests with
+ * legacy short secrets. */
+#ifndef IRC_FED_MIN_SECRET
+#define IRC_FED_MIN_SECRET 16
+#endif
+
 /* ---------------------------------------------------------------------------
  * The FEDERATE verdict
  * ---------------------------------------------------------------------------
@@ -609,8 +618,10 @@ fed_federate_result_t fed_check_federate(const server_t *s,
  * peers are unauthenticated; it is a node that federates with nobody. The
  * operator-facing text is in node_main.c's --help and on its startup line, and
  * both say the same thing. Returns 0 on success, -1 on a NULL node, a secret
- * longer than IRC_FED_MAX_SECRET - 1, or a second call for the SAME node
- * (which would wrap the wrapper and recurse).
+ * longer than IRC_FED_MAX_SECRET - 1, a non-empty secret shorter than
+ * IRC_FED_MIN_SECRET (issue #205; bypassed only by
+ * IRC_SERVE_ALLOW_SHORT_SECRET for legacy test secrets), or a second call for
+ * the SAME node (which would wrap the wrapper and recurse).
  *
  * IT DOES NOT INSTALL THE TICK. srv.on_tick = fed_tick is a separate, visible
  * assignment in node_main.c, so that a reader of the node can see the loop's
