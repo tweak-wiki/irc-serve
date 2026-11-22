@@ -39,14 +39,6 @@ static char up(char c)
     return c;
 }
 
-static int digit_value(char c)
-{
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    return -1;
-}
-
 /* --------------------------------------------------------------------------
  * Tag block grammar and escaping: owned by ircv3_tags.c, called through here
  * ------------------------------------------------------------------------ */
@@ -783,7 +775,7 @@ int parse_decimal(const char *s, size_t len, uint64_t limit,
     const uint64_t r = limit % 10u;
     uint64_t v = 0;
     for (size_t i = 0; i < len; i++) {
-        const int d = digit_value(s[i]);
+        const int d = (s[i] >= '0' && s[i] <= '9') ? s[i] - '0' : -1;
         if (d < 0) {
             return -1;
         }
