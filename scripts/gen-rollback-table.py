@@ -21,10 +21,7 @@ It used to read `refs/tags` out of the CLONE. That is the wrong repository, and 
 consequence is not subtle: this project carries tags that exist only on one developer's
 machine, so `make docs` on that machine writes a table CI cannot reproduce and
 `check-docs-truth.py` answers a different question there than it answers in CI. The
-answer is then true of nobody. Measured on the machine this was written on: the local
-clone held 11 tags and `origin` held 9, and the two the clone had extra were the ones
-that made README's "the tree's newest tag is `safety-net`" sentence true locally and
-false everywhere else.
+answer is then true of nobody. Tags that exist only on one developer's machine must not affect the table: the list comes from the remote, never the clone.
 
 So the tag LIST comes from `git ls-remote --tags <remote>` -- a query against the
 remote, which a local ref cannot answer -- and the METADATA (creatordate, subject,

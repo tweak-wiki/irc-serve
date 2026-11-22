@@ -148,40 +148,36 @@ lookup rather than an archaeology exercise.
 <!-- BEGIN GENERATED: rollback-table (scripts/gen-rollback-table.py; `make docs`) -->
 | Tag | Kind | Commit | Subject |
 |---|---|---|---|
-| `v0.1.0-preserved` | tag | `738f254` | Preserve prior work, correct docs, and adopt a federation-native design (#84) |
-| `v0.2.0-tokenizer` | tag | `8d8c416` | Phase 1: message tokenizer, tag format, nick charset rule (#87) |
-| `v0.3.0-core` | tag | `e958ea9` | Phase 2: server core - poll loop, conn_t framing, registries (#89) |
-| `v0.4.0-registration` | tag | `cbb1d16` | feat(core): registration, 001-005 numerics, and the reply() invariant (#90) |
-| `v0.5.0-channels` | tag | `7d0fe4b` | Phase 4: channels, final struct shapes, and the single-writer rule (#96) |
-| `v0.6.0-docs` | tag | `5291c85` | docs: traefik-style README, CONTRIBUTING, SECURITY, and a runner-script fix (#95) |
-| `v0.7.0-messaging` | tag | `acdaf65` | feat(core): PRIVMSG, NOTICE, WHO, WHOIS, ISON, AWAY - the working-server line (#99) |
-| `backup-before-claude-rewrite-2` | commit | `8bf5bdd` | Merge pull request #116 from TheFirstIstari/ci/test_fed_resync-fix |
-| `backup-before-claude-rewrite-3` | commit | `14d64cd` | Merge pull request #118 from TheFirstIstari/phase/10-ircv3 |
+| `v0.1.0-preserved` | tag | `6d2eae5` | Preserve prior work, correct docs, and adopt a federation-native design (#84) |
+| `v0.2.0-tokenizer` | tag | `65e478e` | Phase 1: message tokenizer, tag format, nick charset rule (#87) |
+| `v0.3.0-core` | tag | `598378f` | Phase 2: server core - poll loop, conn_t framing, registries (#89) |
+| `v0.4.0-registration` | tag | `1e96e85` | feat(core): registration, 001-005 numerics, and the reply() invariant (#90) |
+| `v0.5.0-channels` | tag | `8baffeb` | Phase 4: channels, final struct shapes, and the single-writer rule (#96) |
+| `v0.6.0-docs` | tag | `325a648` | docs: traefik-style README, CONTRIBUTING, SECURITY, and a runner-script fix (#95) |
+| `v0.7.0-messaging` | tag | `bd21d5a` | feat(core): PRIVMSG, NOTICE, WHO, WHOIS, ISON, AWAY - the working-server line (#99) |
 <!-- END GENERATED: rollback-table -->
 
 **THE TABLE IS GENERATED, and `make docs` rewrites it.** It used to be a fenced
 block maintained by hand, under an instruction that read *"AND IF YOU ADD A TAG, ADD
 IT HERE"* — a manual invariant on the one file in the tree whose whole purpose is to
 tell you where to roll back to, and it had **already** been wrong twice. Every one of
-those SHAs was a pre-rewrite object: the history was rewritten once (the
-`backup-before-*-rewrite` tags record it), the phase tags were re-created against the
-rewritten commits, and this table kept naming the old ones. They were still in the
-object store, so `git show 738f254` succeeded and returned a commit that is not what
-`v0.1.0-preserved` resolves to — worse than a missing SHA, because it looks right.
+those SHAs was a pre-rewrite object: the history was rewritten once, the phase tags
+were re-created against the rewritten commits, and this table kept naming the old
+ones. They were still in the object store, so `git show 738f254` succeeded and
+returned a commit that is not what `v0.1.0-preserved` resolves to — worse than a
+missing SHA, because it looks right.
 
 `scripts/check-docs-truth.py` fails when the committed table disagrees with a fresh
 regeneration, so the instruction is now a `make docs` rather than a memory test.
 
 **WHICH REPOSITORY THE TABLE DESCRIBES, and this was wrong until it was fixed.** Both
 the generator and the check used to read `refs/tags` out of **this clone**. That is the
-wrong repository, and it was not a theoretical problem: the machine this was fixed on
-held 11 tags while `origin` held 9, so `make docs` there wrote a table that CI could
-not reproduce and the check answered a different question on that machine than it
-answered everywhere else. Two of the three tags it added were enough to make README's
-sentence naming `safety-net` as the newest tag true locally and false for every other
-reader. (It is phrased that way so it does not read as a fresh claim of the shape
-`check-docs-truth.py` looks for -- the two words "newest tag is" followed by a backticked
-name. A paragraph about a stale claim must not itself be one, which is the same reason
+wrong repository: a clone with local-only tags answers differently from a fresh one,
+so `make docs` there writes a table CI cannot reproduce and the check answers a
+different question on that machine than it answers everywhere else. (It is phrased
+that way so it does not read as a fresh claim of the shape `check-docs-truth.py`
+looks for -- the two words "newest tag is" followed by a backticked name.
+A paragraph about a stale claim must not itself be one, which is the same reason
 that check's own scripts are excluded from the shipped-script sweep it applies to
 `scripts/`.)
 
@@ -189,9 +185,9 @@ So the tag LIST comes from `git ls-remote --tags origin` — a question asked of
 remote, which a local ref cannot answer — and the dates and subjects come from a
 fetch into a **private** namespace, `refs/ircserve-docstruth/tags`, rather than from
 `refs/tags`. Both halves are needed: `ls-remote` carries names and object SHAs but no
-dates, and the claim this table exists to support ("the newest tag is X") is an ordering
-claim. Nothing outside `scripts/gen-rollback-table.py` reads that namespace, and
-`ls-remote` is re-run every time, so a tag deleted on the remote leaves the table.
+dates, so ordering needs the fetched objects. Nothing outside
+`scripts/gen-rollback-table.py` reads that namespace, and `ls-remote` is re-run
+every time, so a tag deleted on the remote leaves the table.
 
 **WHAT THAT COSTS, stated rather than discovered.** `make docs` and `make docs-check`
 now need the remote to be reachable. They do not fall back to the local clone when it
@@ -227,25 +223,17 @@ make docs        # rewrites the table above in place, from origin
 make gate        # and fails if it is stale
 ```
 
-**AND THE TAGS ARE NOT RELEASES, and the newest one is not a phase tag.** The newest
-tag by `creatordate` **on `origin`** is `backup-before-claude-rewrite-3`, which records a
-safety marker from the history rewrite rather than a phase boundary. The newest
-*phase* tag is `v0.7.0-messaging` and the project is at a much later phase — the
-number in a tag names the *phase*, which is also why the version in
-`src/core/server.h` and the number in these tags are two different series that will
-not track each other. There is no `v0.8.0` because **no phase after 5 was tagged at
-all** — and note that this sentence is *about* the table rather than *in* it, which is
-the limit of what generating it can check. A generator can make the ROWS true; it
-cannot make the ARGUMENT made about them true. Prose is not checkable the way `#error`
-checks code, and the honest position is that the rows are verified and this sentence is
-not.
+**AND THE TAGS ARE NOT RELEASES.** Tags mark phase boundaries (`v0.1.0-preserved`
+through `v0.7.0-messaging`); there is no `v0.8.0` because **no phase after 5 was
+tagged at all** — and note that this sentence is *about* the table rather than *in*
+it, which is the limit of what generating it can check. A generator can make the
+ROWS true; it cannot make the ARGUMENT made about them true. Prose is not checkable
+the way `#error` checks code, and the honest position is that the rows are verified
+and this sentence is not.
 
-The two `backup-before-*-rewrite` tags that are in this table are the ones `origin` has.
-A `backup-before-attrib-rewrite` and a `safety-net` tag also existed in one developer's
-clone, and they are deliberately **absent**: a tag nobody can fetch is not a rollback
-point for anybody reading this document, and listing it would make the sentence above
-true on one machine and false everywhere else — which is the defect this section is
-about.
+Tags that exist only in one developer's clone are deliberately **absent** from the
+generated table: the generator reads `origin`, so a tag nobody can fetch is not a
+rollback point for anybody reading this document.
 
 ### Finding the last good state
 

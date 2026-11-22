@@ -35,13 +35,10 @@ into a temporary one that clears on the next resync.
 third-party dependencies.**
 
 There is no release. `irc-serve --help` prints the version — one definition, in
-`src/core/server.h`, which CMake, the packaging and every report of it read; the
-**repository's** newest tag is `backup-before-claude-rewrite-3` (`14d64cd`), a
-**safety marker** from the history rewrite rather than a release. Newest is by
-`creatordate`, and it is read from `origin` rather than from your checkout — a tag
-that exists only in one local clone is not a tag this project has. The newest *phase*
-tag is `v0.7.0-messaging`, and the newest *release* is nothing, because there has never
-been one.
+`src/core/server.h`, which CMake, the packaging and every report of it read. Tags
+mark phase boundaries (`v0.1.0-preserved` through `v0.7.0-messaging`); the newest
+*phase* tag is `v0.7.0-messaging`, and the newest *release* is nothing, because
+there has never been one.
 
 | | |
 |---|---|
