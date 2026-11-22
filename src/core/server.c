@@ -1277,6 +1277,46 @@ void server_writers_kick_conn(server_t *s, const conn_t *c)
     pthread_mutex_unlock(&s->wq_mu);
 }
 
+int server_writer_slot(const server_t *s, int fd)
+{
+    if (s == NULL) {
+        return 0;
+    }
+    return writer_owner_slot(s, fd);
+}
+
+void server_writers_kick_slots(server_t *s, const int *slots, size_t nslots)
+{
+    size_t i;
+    size_t k;
+
+    if (s == NULL || !s->writers_started || slots == NULL || nslots == 0) {
+        return;
+    }
+    /* #279: one wq_mu hold for the whole emission, not one per member.
+     * Duplicate slots are signalled once: a second bump before the owner
+     * drains is a second wake for bytes the first wake already covers. */
+    pthread_mutex_lock(&s->wq_mu);
+    for (i = 0; i < nslots; i++) {
+        int slot = slots[i];
+
+        if (slot < 0 || slot >= s->writer_threads) {
+            continue;
+        }
+        for (k = 0; k < i; k++) {
+            if (slots[k] == slot) {
+                break;
+            }
+        }
+        if (k != i) {
+            continue;
+        }
+        s->wq_slot_gen[slot]++;
+        pthread_cond_signal(&s->wq_slot_avail[slot]);
+    }
+    pthread_mutex_unlock(&s->wq_mu);
+}
+
 void server_writers_stop(server_t *s)
 {
     int i;
@@ -2230,11 +2270,12 @@ void server_close_conn(server_t *s, int fd)
     conn_free(c);
 }
 
-int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
+int server_queue_quiet(server_t *s, conn_t *c, const char *data, size_t len)
 {
     if (c == NULL || conn_queue(c, data, len) == 0) {
-        /* Issue #367: wake exactly this conn's owning writer, never all. */
-        server_writers_kick_conn(s, c);
+        /* #279: no kick here -- the caller coalesces one kick per emission
+         * (server_writers_kick_slots) instead of one per member. A NULL conn
+         * still reports success: it queued nothing and overflowed nothing. */
         return 0;
     }
     /* 3.4: bounded write queues, and a saturated link is DROPPED, not
@@ -2248,6 +2289,17 @@ int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
            c->fd, conn_write_pending_locked(c), CONN_WQ_MAX);
     conn_mark_closing(c);
     return -1;
+}
+
+int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
+{
+    int rc = server_queue_quiet(s, c, data, len);
+
+    if (rc == 0) {
+        /* Issue #367: wake exactly this conn's owning writer, never all. */
+        server_writers_kick_conn(s, c);
+    }
+    return rc;
 }
 
 int server_reap(server_t *s)

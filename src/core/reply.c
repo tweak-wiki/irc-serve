@@ -72,7 +72,7 @@ static int refuse(server_t *s, const conn_t *c, const char *code,
 /* The one queueing site. Everything that can be wrong with an outbound
  * message to a client is refused here, before a byte is buffered. */
 static int emit_to_client(server_t *s, conn_t *c, const char *code,
-                          const char *line, size_t len)
+                          const char *line, size_t len, int kick)
 {
     if (c == NULL) {
         return refuse(s, NULL, code, "no_target");
@@ -88,8 +88,9 @@ static int emit_to_client(server_t *s, conn_t *c, const char *code,
     if (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING) {
         return refuse(s, c, code, "closing");
     }
-    if (server_queue(s, c, line, len) != 0) {
-        /* Already counted and already marked by server_queue(), which refuses
+    if ((kick != 0 ? server_queue(s, c, line, len)
+                   : server_queue_quiet(s, c, line, len)) != 0) {
+        /* Already counted and already marked by the queue call, which refuses
          * a saturated link rather than buffering it. Not a second count. */
         return REPLY_REFUSED;
     }
@@ -105,7 +106,7 @@ static int emit_to_client(server_t *s, conn_t *c, const char *code,
 static int emit_built_ex(server_t *s, conn_t *c, const char *code,
                          const char *prefix,
                          const char *const *params, int nparams,
-                         int force_colon, const char *tags)
+                         int force_colon, const char *tags, int kick)
 {
     message_t m;
     /* IRC_MAX_LINE counts a legal line INCLUDING its terminator, and
@@ -242,7 +243,7 @@ static int emit_built_ex(server_t *s, conn_t *c, const char *code,
      * where the line terminator comes from. */
     line[len] = '\r';
     line[len + 1u] = '\n';
-    return emit_to_client(s, c, code, line, len + 2u);
+    return emit_to_client(s, c, code, line, len + 2u, kick);
 }
 
 /* ---------------------------------------------------------------------------
@@ -350,7 +351,7 @@ static int emit_numeric_ex(server_t *s, conn_t *c, const char *code,
         clean[i] = arena + used;
         used += kept + 1u;
     }
-    return emit_built_ex(s, c, code, NULL, clean, nparams, force_colon, tags);
+    return emit_built_ex(s, c, code, NULL, clean, nparams, force_colon, tags, 1);
 }
 
 /* The RELAYED path's own front end, deliberately not the numeric one. See the block
@@ -358,9 +359,9 @@ static int emit_numeric_ex(server_t *s, conn_t *c, const char *code,
  * mIRC bytes and a numeric's parameters must not. */
 static int emit_built(server_t *s, conn_t *c, const char *code,
                       const char *prefix,
-                      const char *const *params, int nparams)
+                      const char *const *params, int nparams, int kick)
 {
-    return emit_built_ex(s, c, code, prefix, params, nparams, 0, NULL);
+    return emit_built_ex(s, c, code, prefix, params, nparams, 0, NULL, kick);
 }
 
 /* <target> per RFC 2812 3.3: the client's nickname, or "*" when it does not
@@ -479,7 +480,7 @@ int send_line(server_t *s, conn_t *dst, const char *prefix,
     if (nparams < 0 || nparams > IRC_MAX_PARAMS) {
         return refuse(s, dst, command, "too_many_params");
     }
-    return emit_built(s, dst, command, prefix, params, nparams);
+    return emit_built(s, dst, command, prefix, params, nparams, 1);
 }
 
 int send_line_tagged(server_t *s, conn_t *dst, const char *prefix,
@@ -505,7 +506,45 @@ int send_line_tagged(server_t *s, conn_t *dst, const char *prefix,
     }
     /* The SAME door as send_line(), so the peer-target and CLOSING refusals and
      * the one queueing site are shared rather than restated. See the file header. */
-    return emit_built_ex(s, dst, command, prefix, params, nparams, 0, tags);
+    return emit_built_ex(s, dst, command, prefix, params, nparams, 0, tags, 1);
+}
+
+/* #279: quiet twins of send_line()/send_line_tagged(). Same render, same
+ * refusals and counters, but the bytes are queued without a kick so a
+ * multi-member emission can wake each touched owner slot once at the end
+ * (server_writers_kick_slots) instead of once per member. */
+int send_line_quiet(server_t *s, conn_t *dst, const char *prefix,
+                    const char *command, const char *const *params, int nparams)
+{
+    if (s == NULL || command == NULL || command[0] == '\0') {
+        return refuse(s, dst, command, "bad_args");
+    }
+    if (params == NULL && nparams != 0) {
+        return refuse(s, dst, command, "bad_args");
+    }
+    if (nparams < 0 || nparams > IRC_MAX_PARAMS) {
+        return refuse(s, dst, command, "too_many_params");
+    }
+    return emit_built(s, dst, command, prefix, params, nparams, 0);
+}
+
+int send_line_tagged_quiet(server_t *s, conn_t *dst, const char *prefix,
+                           const char *command, const char *const *params,
+                           int nparams, const char *tags)
+{
+    if (s == NULL || command == NULL || command[0] == '\0') {
+        return refuse(s, dst, command, "bad_args");
+    }
+    if (params == NULL && nparams != 0) {
+        return refuse(s, dst, command, "bad_args");
+    }
+    if (nparams < 0 || nparams > IRC_MAX_PARAMS) {
+        return refuse(s, dst, command, "too_many_params");
+    }
+    if (tags != NULL && tags[0] == '\0') {
+        return refuse(s, dst, command, "empty_tags");
+    }
+    return emit_built_ex(s, dst, command, prefix, params, nparams, 0, tags, 0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -867,7 +906,7 @@ int send_line_colon(server_t *s, conn_t *dst, const char *prefix,
     if (nparams < 0 || nparams > IRC_MAX_PARAMS) {
         return refuse(s, dst, command, "too_many_params");
     }
-    return emit_built_ex(s, dst, command, prefix, params, nparams, 1, NULL);
+    return emit_built_ex(s, dst, command, prefix, params, nparams, 1, NULL, 1);
 }
 
 int send_pong(server_t *s, conn_t *src, const char *token)
