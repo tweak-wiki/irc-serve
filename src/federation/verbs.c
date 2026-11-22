@@ -1788,6 +1788,17 @@ static void fed_in_shutdown(server_t *s, server_link_t *link, const char *prefix
         s->n_fed_shutdown_refused++;
         fed_obs("[observable] fed_shutdown_refused: peer=%s reason=ARITY nparams=%d\n",
                link->name, nparams);
+        /* The line is unusable, but the LINK carried it: a peer speaking the
+         * wrong SHUTDOWN shape is a peer this node can no longer trust to
+         * speak 4.3, so the link goes down with the line instead of staying
+         * ESTABLISHED with a stale roster until T4. */
+        {
+            conn_t *c = server_link_conn(s, link);
+
+            if (c != NULL) {
+                conn_mark_closing(c);
+            }
+        }
         return;
     }
     if (nparams == 1) {
@@ -2355,6 +2366,15 @@ static void fed_in_squit(server_t *s, server_link_t *link,
         fed_obs("[observable] fed_malformed: command=SQUIT field=arity nparams=%d "
                "want=1..2\n",
                nparams);
+        /* Same as SHUTDOWN's ARITY arm above: the line is refused AND the link
+         * that carried it goes down, or a departed peer haunts the roster. */
+        if (link != NULL) {
+            conn_t *c = server_link_conn(s, link);
+
+            if (c != NULL) {
+                conn_mark_closing(c);
+            }
+        }
         return;
     }
     gone = params[0];
