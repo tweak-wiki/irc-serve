@@ -16,13 +16,13 @@ still builds and still passes every other test in the suite -- a fault that does
 compile proves nothing, and this file's premise is that a source-level regression
 can leave the build perfectly green.
 """
+from util import apply_fault
+
 p = "src/core/connection.h"
-s = open(p).read()
 old = """#define CONN_HOSTMASK_MAX (sizeof(((conn_t *)0)->nick) + \\
                            sizeof(((conn_t *)0)->user) + \\
                            sizeof(((conn_t *)0)->host) + 3u)"""
 new = """/* FAULT: the right number, typed in, which stops being the right number the day
  * a field grows. */
 #define CONN_HOSTMASK_MAX 259u"""
-assert old in s, "the CONN_HOSTMASK_MAX derivation not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the CONN_HOSTMASK_MAX derivation")
