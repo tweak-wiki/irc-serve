@@ -1044,37 +1044,7 @@ static void *writer_main(void *arg)
          * one scheduling round per slice while its reply sits queued behind
          * PONGs. Each pass is still one bounded slice per conn, so a fat
          * conn cannot hold the writer. */
-        {
-            int extra = 0;
-            int closing_seen = 0;
-            size_t k;
-
-            (void)writer_drain_slot(s, wid);
-            for (k = 0; k < s->nactive; k++) {
-                conn_t *c;
-
-                if (k >= s->nactive) {
-                    break;
-                }
-                c = writer_resolve(s, s->active_fds[k]);
-                if (c != NULL &&
-                    atomic_load_explicit(&c->state, memory_order_acquire) ==
-                        CONN_CLOSING &&
-                    conn_write_pending_locked(c) > 0u) {
-                    closing_seen = 1;
-                    break;
-                }
-            }
-            while (closing_seen && extra < 8) {
-                size_t moved;
-
-                moved = writer_drain_slot(s, wid);
-                if (moved == 0u) {
-                    break;
-                }
-                extra++;
-            }
-        }
+        (void)writer_drain_slot(s, wid);
         pthread_mutex_lock(&s->wq_mu);
         for (;;) {
             if (s->wq_stop) {
