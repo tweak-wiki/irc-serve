@@ -246,6 +246,12 @@ jobs:
       - name: Skip gate (ratchet)
         run: ./scripts/check-skips.sh -b build build/ctest.log
 
+      # No checked-in script rots unwired (#287). Every scripts/* entry point
+      # must be named in gate.sh, the Makefile, or these workflows, or carry a
+      # reasoned allowlist entry in the script itself.
+      - name: Wired-scripts guard
+        run: ./scripts/check-wired.sh
+
       # No AI attribution in this repository's history. Attribution was stripped
       # from main twice by rewriting history and came back both times, because a
       # rewrite only says something about the PAST and nothing about the next
