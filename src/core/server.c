@@ -1247,10 +1247,8 @@ void server_writers_stop(server_t *s)
     s->writers_started = 0;
 }
 
-void server_shutdown(server_t *s)
+void server_shutdown_phase1_say_goodbye(server_t *s)
 {
-    size_t i;
-
     if (s == NULL) {
         return;
     }
@@ -1267,6 +1265,15 @@ void server_shutdown(server_t *s)
      * implementation would have to guess at is a compatibility break bought for
      * nothing, and the receiver's log already names who left. */
     (void)fed_send_shutdown(s, NULL);
+}
+
+void server_shutdown_phase2_close(server_t *s)
+{
+    size_t i;
+
+    if (s == NULL) {
+        return;
+    }
     /* MT 2.2 (#241): stop writers BEFORE the goodbye is drained below AND the
      * by_fd walk frees conns. Writers pump under wq_lock and may mark CLOSING,
      * but only the reaper closes; joining first means no writer can touch a
@@ -1524,6 +1531,15 @@ void server_shutdown(server_t *s)
         pthread_mutex_destroy(&s->reg_mu);
         s->reg_started = 0;
     }
+}
+
+void server_shutdown(server_t *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    server_shutdown_phase1_say_goodbye(s);
+    server_shutdown_phase2_close(s);
 }
 
 int server_listen(server_t *s, int port)
