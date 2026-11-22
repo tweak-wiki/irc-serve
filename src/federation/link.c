@@ -2066,9 +2066,9 @@ void fed_close(server_t *s)
     if (s == NULL || s->fed_opened == 0) {
         return;
     }
-    if (s->fed_inner != NULL) {
-        s->dispatch = s->fed_inner;
-    }
+    /* Unconditional: NULL restores NULL. A guarded restore leaves dispatch
+     * hooked when opened pre-dispatch, and reopen then wraps the hook itself. */
+    s->dispatch = s->fed_inner;
     s->fed_inner = NULL;
     s->fed_opened = 0;
     link_wipe(s->fed_secret, sizeof s->fed_secret);
