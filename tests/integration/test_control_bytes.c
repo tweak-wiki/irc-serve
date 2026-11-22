@@ -101,11 +101,16 @@
  * conventional `:nick!user@host AWAY #chan :<text>` and every expected string here
  * is about the bytes that were removed. */
 #define DEL "\177"
-#define CSI ESC "[2J" ESC "[31mbrb back in 5" DEL
-/* What CSI becomes once the two escapes are gone. This is a SEPARATE literal rather
- * than CSI with the ESCs deleted by the test, because a "stripped" expectation
- * assembled by the same arithmetic that builds the payload would agree with a wrong
- * implementation: writing both out is what makes the pair a claim. */
+/* A raw C1 control: 0x9B is CSI on an 8-bit terminal, so it is the same hazard
+ * as ESC `[` in one byte. It is spelled as its own literal so the payload below
+ * reads as the three hazards it carries rather than as one longer escape. */
+#define C1_9B "\233"
+#define CSI ESC "[2J" C1_9B ESC "[31mbrb back in 5" DEL
+/* What CSI becomes once the two escapes, the raw C1 and the DEL are gone. This is
+ * a SEPARATE literal rather than CSI with the bad bytes deleted by the test,
+ * because a "stripped" expectation assembled by the same arithmetic that builds
+ * the payload would agree with a wrong implementation: writing both out is what
+ * makes the pair a claim. */
 #define CSI_STRIPPED "[2J[31mbrb back in 5"
 
 static unsigned g_drain_seq;
@@ -391,18 +396,18 @@ static void case_away_stripped_for_member(void)
         /* The counts come from strlen() of the two literals above rather than from
          * numbers typed in, because a hand-arithmetic byte count that is wrong by
          * one turns a real assertion into a permanently red test -- which is the
-         * same failure as an assertion that cannot fail. `removed=3` IS written
+         * same failure as an assertion that cannot fail. `removed=4` IS written
          * out: it is the number of bytes in the payload that the set contains --
-         * two ESCs and a DEL -- and it is what says the count is a measurement
-         * rather than a constant. */
+         * two ESCs, a raw C1 0x9B and a DEL -- and it is what says the count is a
+         * measurement rather than a constant. */
         (void)snprintf(log_want, sizeof log_want,
-                       "away_stripped: nick=vic removed=3 in_len=%zu kept_len=%zu "
+                       "away_stripped: nick=vic removed=4 in_len=%zu kept_len=%zu "
                        "reason=CONTROL_BYTES", strlen(CSI), strlen(CSI_STRIPPED));
         TF_CHECK_MSG(nf_expect(&node, log_want, T_IO_MS) == 0,
                      "the operator log did not record the strip, or recorded the "
-                     "wrong counts; expected \"%s\". The payload carries two ESCs and "
-                     "a DEL, so it must be announced as 3 removed, %zu in, %zu kept -- "
-                     "silent "
+                     "wrong counts; expected \"%s\". The payload carries two ESCs, "
+                     "a raw C1 and a DEL, so it must be announced as 4 removed, "
+                     "%zu in, %zu kept -- silent "
                      "mutation is its own defect, and without this line a member and "
                      "the setter simply disagree about what was said with no record "
                      "of why.\n  node said: %s", log_want, strlen(CSI),
