@@ -14,14 +14,13 @@ would then pass for reasons that have nothing to do with what it is asserting, a
 sweep would report a surface clean because it never really made a check.
 """
 
-PATH = "tests/harness/sweep_scan.h"
+from util import apply_fault
 
-src = open(PATH).read()
+PATH = "tests/harness/sweep_scan.h"
 old = """    if (hay == NULL || needle == NULL || needle_len == 0u) {
         return NULL;
     }"""
 new = """    if (hay == NULL || needle == NULL) {
         return NULL; /* FAULT: the empty-needle guard is gone */
     }"""
-assert old in src, "the empty-needle guard not found"
-open(PATH, "w").write(src.replace(old, new))
+apply_fault(PATH, old, new, "the empty-needle guard")
