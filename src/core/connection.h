@@ -1136,8 +1136,14 @@ typedef struct conn {
     char       *rbuf;              /* read buffer */
     size_t      rlen;
     size_t      rcap;
-    /* MT 2.1 (#240): guards wbuf/wlen/woff/wcap + want_write ONLY. Single-threaded
-     * loop calls conn_queue()/conn_pump() exactly as before, so no behavior change. */
+    /* MT 2.1 (#240): guards wbuf/wcap + want_write AND the queue it points
+     * at. wlen/woff themselves are atomic (#280): a transport's publish
+     * snapshots the pending tail without taking this lock, so the read path
+     * no longer contends with a writer's drain. Mutation still happens only
+     * under the lock, which is what keeps the pair consistent; the snapshot
+     * can be stale by a concurrent drain, and only in the harmless
+     * direction -- a drain removes bytes, so a stale read over-reports and
+     * the next publish corrects it. Single-threaded, no behavior change. */
     /* -----------------------------------------------------------------------
      * #368 HANDOFF: THE FIELDS THE LOOP SHARES WITH WRITER THREADS.
      * -----------------------------------------------------------------------
@@ -1163,8 +1169,8 @@ typedef struct conn {
     atomic_int  want_read;         /* poll() must include POLLIN; release/acquire */
     atomic_int  want_write;        /* poll() must include POLLOUT; release/acquire */
     char       *wbuf;              /* write queue; wbuf[woff..wlen) is unsent */
-    size_t      woff;
-    size_t      wlen;
+    atomic_size_t woff;
+    atomic_size_t wlen;
     size_t      wcap;
 } conn_t;
 

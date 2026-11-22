@@ -274,10 +274,10 @@ static ssize_t tls_fail(conn_t *c, SSL *ssl, int ret, const char *what)
  *
  * MT 3.1 (#244): SERIALIZATION. Each SSL* is driven under its conn's wq_lock,
  * which the CALLER holds -- conn_pump() across transport_send(), conn_fill()
- * across transport_recv() (recv-side lock lands with #241). These ops take NO
- * lock themselves: wq_lock is non-recursive, so locking here would deadlock
- * on the only paths that reach it. The one-SSL-one-thread invariant is a
- * caller contract, verified by ci_tsan at --writers 4. */
+ * across transport_recv() on TLS conns (plaintext fill takes no lock: #280).
+ * These ops take NO lock themselves: wq_lock is non-recursive, so locking
+ * here would deadlock on the only paths that reach it. The one-SSL-one-thread
+ * invariant is a caller contract, verified by ci_tsan at --writers 4. */
 static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
 {
     SSL *ssl = (SSL *)c->t_ctx;

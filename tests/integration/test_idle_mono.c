@@ -79,7 +79,7 @@ static void queued(const member_t *m, size_t from, char *out, size_t cap)
     }
     out[0] = '\0';
     for (size_t i = from; i < have && n + 1u < cap; i++) {
-        out[n++] = m->c->wbuf[m->c->woff + i];
+        out[n++] = m->c->wbuf[atomic_load_explicit(&m->c->woff, memory_order_acquire) + i];
     }
     out[n] = '\0';
 }
