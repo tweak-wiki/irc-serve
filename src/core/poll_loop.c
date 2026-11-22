@@ -142,6 +142,8 @@ static void conn_readable(server_t *s, conn_t *c)
         message_t m;
         size_t len = 0;
         int got;
+        int limited;
+        int frame_last;
 
         got = conn_next_line(c, line, sizeof line, &len);
         if (got == 0) {
@@ -154,24 +156,44 @@ static void conn_readable(server_t *s, conn_t *c)
             conn_mark_closing(c);
             return;
         }
+        /* #224: every framed line is charged before parsing, rejected lines
+         * included, so invalid input cannot dodge the flood controls. */
+        limited = (c->kind != CONN_SERVER && c->rate_tokens < 1.0);
+        if (c->kind != CONN_SERVER && !limited) {
+            c->rate_tokens -= 1.0;
+        }
+        frame_last = (--budget == 0u);
 
         /* message_parse_n(), not message_parse(): the framing layer holds a
          * length, and only the counted entry point rejects an embedded NUL,
          * which is a stated hard requirement of 3.2. */
         if (message_parse_n(line, len, &m) != 0) {
             s->n_parse_reject++;
-            message_free(&m); /* rejection leaves it zeroed; free is a no-op */
-            continue;
+            if (!limited) {
+                message_free(&m); /* rejection leaves it zeroed; free is a no-op */
+                if (frame_last) {
+                    /* #216: more buffered; the next POLLIN continues. Mark the
+                     * node so the pre-poll scan runs next tick instead of
+                     * every tick. */
+                    if (conn_has_line(c)) {
+                        s->lines_pending = 1;
+                    }
+                    return;
+                }
+                continue;
+            }
+            /* Flooded and unparsable: m is zeroed, so the 417 below
+             * simply carries no command. */
+        } else {
+            s->n_lines++;
         }
-
-        s->n_lines++;
         /* #168: each dispatched client line spends one token. Empty means the
          * sender is flooding: one 417, then CLOSING, and the reaper collects
          * the fd at step 7. The reply precedes the mark because the reply
          * path refuses a CLOSING target. "Once" needs no flag: a CLOSING
          * conn is never read again. */
-        if (c->kind != CONN_SERVER) {
-            if (c->rate_tokens < 1.0) {
+        if (limited) {
+            {
                 int need_flush;
                 printf("[observable] rate_limited: fd=%d\n", c->fd);
                 (void)reply_refused(s, c, m.command, NULL, "417", NULL, 0,
@@ -195,7 +217,6 @@ static void conn_readable(server_t *s, conn_t *c)
                 conn_mark_closing(c);
                 return;
             }
-            c->rate_tokens -= 1.0;
         }
         if (s->trace) {
             /* THE COMMAND WORD IS AN IDENTIFIER, SO IT IS MEASURED, NOT FILTERED.
@@ -233,7 +254,7 @@ static void conn_readable(server_t *s, conn_t *c)
             s->dispatch(s, c, &m);
         }
         message_free(&m);
-        if (--budget == 0u) {
+        if (frame_last) {
             /* #216: more buffered; the next POLLIN continues. Mark the node
              * so the pre-poll scan runs next tick instead of every tick. */
             if (conn_has_line(c)) {
