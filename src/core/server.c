@@ -848,6 +848,37 @@ static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
     return total;
 }
 
+/* True when `owner`'s slice holds a CLOSING conn with queued bytes (the
+ * 417-flush shape): the reply the client is waiting for sits behind that
+ * backlog, so idle writers must pick it up now rather than when the
+ * aggregate trips the stickiness floor. */
+static int writer_owner_closing(server_t *s, int owner, int n)
+{
+    size_t i;
+
+    for (i = 0; i < s->nactive; i++) {
+        int fd;
+        conn_t *c;
+
+        if (i >= s->nactive) {
+            break;
+        }
+        fd = s->active_fds[i];
+        if (writer_owner(fd, n) != owner) {
+            continue;
+        }
+        c = writer_resolve(s, fd);
+        if (c == NULL) {
+            continue;
+        }
+        if (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING &&
+            conn_write_pending_locked(c) > 0u) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Drain one bounded slice of every live conn owned by `owner`. The caller
  * holds reg_mu; each pump takes that conn's wq_lock, so FIFO +
  * single-drainer hold through the move. */
@@ -939,7 +970,8 @@ static void writer_drain_slot(server_t *s, int wid)
                     fat = w;
                 }
             }
-            if (fat >= 0 && best >= (unsigned long long)WRITER_STEAL_BYTES) {
+            if (fat >= 0 && (best >= (unsigned long long)WRITER_STEAL_BYTES ||
+                               writer_owner_closing(s, fat, n))) {
                 writer_drain_owner(s, fat, n, &drained);
             }
         }
