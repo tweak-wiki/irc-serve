@@ -291,11 +291,7 @@ static void peer_link_up(server_t *s, wire_t *far, int listen_fd, int port)
     l->created_ms = server_now_ms();
     memcpy(&l->addr, &peer_addr, sizeof peer_addr);
     l->addrlen = peer_alen;
-    /* Written the way fed_link_set_state() will: the FSM context first and the
-     * `state` mirror second, so the mirror cannot be set without the context. */
-    handshake_init(&l->hs);
-    l->hs.state = ESTABLISHED;
-    l->state = (int)l->hs.state;
+    l->state = (int)ESTABLISHED;
 }
 
 static void step_and_drain(server_t *s, wire_t *peer)
@@ -648,8 +644,7 @@ int main(void)
         server_link_t *l = server_find_link(&s, PEER_NAME);
 
         TF_CHECK_MSG(l != NULL, "the link is not findable by its own name");
-        l->hs.state = INIT;
-        l->state = (int)l->hs.state;
+        l->state = (int)INIT;
     }
     TF_CHECK_MSG(server_find_link(&s, PEER_NAME) != NULL,
                  "the link stopped being findable when its handshake went back "
@@ -668,8 +663,7 @@ int main(void)
     {
         server_link_t *l = server_find_link(&s, PEER_NAME);
 
-        l->hs.state = ESTABLISHED;
-        l->state = (int)l->hs.state;
+        l->state = (int)ESTABLISHED;
     }
     TF_CHECK_MSG(server_find_peer(&s, PEER_NAME) != NULL,
                  "the link did not become a route again when the handshake "
