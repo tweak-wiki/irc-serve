@@ -1328,15 +1328,17 @@ struct server {
     writer_slot_t *slots;          /* N slot args, or NULL */
     atomic_ullong *writer_bytes; /* per-writer drained-byte totals */
 
-    /* MT 2.2 (#241): registry mutex. The loop thread is the only mutator
+    /* MT 2.2 (#241) + #279: registry mutex. The loop thread is the only mutator
      * (server_add_conn / the detach half of server_close_conn), but writers
      * resolve conns through the same by_fd/active structures -- without this
      * the writer scan races the loop's accept/reap (TSan). Lock order is
      * reg_mu -> wq_lock: a holder of wq_lock never takes reg_mu. The loop's
      * own (same-thread) resolutions need no lock; only cross-thread
-     * resolve/pump paths take it. Writers hold it across resolve+pump, so a
-     * conn cannot be detached/freed mid-pump (the close handoff in #242 will
-     * replace this coarse hold with a per-conn scheme). */
+     * resolve/pump paths take it. Writers hold reg_mu only across the
+     * registry scan, never across a pump: wq_lock is taken as a trylock
+     * under reg_mu, then reg_mu drops across conn_pump_slice_locked. The
+     * held wq_lock keeps the reaper (#242: trylock fails, close defers) from
+     * detaching/freeing mid-pump, so resolve-to-pump has no gap. */
     pthread_mutex_t reg_mu;
     int       reg_started;        /* 1: reg_mu is live */
     /* MT 2.2: reap-deferral deadline per fd (monotonic ms, 0 = none). At N > 0
