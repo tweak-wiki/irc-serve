@@ -445,12 +445,11 @@ int main(void)
         assert(strcmp(u, "\r") == 0);
         assert(message_tag_unescape("\\n", u, sizeof u) == 0);
         assert(strcmp(u, "\n") == 0);
-        /* The lone-trailing-backslash rule: dropped on the way in, and a
-         * literal backslash is therefore SENT as '\\' (above). */
-        assert(message_tag_unescape("\\", u, sizeof u) == 0);
-        assert(strcmp(u, "") == 0);
-        assert(message_tag_unescape("ab\\", u, sizeof u) == 0);
-        assert(strcmp(u, "ab") == 0);
+        /* The lone-trailing-backslash rule: malformed, refuses with -1 (#278)
+         * rather than decoding to nothing, and a literal backslash is
+         * therefore SENT as '\\' (above). */
+        assert(message_tag_unescape("\\", u, sizeof u) == -1);
+        assert(message_tag_unescape("ab\\", u, sizeof u) == -1);
         /* An escape before a character outside the set DROPS the backslash and
          * yields the character, so `\b` is `b`. */
         assert(message_tag_unescape("a\\qb", u, sizeof u) == 0);

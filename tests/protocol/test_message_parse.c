@@ -359,31 +359,21 @@ int main(void)
      * separates pairs -- so `\;` ends the pair instead of smuggling a
      * separator inside the value. The retired core grammar read `\;` as an
      * escaped ';' and disagreed with ircv3_tags.c here; the single grammar
-     * splits, and the dangling backslash decodes to nothing. */
+     * splits, leaving a dangling backslash that refuses the block (#278). */
     assert(message_parse("@v=a\\:b PING", &m) == 0);
     {
         char value[64];
         assert(message_tag_get(&m, "v", value, sizeof value) == 0);
         assert(strcmp(value, "a;b") == 0);
     }
-    message_free(&m);
-    assert(message_parse("@v=a\\;b PING", &m) == 0);
-    {
-        char value[64];
-        assert(message_tag_get(&m, "v", value, sizeof value) == 0);
-        assert(strcmp(value, "a") == 0);
-        assert(message_tag_get(&m, "b", value, sizeof value) == 0);
-        assert(strcmp(value, "") == 0);
-    }
+    /* `\;` leaves a dangling backslash, which is malformed (#278): the whole
+     * message is refused at parse, so no decoded value exists to read. */
+    assert(message_parse("@v=a\\;b PING", &m) == -1);
     message_free(&m);
 
-    /* A lone trailing backslash in a value decodes to nothing. */
-    assert(message_parse("@v=ab\\ PING", &m) == 0);
-    {
-        char value[64];
-        assert(message_tag_get(&m, "v", value, sizeof value) == 0);
-        assert(strcmp(value, "ab") == 0);
-    }
+    /* A lone trailing backslash is malformed (#278): the message is refused
+     * at parse rather than decoded with a byte silently dropped. */
+    assert(message_parse("@v=ab\\ PING", &m) == -1);
     message_free(&m);
 
     /* parse -> serialize is byte-for-byte, duplicates and escapes included:
