@@ -428,7 +428,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
      * the echo-message copy of a CHANNEL message too, and a labelled `PRIVMSG #chan` came
      * back unlabelled followed by an `ACK`. */
     c->label_self = ((t.kind == FANOUT_LOCAL_USER) && (t.user == c)) ? 1 : 0;
-    exclude = ((is_notice != 0) && (cap_echo_message_enabled(c) == 0)) ? c : NULL;
+    exclude = ((is_notice != 0) && (cap_enabled(c, CAP_ECHO_MESSAGE) == 0)) ? c : NULL;
     {
         const char *sp[1];
 
@@ -575,7 +575,7 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
     /* ONE ANSWER FOR THE WHOLE REPLY, asked once because a WHO is answered to a
      * single client and asking per entry would ask the same question once per row
      * of a reply this node builds in a loop. See who_flags(). */
-    const int multiprefix = cap_multiprefix_enabled(c);
+    const int multiprefix = cap_enabled(c, CAP_MULTIPREFIX);
     /* RFC 2812 3.3.4: WHO [<mask> ["o"]]. The second parameter selects only
      * channel operators; anything else there is refused like any bad arity. */
     int ops_only = 0;

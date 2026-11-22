@@ -871,7 +871,7 @@ static void fanout_form_for(const conn_t *dst, const fanout_form_t *extended,
                             const char *const **params, int *nparams)
 {
     if (extended == NULL || extended->params == NULL ||
-        cap_extended_join_enabled(dst) == 0) {
+        cap_enabled(dst, CAP_EXTENDED_JOIN) == 0) {
         return;
     }
     *params = extended->params;
