@@ -1,0 +1,45 @@
+name: Deploy to CachyOS
+on:
+  workflow_dispatch:
+    inputs:
+      port:
+        description: "IRC port (bare positional arg)"
+        default: "6667"
+        required: false
+      name:
+        description: "Server name (--name)"
+        default: "irc.test"
+        required: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, tweak-ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Release
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)"
+          ls -la build/irc-serve
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          ./build/irc-serve --help 2>&1 | head -8
+      - name: Run server
+        run: |
+          set -euo pipefail
+          pkill -f "irc-serve --name" || true
+          sleep 1
+          nohup ./build/irc-serve --name "${{ inputs.name }}" "${{ inputs.port }}" > /tmp/irc-serve.log 2>&1 &
+          echo $! > /tmp/irc-serve.pid
+          sleep 3
+          if (exec 3<>/dev/tcp/127.0.0.1/${{ inputs.port }}) 2>/dev/null; then
+            echo "IRC listening on port ${{ inputs.port }} (pid $(cat /tmp/irc-serve.pid))"
+            head -20 /tmp/irc-serve.log
+          else
+            echo "server did not come up:"
+            cat /tmp/irc-serve.log
+            exit 1
+          fi
