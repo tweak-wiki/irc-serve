@@ -102,11 +102,11 @@ endfunction()
 # ---------------------------------------------------------------------------
 # PER-TEST TIMEOUTS: WHY THEY EXIST, AND WHY THEY ARE NOT `--timeout 400`
 # ---------------------------------------------------------------------------
-# Every CI job runs `ctest --timeout 60`, and three tests in this suite are
+# Every CI job runs `ctest --timeout 60`, and four tests in this suite are
 # legitimately slower than that. The obvious fix -- raising the global -- is the
 # wrong one: 60s is what turns a WEDGED run red in a minute instead of an hour,
-# and raising it to accommodate three slow tests spends that detection on the
-# other eighty-two, which finish in under three seconds and would then hang
+# and raising it to accommodate four slow tests spends that detection on the
+# other eighty-one, which finish in under three seconds and would then hang
 # unnoticed for as long as the new limit allows. So the global default stays
 # 60 and only the tests with a measured reason get an override.
 #
@@ -125,17 +125,20 @@ endfunction()
 #   test_peer_tls         28.75s   -> 180   (6.3x)
 #   test_topic_persist    22.81s   -> 150   (6.6x)
 #   FailoverReconnect     11.24s   ->  90   (8.0x)
+#   test_writers_tls_417  ~35s     -> 210   (6.0x, stalls observed on macOS
+#     Release -j2; see its TIMEOUT note where it is added below)
 #
-# NOTHING ELSE GETS ONE, and that is a result rather than an omission: the fourth
+# NOTHING ELSE GETS ONE, and that is a result rather than an omission: the fifth
 # slowest test is CapNegotiation at 4.53s, which is 13x inside 60, and every
-# other test in the suite is faster still. The rule produces three overrides and
-# stops; a fourth would be a number without a measurement behind it.
+# other test in the suite is faster still. The rule produces four overrides and
+# stops; a fifth would be a number without a measurement behind it.
 #
-# THE COST, stated rather than discovered later. These three tests accumulate
+# THE COST, stated rather than discovered later. These four tests accumulate
 # MANY deadline-bounded waits rather than one long one -- test_peer_tls has 20
 # wait sites at 4s-20s each, test_topic_persist 20 at 15s, FailoverReconnect 13
-# at up to 20s -- so a run in which EVERY wait fully expires reaches roughly
-# 200s, 300s and 160s respectively. That is a failing run, not a hanging one,
+# at up to 20s, test_writers_tls_417 two at 120s -- so a run in which EVERY
+# wait fully expires reaches roughly 200s, 300s, 160s and 300s respectively.
+# That is a failing run, not a hanging one,
 # and because these values sit below those structural worst cases, such a run
 # can surface as a ctest Timeout rather than as a named failed assertion. The
 # trade is deliberate: a 4-5 minute budget for a wedge is cheaper than the
@@ -150,7 +153,7 @@ function(irc_test_timeout ctest_name seconds)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# The three overrides. Each is set immediately before the add_test() for the
+# The four overrides. Each is set immediately before the add_test() for the
 # test it is about, so the number and the test it belongs to are read together
 # rather than from a list somewhere else in the file.
 #
@@ -237,6 +240,11 @@ irc_add_integration_test(test_flood_rate test_flood_rate.c)
 # #282: the two writer interactions with no N=4 coverage -- TLS pending-drain
 # under writers (byte-exact PONG oracle; TSan is the race oracle) and
 # 417-flush-deferred-to-writers (417 before close plus a short pump).
+# TIMEOUT. The deferred-close cases (2a/2b) wait out the drain round-trips plus
+# the reaper's own ticks at T_CLOSE_MS = 120s: stalls to ~35s observed on macOS
+# Release -j2 (#480). Six times the observed maximum, rounded up to the next
+# 30s, per the rule above.
+set(irc_timeout_test_writers_tls_417 210)
 irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
 
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
