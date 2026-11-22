@@ -749,9 +749,18 @@ static void case_attach_refuses_at_cap(void)
     /* AND A FREED SLOT TAKES THE SAME NAME AGAIN: detach drops the count, and
      * the re-attach of the refused name succeeds -- the cap is on what the
      * node holds, not on what it has ever held. */
-    server_chan_detach(&s, "#CU0000");
-    TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS - 1u,
-                 "a detach did not free a slot");
+    {
+        /* Detach drops the object from the index without freeing it (the
+         * caller owns the channel either way): free it by hand, then the
+         * retry below proves the freed slot takes the same name again. */
+        chan_t *dropped = server_chan_at(&s, 0u);
+
+        TF_CHECK_MSG(dropped != NULL, "no channel at slot 0 to detach");
+        server_chan_detach(&s, dropped->name);
+        TF_CHECK_MSG(server_chan_count(&s) == (size_t)SERVER_MAX_CHANNELS - 1u,
+                     "a detach did not free a slot");
+        chan_free(dropped);
+    }
     {
         chan_t *retry = chan_new("#CUOVER", "irc.a", s.epoch);
 
