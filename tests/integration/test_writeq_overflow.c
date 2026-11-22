@@ -170,7 +170,7 @@ int main(void)
         TF_CHECK_MSG(got >= 0,
                      "could not read src/core/server.c (is IRCSERVE_SRC_DIR "
                      "set?)");
-        fn = strstr(code, "int server_queue(server_t");
+        fn = strstr(code, "int server_queue_quiet(server_t");
         TF_CHECK_MSG(fn != NULL,
                      "could not find server_queue() in server.c");
         use = strstr(fn, "conn_write_pending_locked(c)");
