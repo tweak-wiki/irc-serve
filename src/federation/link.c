@@ -38,7 +38,7 @@
  * against this number, so a reason added to the enum without a counter here is
  * a reason that is counted nowhere rather than a reason that writes past the
  * array -- and the dump prints "?" for it, which is how it gets noticed. */
-#define FED_RESULT_COUNT 11
+#define FED_RESULT_COUNT 12
 
 #if FED_RESULT_COUNT != IRC_FED_REJECT_REASONS
 #error "link.c's FED_RESULT_COUNT and server.h's IRC_FED_REJECT_REASONS disagree"
@@ -95,7 +95,8 @@ static const char *const FED_REASON_NAME[FED_RESULT_COUNT] = {
     "NAME_MISMATCH",
     "BAD_NAME",   /* FED_BAD_NAME      */
     "BAD_EPOCH",  /* FED_BAD_EPOCH     */
-    "BAD_VERSION" /* FED_BAD_VERSION   */
+    "BAD_VERSION", /* FED_BAD_VERSION   */
+    "TLS_REQUIRED" /* FED_TLS_REQUIRED  */
 };
 
 /* The per-reason keys, for the dump. A table rather than ten literals in a
@@ -107,7 +108,7 @@ static const char *const FED_REASON_NAME[FED_RESULT_COUNT] = {
 static const char *const FED_REASON_KEY[FED_RESULT_COUNT] = {
     "", "rej_arity=", "rej_secret=", "rej_nosecret=", "rej_self=",
     "rej_in_use=", "rej_dup=", "rej_mismatch=", "rej_name=", "rej_epoch=",
-    "rej_version="
+    "rej_version=", "rej_tls="
 };
 
 const char *fed_federate_reason(fed_federate_result_t result)
@@ -134,6 +135,7 @@ const char *fed_federate_reason(fed_federate_result_t result)
     case (int)FED_BAD_NAME:
     case (int)FED_BAD_EPOCH:
     case (int)FED_BAD_VERSION:
+    case (int)FED_TLS_REQUIRED:
         break;
     default:
         /* Unreachable while fed_federate_result_t is closed and every member
@@ -500,32 +502,29 @@ int fed_link_set_tls(server_t *s, const char *name, int require_tls)
         return -1;
     }
     link->require_tls = (require_tls != 0) ? 1 : 0;
-    /* THE INBOUND HALF IS NOT ENFORCED BY THIS FLAG, and an operator who reads
-     * `--peer-tls irc.a` as "this link is encrypted whichever way round it is
-     * connects" is going to be wrong about one of the two directions. So the line
-     * says which:
+    /* THE INBOUND HALF IS ENFORCED ON THE HANDSHAKE, and an operator who read
+     * an older version of this comment -- "NOT enforced here" -- should read
+     * on. The accept site still cannot tell a peer from a client, and it still
+     * does not sniff the plain port for a ClientHello: any client that sends
+     * something other than a ClientHello first defeats a detector, and a
+     * detector that guesses is a downgrade waiting to be asked for. What
+     * changed (issue #221) is that the handshake itself refuses: a FEDERATE
+     * arriving on a plaintext connection for a link with require_tls is
+     * rejected as TLS_REQUIRED before the secret is compared. The secret has
+     * already travelled at that point, so this does not unsend it -- what it
+     * stops is the cleartext LINK, which would otherwise carry the mesh's
+     * traffic in the clear against the operator's stated requirement. A
+     * plaintext FEDERATE for a link WITHOUT require_tls is accepted exactly
+     * as before, which is what keeps a mixed mesh working.
      *
-     *   this node DIALS  require_tls is enforced: the handshake is started on the
-     *                    socket, the peer's certificate is verified against this
-     *                    link's name, and a failure closes the link and spends a
-     *                    retry rather than continuing in the clear.
+     * An inbound peer link over TLS arrives on the implicit-TLS listener,
+     * where every byte is TLS before anything is interpreted, so a peer that
+     * points at --tls-port never trips the refusal above.
      *
-     *   this node ACCEPTS  NOT enforced here, and deliberately not by SNIFFING the
-     *                    plain port for a ClientHello. A port that serves plaintext
-     *                    clients and must also auto-detect TLS has no correct
-     *                    discriminator: any client that sends something other than a
-     *                    ClientHello first defeats it, and a detector that guesses
-     *                    is a downgrade waiting to be asked for. The answer an
-     *                    operator actually wants -- "nothing on the plain port may
-     *                    be plaintext" -- is `--tls-require`, which refuses every
-     *                    plaintext connection at accept and leaves the operator to
-     *                    point peers at --tls-port.
-     *
-     * An inbound peer link over TLS therefore arrives on the implicit-TLS
-     * listener, where every byte is TLS before anything is interpreted, and it is
-     * protected by exactly the mechanism a client's is. That is a real property and
-     * it is NOT the same property as the outbound one, which is why the line
-     * distinguishes them. */
+     * TO CLOSE EVERY PLAINTEXT CONNECTION, the answer is still `--tls-require`,
+     * which refuses them at accept and leaves the operator to point peers at
+     * --tls-port.
+     */
     printf("[observable] link_tls: peer=%s require_tls=%d enforced=%s inbound_hint=%s\n",
            link->name, link->require_tls,
            (link->initiator != 0) ? "outbound_dial"
@@ -1933,6 +1932,22 @@ void fed_on_federate(server_t *s, conn_t *c, const message_t *m)
 
     if (s == NULL || c == NULL || m == NULL) {
         return;
+    }
+    /* A FEDERATE in cleartext for a peer this node requires TLS for
+     * (issue #221): the line carries the shared secret, so honoring it
+     * would both trust a sniffable credential and establish the cleartext
+     * link the operator said must be TLS. Refused BEFORE the secret is
+     * compared, so the exchange answers nothing about it, and before any
+     * link state moves. A plaintext FEDERATE for a peer with no such
+     * requirement is untouched, which is what keeps a plaintext mesh
+     * working exactly as before. */
+    if (transport_is_tls(c) == 0 && m->nparams >= 1 && m->params[0] != NULL) {
+        const server_link_t *claimed = server_find_link(s, m->params[0]);
+
+        if (claimed != NULL && claimed->require_tls != 0) {
+            fed_reject(s, self, c, FED_TLS_REQUIRED, m->params[0]);
+            return;
+        }
     }
     result = fed_check_federate(s, self, m, s->fed_secret, &peer_epoch);
     if (result != FED_OK) {

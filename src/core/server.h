@@ -180,7 +180,7 @@ struct burst_shadow;
  * from here -- link.h includes this file, so including it back would be a
  * cycle -- so the width is a literal with a preprocessor #error tie at the
  * definition (link.c) rather than a second spelling nobody checks. */
-#define IRC_FED_REJECT_REASONS 11
+#define IRC_FED_REJECT_REASONS 12
 
 /* The node-wide channel cap (issue #169): the most chan_t objects one node
  * will hold at once. The per-connection cap (CONN_MAX_CHANNELS, 128) bounds
