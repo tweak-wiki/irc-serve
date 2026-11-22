@@ -101,6 +101,19 @@ static int append(test_client_t *c, const char *bytes, size_t n)
     return 0;
 }
 
+/* The longest one select() may sleep inside read_once(). A wait that spends
+ * its whole deadline with an idle socket must still drain the child nodes'
+ * stdout pipes: a writer thread printf()ing a close storm (test_writer_fault's
+ * RST victim at N > 0) fills the 64 KiB pipe in milliseconds, and a writer
+ * blocked in write() holds its conn's wq_lock -- which is exactly the lock
+ * the loop's next server_queue() takes. The parent's only pump runs in the
+ * wait loop, so one deadline-long select means no drain for the whole wait
+ * and a wedge that no timeout outlives. Slicing keeps the documented "always
+ * reading every child" true even when the socket is silent; readable sockets
+ * still return immediately, so passing runs pay one extra syscall per 50 ms
+ * of silence. */
+#define TC_PUMP_SLICE_MS 50u
+
 /* Read whatever is readable, up to the deadline. Returns 1 if bytes were
  * appended, 0 if the deadline passed with nothing, and -1 on a hard error.
  * `eof` is set when the peer closed. */
@@ -123,6 +136,12 @@ static int read_once(test_client_t *c, uint64_t deadline, int *eof)
 
     FD_ZERO(&rfds);
     FD_SET(c->fd, &rfds);
+    /* Capped at TC_PUMP_SLICE_MS, not the whole deadline: see above. The
+     * callers loop until the deadline, so slicing changes nothing but how
+     * often the pump hook below gets to run. */
+    if (left > TC_PUMP_SLICE_MS) {
+        left = TC_PUMP_SLICE_MS;
+    }
     tv.tv_sec = (time_t)(left / 1000u);
     tv.tv_usec = (suseconds_t)((left % 1000u) * 1000u);
 
