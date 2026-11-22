@@ -763,29 +763,27 @@ static void *writer_main(void *arg);
 
 /* Drain one bounded slice of a conn's queued FIFO (#369: CONN_WQ_SLICE bytes
  * via conn_pump_slice_locked(), so a fat conn cannot hold a writer past one
- * slice while a thin conn's reply waits). The pump takes the conn's wq_lock,
- * so FIFO + single-drainer hold across steal moves. Adds the bytes drained
- * to `*drained`. */
+ * slice while a thin conn's reply waits). The caller already holds the
+ * conn's wq_lock (taken as a trylock under reg_mu, see writer_drain_owner),
+ * so FIFO + single-drainer hold across steal moves. The pending reads use
+ * the plain accessor: wq_lock is already held, and the _locked form takes
+ * the lock itself (self-deadlock inside a pump critical section, by its own
+ * contract). Adds the bytes drained to `*drained`. */
 static void writer_pump_conn(server_t *s, conn_t *c, size_t *drained)
 {
     size_t before;
     size_t left;
     int rc;
 
-    /* wlen/woff are wq_lock-guarded (loop's conn_queue vs our pump);
-     * reg_mu covers structure only, so these stay locked reads. Order
-     * reg_mu -> wq_lock holds: nothing takes them in reverse. */
-    before = conn_write_pending_locked(c);
-    pthread_mutex_lock(&c->wq_lock);
+    before = conn_write_pending(c);
     rc = conn_pump_slice_locked(c);
-    pthread_mutex_unlock(&c->wq_lock);
     if (rc < 0) {
         atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
         printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
         conn_mark_closing(c);
         return;
     }
-    left = conn_write_pending_locked(c);
+    left = conn_write_pending(c);
     if (left < before) {
         *drained += before - left;
     }
@@ -821,8 +819,13 @@ static conn_t *writer_resolve(server_t *s, int fd)
     return s->by_fd[fd];
 }
 
-/* Aggregate unsent bytes over one owner's live conns. Locked pending reads
- * only (reg_mu -> wq_lock order holds). */
+/* Aggregate unsent bytes over one owner's live conns. The scan holds reg_mu
+ * (active_fds/by_fd stability); each pending read stays wq_lock-guarded
+ * (#445) but takes the lock as a trylock, so the scan never blocks under
+ * reg_mu (#279). A conn whose lock is held is being pumped -- or read by the
+ * reaper -- and contributes nothing this pass; the next pass picks up what
+ * is left. Lock order reg_mu -> wq_lock holds: nothing takes them in
+ * reverse. */
 static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
 {
     size_t i;
@@ -843,14 +846,20 @@ static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
         if (!writer_conn_live(c)) {
             continue;
         }
-        total += (unsigned long long)conn_write_pending_locked(c);
+        if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+            continue;
+        }
+        total += (unsigned long long)conn_write_pending(c);
+        pthread_mutex_unlock(&c->wq_lock);
     }
     return total;
 }
 
 /* True when `owner`'s slice holds a CLOSING conn with queued bytes (the
  * 417-flush shape): the reply sits behind that backlog, so an idle pass
- * steals it now instead of waiting for the stickiness floor. */
+ * steals it now instead of waiting for the stickiness floor. Same reg_mu +
+ * trylock discipline as writer_owner_backlog: a locked CLOSING conn is being
+ * drained already, so it does not trip the steal. */
 static int writer_owner_closing(server_t *s, int owner, int n)
 {
     size_t i;
@@ -858,6 +867,7 @@ static int writer_owner_closing(server_t *s, int owner, int n)
     for (i = 0; i < s->nactive; i++) {
         int fd;
         conn_t *c;
+        int has_bytes;
 
         if (i >= s->nactive) {
             break;
@@ -869,17 +879,31 @@ static int writer_owner_closing(server_t *s, int owner, int n)
         c = writer_resolve(s, fd);
         if (c != NULL &&
             atomic_load_explicit(&c->state, memory_order_acquire) ==
-                CONN_CLOSING &&
-            conn_write_pending_locked(c) > 0u) {
-            return 1;
+                CONN_CLOSING) {
+            if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+                continue;
+            }
+            has_bytes = (conn_write_pending(c) > 0u);
+            pthread_mutex_unlock(&c->wq_lock);
+            if (has_bytes) {
+                return 1;
+            }
         }
     }
     return 0;
 }
 
 /* Drain one bounded slice of every live conn owned by `owner`. The caller
- * holds reg_mu; each pump takes that conn's wq_lock, so FIFO +
- * single-drainer hold through the move. */
+ * holds reg_mu; each conn's wq_lock is taken as a trylock while still
+ * holding reg_mu (order reg_mu -> wq_lock, never the reverse, never
+ * blocking), then reg_mu is released across the pump and retaken after.
+ * Holding reg_mu over every conn_pump_slice_locked serialized all writers
+ * on one mutex (N=4 ~= N=1) and stalled the loop's add/detach behind write
+ * syscalls (#279). The held wq_lock is what keeps the reaper from
+ * detaching/freeing mid-pump -- its trylock fails and it defers the close
+ * (#242) -- so resolve-to-pump has no gap. A detach between pumps only
+ * moves active_fds, which is re-read every iteration, so a conn is at worst
+ * visited twice or next pass. */
 static void writer_drain_owner(server_t *s, int owner, int n, size_t *drained)
 {
     size_t i;
@@ -902,7 +926,20 @@ static void writer_drain_owner(server_t *s, int owner, int n, size_t *drained)
         if (!writer_conn_live(c)) {
             continue;
         }
+        if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+            /* Another writer is pumping this conn, or the reaper is reading
+             * its pending: either way it is being handled, and the next pass
+             * picks up what is left. */
+            continue;
+        }
+        if (s->reg_started) {
+            pthread_mutex_unlock(&s->reg_mu);
+        }
         writer_pump_conn(s, c, drained);
+        pthread_mutex_unlock(&c->wq_lock);
+        if (s->reg_started) {
+            pthread_mutex_lock(&s->reg_mu);
+        }
     }
 }
 
@@ -910,13 +947,13 @@ static size_t writer_drain_slot(server_t *s, int wid)
 {
     int n;
     size_t drained = 0u;
-    size_t i;
 
-    /* MT 2.2: the whole scan holds reg_mu, so the loop's add/detach cannot
-     * move active_fds/by_fd under us (TSan) and a resolved conn cannot be
-     * detached/freed mid-pump. Lock order reg_mu -> wq_lock is fixed: the
-     * pump takes wq_lock inside, never the reverse. The loop never blocks on
-     * reg_mu while holding wq_lock (fill/queue take wq_lock alone). */
+    /* The pass holds reg_mu across the registry scans but never across a
+     * pump: each pump drops it per-conn (see writer_drain_owner), so writers
+     * never serialize on one mutex and the loop's add/detach never waits on
+     * a write syscall. Lock order reg_mu -> wq_lock is fixed throughout:
+     * wq_lock is only ever taken (as a trylock) while reg_mu is held, and
+     * reg_mu is retaken only after wq_lock is released. */
     if (s->reg_started) {
         pthread_mutex_lock(&s->reg_mu);
     }
@@ -925,26 +962,7 @@ static size_t writer_drain_slot(server_t *s, int wid)
         /* Owned slice first: one bounded slice per owned conn (#369), so a
          * fat conn cannot hold this writer past one slice while a thin
          * conn's reply waits. */
-        for (i = 0; i < s->nactive; i++) {
-            int fd;
-            conn_t *c;
-
-            if (i >= s->nactive) {
-                break;
-            }
-            fd = s->active_fds[i];
-            if (writer_owner(fd, n) != wid) {
-                continue;
-            }
-            c = writer_resolve(s, fd);
-            /* No CLOSING skip: writers drain CLOSING conns with queued bytes too
-             * (the 417-flush path leaves them for us). Only the reaper closes; a
-             * failed pump still only marks. */
-            if (!writer_conn_live(c)) {
-                continue;
-            }
-            writer_pump_conn(s, c, &drained);
-        }
+        writer_drain_owner(s, wid, n, &drained);
         if (drained == 0u && n > 1) {
             int w;
             int fat = -1;
