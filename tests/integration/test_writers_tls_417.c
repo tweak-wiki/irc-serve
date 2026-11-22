@@ -295,6 +295,17 @@ static int case_writers_short_pump(void)
         TF_CHECK_MSG(tc_send(&flood, line) == 0,
                      "flood PING %d of %d could not be sent", i,
                      T_FLOOD_LINES);
+        /* Keep the flooder's own socket drained: with the default receive
+         * window the ~123 KiB burst would otherwise sit in the client's
+         * buffer unread, so writers short-write against a full peer and the
+         * EOF waits on a client that never reads. Draining in batches keeps
+         * every reply flowing toward the 417 and the close. */
+        if (i % 20 == 19) {
+            TF_CHECK_MSG(tc_expect(&flood, "PONG", T_IO_MS) == 0,
+                         "no PONG within 20 PINGs at N=4: the drain stalled "
+                         "before the limiter could fire:\n%s",
+                         tc_buffer(&flood));
+        }
     }
 
     /* The reaper cannot close while the backlog drains, so this line is the
