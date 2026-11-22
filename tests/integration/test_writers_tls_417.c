@@ -36,6 +36,14 @@
 #include "harness/tls_fixture.h"
 
 #define T_IO_MS 30000
+/* Deferred-close waits (cases 2a/2b): the reaper defers a CLOSING conn with
+ * queued bytes until the writers drain it or the 2 s deadline lands, so on
+ * a loaded runner these waits outlast the drain round-trips (4 KiB server
+ * sndbuf against ~105 KiB of queued PONGs) and the reaper's own ticks.
+ * Observed stalls to ~35 s on macOS Release -j2; 120 s absorbs them the way
+ * FLOOD_IO_MS does for the 8k-record refusal (#330). ctest's 60 s cap bounds
+ * the actual wait, so a stall past that still goes red as a Timeout. */
+#define T_CLOSE_MS 120000
 #define T_BURST_PINGS 160
 #define T_FLOOD_LINES 300
 #define T_TOKEN_LEN 400
@@ -294,7 +302,7 @@ static int case_writers_short_pump(void)
      * with the socket still full. The 417 is NOT asserted here -- an
      * unread backlog ends in RST, which may drop it. Delivery is the next
      * case's claim, on a connection the test drains. */
-    TF_CHECK_MSG(nf_expect(&node, "conn_reaped:", 15000) == 0,
+    TF_CHECK_MSG(nf_expect(&node, "conn_reaped:", T_CLOSE_MS) == 0,
                  "the flooder was never reaped:\n%s", node.out);
     TF_CHECK_MSG(nf_stop(&node) == 0, "node did not exit cleanly");
     TF_CHECK_MSG(last_partial_writes(node.out, &pw) == 0 && pw >= 1,
@@ -358,7 +366,7 @@ static int case_417_deferred_close(void)
                  tc_buffer(&flood));
     TF_CHECK_MSG(nf_expect(&node, "rate_limited:", T_IO_MS) == 0,
                  "the node never reported the rate limit:\n%s", node.out);
-    rc = tc_expect_eof(&flood, T_IO_MS);
+    rc = tc_expect_eof(&flood, T_CLOSE_MS);
     TF_CHECK_MSG(rc == 0 || rc == -3,
                  "the flooding connection was not closed after the 417 "
                  "(rc=%d)", rc);
