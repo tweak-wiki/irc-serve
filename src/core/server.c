@@ -757,7 +757,7 @@ void server_set_writer_threads(server_t *s, int n)
  * bounded slice (#369), so a conn is still drained by exactly one writer at
  * a time and FIFO holds through the move. Ownership stays a pure function
  * of (fd, N): no migration state, no reg_mu -> wq_lock order change. */
-static void writer_drain_slot(server_t *s, int wid);
+static size_t writer_drain_slot(server_t *s, int wid);
 
 static void *writer_main(void *arg);
 
@@ -908,7 +908,7 @@ static void writer_drain_owner(server_t *s, int owner, int n, size_t *drained)
     }
 }
 
-static void writer_drain_slot(server_t *s, int wid)
+static size_t writer_drain_slot(server_t *s, int wid)
 {
     int n;
     size_t drained = 0u;
@@ -1015,6 +1015,7 @@ static void writer_drain_slot(server_t *s, int wid)
     if (s->reg_started) {
         pthread_mutex_unlock(&s->reg_mu);
     }
+    return drained;
 }
 
 /* MT #366: per-writer thread argument. Carries both ends the thread
@@ -1035,8 +1036,45 @@ static void *writer_main(void *arg)
     unsigned long seen = 0ul;
 
     for (;;) {
-        /* Drain first: queued work is handled without waiting for a wakeup. */
-        writer_drain_slot(s, wid);
+        /* Drain first: queued work is handled without waiting for a wakeup.
+         * Re-scan while the previous pass moved bytes (bounded: a pass that
+         * moves nothing parks, and OPEN backlogs stop after the first
+         * re-scan). A kick landing mid-drain is already paid for by the
+         * re-scan, and a CLOSING backlog (the 417-flush shape) does not wait
+         * one scheduling round per slice while its reply sits queued behind
+         * PONGs. Each pass is still one bounded slice per conn, so a fat
+         * conn cannot hold the writer. */
+        {
+            int extra = 0;
+            int closing_seen = 0;
+            size_t k;
+
+            (void)writer_drain_slot(s, wid);
+            for (k = 0; k < s->nactive; k++) {
+                conn_t *c;
+
+                if (k >= s->nactive) {
+                    break;
+                }
+                c = writer_resolve(s, s->active_fds[k]);
+                if (c != NULL &&
+                    atomic_load_explicit(&c->state, memory_order_acquire) ==
+                        CONN_CLOSING &&
+                    conn_write_pending_locked(c) > 0u) {
+                    closing_seen = 1;
+                    break;
+                }
+            }
+            while (closing_seen && extra < 8) {
+                size_t moved;
+
+                moved = writer_drain_slot(s, wid);
+                if (moved == 0u) {
+                    break;
+                }
+                extra++;
+            }
+        }
         pthread_mutex_lock(&s->wq_mu);
         for (;;) {
             if (s->wq_stop) {
@@ -1212,7 +1250,7 @@ void server_writer_pass(server_t *s, int wid)
     if (s == NULL || !s->writers_started) {
         return;
     }
-    writer_drain_slot(s, wid);
+    (void)writer_drain_slot(s, wid);
 }
 
 int server_writers_start_pool(server_t *s)
