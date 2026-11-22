@@ -120,62 +120,65 @@ static int append(test_client_t *c, const char *bytes, size_t n)
 static int read_once(test_client_t *c, uint64_t deadline, int *eof)
 {
     char chunk[16384];
-    struct timeval tv;
-    fd_set rfds;
-    ssize_t n;
-    uint64_t left;
-    int rc;
 
     if (eof != NULL) {
         *eof = 0;
     }
-    left = (deadline > now_ms()) ? (deadline - now_ms()) : 0;
-    if (left == 0) {
-        return 0;
-    }
+    for (;;) {
+        struct timeval tv;
+        fd_set rfds;
+        ssize_t n;
+        uint64_t left;
+        uint64_t slice;
+        int rc;
 
-    FD_ZERO(&rfds);
-    FD_SET(c->fd, &rfds);
-    /* Capped at TC_PUMP_SLICE_MS, not the whole deadline: see above. The
-     * callers loop until the deadline, so slicing changes nothing but how
-     * often the pump hook below gets to run. */
-    if (left > TC_PUMP_SLICE_MS) {
-        left = TC_PUMP_SLICE_MS;
-    }
-    tv.tv_sec = (time_t)(left / 1000u);
-    tv.tv_usec = (suseconds_t)((left % 1000u) * 1000u);
-
-    rc = select(c->fd + 1, &rfds, NULL, NULL, &tv);
-    if (rc < 0) {
-        return (errno == EINTR) ? 0 : -1;
-    }
-    if (rc == 0) {
-        /* The socket had nothing, but the wait is not over: the deadline may
-         * have room left and the OTHER readers this test owns -- the child
-         * nodes' stdout pipes -- may not. Calling the hook on the timeout branch
-         * as well as the readable one is what keeps them drained for the whole
-         * of a wait that spends most of its time with an idle socket, which is
-         * the normal shape of a cross-node test waiting for a peer to catch up. */
-        pump_hook();
-        return 0;
-    }
-
-    pump_hook();
-    n = recv(c->fd, chunk, sizeof chunk, 0);
-    if (n == 0) {
-        if (eof != NULL) {
-            *eof = 1;
-        }
-        c->closed = 1;
-        return 0;
-    }
-    if (n < 0) {
-        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+        left = (deadline > now_ms()) ? (deadline - now_ms()) : 0;
+        if (left == 0) {
             return 0;
         }
-        return -1;
+        /* One short sleep, not the whole deadline: a wait that spends its
+         * whole deadline with an idle socket must still run the pump hook
+         * below, or a child that fills its stdout pipe mid-wait wedges the
+         * run. Returning 0 still means the deadline passed -- the slicing
+         * is invisible to the callers, whose loops are written against that
+         * contract (tc_drain() in particular returns on 0). */
+        slice = (left > TC_PUMP_SLICE_MS) ? TC_PUMP_SLICE_MS : left;
+        tv.tv_sec = (time_t)(slice / 1000u);
+        tv.tv_usec = (suseconds_t)((slice % 1000u) * 1000u);
+        FD_ZERO(&rfds);
+        FD_SET(c->fd, &rfds);
+        rc = select(c->fd + 1, &rfds, NULL, NULL, &tv);
+        if (rc < 0) {
+            return (errno == EINTR) ? 0 : -1;
+        }
+        if (rc == 0) {
+            /* The socket had nothing, but the wait is not over: the deadline
+             * may have room left and the OTHER readers this test owns -- the
+             * child nodes' stdout pipes -- may not. Calling the hook on the
+             * timeout branch as well as the readable one is what keeps them
+             * drained for the whole of a wait that spends most of its time
+             * with an idle socket, which is the normal shape of a cross-node
+             * test waiting for a peer to catch up. */
+            pump_hook();
+            continue;
+        }
+        pump_hook();
+        n = recv(c->fd, chunk, sizeof chunk, 0);
+        if (n == 0) {
+            if (eof != NULL) {
+                *eof = 1;
+            }
+            c->closed = 1;
+            return 0;
+        }
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            return -1;
+        }
+        return (append(c, chunk, (size_t)n) == 0) ? 1 : -1;
     }
-    return (append(c, chunk, (size_t)n) == 0) ? 1 : -1;
 }
 
 void tc_init(test_client_t *c)
