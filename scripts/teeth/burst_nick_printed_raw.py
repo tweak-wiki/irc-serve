@@ -21,13 +21,13 @@ Note that `apply_nick()`'s line prints the nickname on the branch where
 #134's was -- it is reachable with one parameter, which is why the fault's docstring
 does not have to argue anything.
 """
+from util import apply_fault
+
 p = "src/federation/burst.c"
-s = open(p).read()
 old = '''            fed_obs("[observable] fed_malformed: fd=%d command=SBURSTN nick=%s "
                     "nick_len=%zu nick_bad_bytes=%zu\\n",
                     link->fd, raw, strlen(raw), conn_text_bad_count(raw));'''
 new = '''            /* FAULT: the peer's nickname into printf("%s"), unfiltered. */
             printf("[observable] fed_malformed: fd=%d command=SBURSTN nick=%s\\n",
                    link->fd, raw);'''
-assert old in s, "apply_nick's filtered malformed line not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "apply_nick's filtered malformed line")
