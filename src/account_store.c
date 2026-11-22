@@ -180,7 +180,8 @@ int account_store_add(account_store_t *store, const char *name,
     size_t plen;
     size_t at = 0;
 
-    if (store == NULL || name == NULL || password == NULL || name[0] == '\0') {
+    if (store == NULL || name == NULL || password == NULL || name[0] == '\0' ||
+        password[0] == '\0') {
         return -1;
     }
     nlen = strlen(name);
