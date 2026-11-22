@@ -12,16 +12,18 @@
  * issuer, with real thisUpdate/nextUpdate -- rather than a corrupted something
  * dressed up as a revocation:
  *
- *   GOOD      status GOOD, inside its window          ESTABLISHES
- *   REVOKED   status REVOKED, keyCompromise, signed by the issuing CA
- *                                                        REFUSED
- *   STALE     status GOOD, nextUpdate an hour ago      REFUSED
- *   NO_NEXT_UPDATE  status GOOD, no nextUpdate at all  REFUSED
- *   UNVERIFIED  a correct CertID, signed by a stranger  REFUSED
- *   MISSING   the peer staples nothing
- *                    strict:                            REFUSED
- *                    permissive:                        ESTABLISHES, with a line
- *
+    *   GOOD      status GOOD, inside its window          ESTABLISHES
+     *   REVOKED   status REVOKED, keyCompromise, signed by the issuing CA
+     *                                                        REFUSED, strict or
+     *                                                        permissive: the flag
+     *                                                        waives missing proof,
+     *                                                        never proof of harm
+     *   STALE     status GOOD, nextUpdate an hour ago      REFUSED
+     *   NO_NEXT_UPDATE  status GOOD, no nextUpdate at all  REFUSED
+     *   UNVERIFIED  a correct CertID, signed by a stranger  REFUSED
+     *   MISSING   the peer staples nothing
+     *                    strict:                            REFUSED
+     *                    permissive:                        ESTABLISHES, with a line
  * WHY THE REVOKED CASE IS SIGNED BY THE ISSUING CA, which is the whole difficulty
  * and the reason this file builds responses with OpenSSL's OCSP API instead of
  * corrupting a handshake: a response signed by the issuer, carrying a CertID that
@@ -701,6 +703,21 @@ int main(void)
              "the issuing CA, its CertID matches the verified leaf, it is inside its "
              "freshness window, and it says revoked -- so every other check passes "
              "and the answer is still no");
+
+    /* ============ CASE 2b: REVOKED, PERMISSIVE: STILL REFUSED =================
+     * THE FLAG WAIVES PROOF A CERTIFICATE IS STILL GOOD, never proof it is bad.
+     * A permissive node tolerates a missing, stale or unverifiable staple -- but
+     * a response that verifies and says REVOKED is answered no under either
+     * policy, because accepting it would mean knowingly linking a compromised
+     * key. This is the pair with the missing-permissive case below: that one
+     * establishes, this one does not, and swapping the verdict logic inverts
+     * exactly one of them. */
+    run_case("revoked-permissive", a_crt, a_key, b_crt, b_key, ca_crt,
+             good_a_ocsp, revoked_ocsp, 1, 0, "REVOKED",
+             "--tls-staple-permissive does NOT admit a REVOKED certificate: the "
+             "link is refused with policy=permissive and action=REFUSE, so the "
+             "flag stays an explicit tolerance for missing proof rather than a "
+             "silent downgrade of peer authentication");
 
     /* ================== CASE 3: EXPIRED STAPLE: FRESHNESS IS CHECKED =========== */
     run_case("stale-strict", a_crt, a_key, b_crt, b_key, ca_crt, good_a_ocsp,
