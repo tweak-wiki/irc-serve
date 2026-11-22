@@ -14,10 +14,9 @@ past the end are still inside the process on every ordinary run and the answer o
 differs when they happen to match.
 """
 
-PATH = "tests/harness/sweep_scan.h"
+from util import apply_fault
 
-src = open(PATH).read()
+PATH = "tests/harness/sweep_scan.h"
 old = "    last = hay_len - needle_len;"
 new = "    last = hay_len; /* FAULT: one byte too far */"
-assert old in src, "the bound not found"
-open(PATH, "w").write(src.replace(old, new))
+apply_fault(PATH, old, new, "the bound")
