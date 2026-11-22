@@ -299,15 +299,39 @@ void chan_member_leave(server_t *s, chan_t *ch, conn_t *who, int echo_to_who,
          * this protocol. */
         params[n++] = reason;
     }
-    for (size_t i = 0; i < ch->nmembers; i++) {
-        /* Skip a member the loop has already retired -- see chan_member_live().
-         * `who` itself is in this list on the echo_to_who == 1 path, and on the
-         * teardown path it has already been dropped; the third case is another
-         * member whose conn hit EOF in the same read step. */
-        if (chan_member_live(&ch->members[i]) == 0) {
-            continue;
+    /* #279: queue quietly and kick once per emission, not once per member --
+     * one wq_mu hold for the whole PART, duplicate owner slots once. */
+    {
+        int slots[64];
+        size_t nslots = 0;
+        for (size_t i = 0; i < ch->nmembers; i++) {
+            /* Skip a member the loop has already retired -- see
+             * chan_member_live(). `who` itself is in this list on the
+             * echo_to_who == 1 path, and on the teardown path it has already
+             * been dropped; the third case is another member whose conn hit
+             * EOF in the same read step. */
+            if (chan_member_live(&ch->members[i]) == 0) {
+                continue;
+            }
+            (void)send_line_quiet(s, ch->members[i].c, hostmask, "PART", params, n);
+            {
+                int slot = server_writer_slot(s, ch->members[i].c->fd);
+                size_t k;
+                for (k = 0; k < nslots; k++) {
+                    if (slots[k] == slot) {
+                        break;
+                    }
+                }
+                if (k == nslots) {
+                    if (nslots == 64) {
+                        server_writers_kick_slots(s, slots, nslots);
+                        nslots = 0;
+                    }
+                    slots[nslots++] = slot;
+                }
+            }
         }
-        (void)send_line(s, ch->members[i].c, hostmask, "PART", params, n);
+        server_writers_kick_slots(s, slots, nslots);
     }
     if (echo_to_who != 0) {
         member_drop(ch, who);

@@ -243,6 +243,16 @@ int send_line_tagged(server_t *s, conn_t *dst, const char *prefix,
                      const char *command, const char *const *params, int nparams,
                      const char *tags);
 
+/* Issue #279: quiet twins of send_line()/send_line_tagged(). Same render,
+ * same refusals and counters, but no writer kick: a multi-member emission
+ * queues every member quietly and wakes each touched owner slot once at the
+ * end (server_writers_kick_slots) instead of once per member. */
+int send_line_quiet(server_t *s, conn_t *dst, const char *prefix,
+                    const char *command, const char *const *params, int nparams);
+int send_line_tagged_quiet(server_t *s, conn_t *dst, const char *prefix,
+                           const char *command, const char *const *params,
+                           int nparams, const char *tags);
+
 /* As many middle parameters as the 15-parameter cap leaves room for once
  * <target> and the trailing text have taken two slots. */
 #define REPLY_MAX_MID (IRC_MAX_PARAMS - 2)
