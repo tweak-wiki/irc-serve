@@ -502,11 +502,12 @@ int chan_server_add(chan_t *ch, const char *name)
         strlen(name) > (size_t)CHAN_MAX_SERVER) {
         return -1;
     }
-    /* Idempotent. Two members behind the same server must not create two
-     * entries: the set is a refcount, and the count lives in the origin's
-     * records, so presence is the whole state. */
-    if (chan_server_has(ch, name)) {
-        return 0;
+    /* Idempotent single pass: check-then-add in one walk so burst installs
+     * pay one linear scan per member instead of two. */
+    for (size_t i = 0; i < ch->nservers; i++) {
+        if (chan_same_name(ch->servers[i].name, name)) {
+            return 0;
+        }
     }
     if (ch->nservers == ch->scap) {
         size_t want = (ch->scap == 0) ? 4u : ch->scap * 2u;
