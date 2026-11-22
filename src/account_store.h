@@ -231,13 +231,16 @@ typedef struct account_store account_store_t;
 account_store_t *account_store_load(const char *path);
 
 /* An empty registry, for a caller that wants to build one in memory. Returns
- * NULL only on allocation failure. */
+ * NULL on allocation failure or when no kernel RNG is available -- fail closed
+ * (#305): a registry without fresh salt would hash every boot alike, so there
+ * is no registry at all and the load path refuses. */
 account_store_t *account_store_new(void);
 
 /* Add or replace the record for `name`. Returns 0, or -1 on a NULL/empty
  * `name`, an over-long name or password, a name or password containing a TAB,
- * or a full store. The name is COPIED; `password` is HASHED (iterated salted SHA-256
- * under the record's own salt) and never stored. The timestamp is a
+ * a full store, or when no kernel RNG is available (the record is refused and
+ * left untouched). The name is COPIED; `password` is HASHED (iterated salted
+ * SHA-256 under the record's own salt) and never stored. The timestamp is a
  * C long rather than a string because it is a NUMBER, and a number kept as
  * a string is a number two comparisons from being compared wrongly.
  *

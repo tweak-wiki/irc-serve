@@ -160,11 +160,14 @@ sasl_store_t *sasl_store_load(const char *path);
 
 /* An empty store, for a caller that wants to build one in memory. sasl_state_
  * machine() is that caller, and so is a future phase that loads credentials from
- * somewhere other than a file. Returns NULL only on allocation failure. */
+ * somewhere other than a file. Returns NULL on allocation failure or when no
+ * kernel RNG is available -- fail closed (#305): there is no store at all and
+ * the load path refuses. */
 sasl_store_t *sasl_store_new(void);
 
 /* Add or replace the record for `authcid`. Returns 0, or -1 on a NULL/empty or
- * over-long authcid, an over-long password, or a full store. `password` is
+ * over-long authcid, an over-long password, a full store, or when no kernel RNG
+ * is available (the record is refused and left untouched). `password` is
  * HASHED (iterated salted SHA-256 under the record's own salt) and never stored. */
 int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password);
 
