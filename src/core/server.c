@@ -972,7 +972,38 @@ static void writer_drain_slot(server_t *s, int wid)
             }
             if (fat >= 0 && (best >= (unsigned long long)WRITER_STEAL_BYTES ||
                                writer_owner_closing(s, fat, n))) {
-                writer_drain_owner(s, fat, n, &drained);
+                /* A closing owner's 417 sits behind its whole backlog, and
+                 * this idle pass has nothing else to do: keep passing over
+                 * the stolen owner until its queues are empty (each pass
+                 * still one bounded slice per conn, so a fat conn cannot
+                 * hold the stealer past one slice per visit). Other owners
+                 * stay sticky -- only the stolen owner is re-scanned. */
+                for (;;) {
+                    size_t before_pass = drained;
+                    size_t j;
+                    int more = 0;
+
+                    writer_drain_owner(s, fat, n, &drained);
+                    for (j = 0; j < s->nactive; j++) {
+                        int fd = s->active_fds[j];
+                        conn_t *c;
+
+                        if (j >= s->nactive) {
+                            break;
+                        }
+                        if (writer_owner(fd, n) != fat) {
+                            continue;
+                        }
+                        c = writer_resolve(s, fd);
+                        if (c != NULL && conn_write_pending_locked(c) > 0u) {
+                            more = 1;
+                            break;
+                        }
+                    }
+                    if (drained == before_pass || !more) {
+                        break;
+                    }
+                }
             }
         }
         if (s->writer_bytes != NULL && drained > 0u) {
@@ -1226,17 +1257,35 @@ void server_writers_kick(server_t *s)
     pthread_mutex_unlock(&s->wq_mu);
 }
 
+/* The 417-flush path queues the reply then marks CLOSING and kicks; its
+ * owner may be mid-backlog draining another conn on its slice. Waking every
+ * slot (not just the owner) lets the first free writer steal the closing
+ * backlog via the closing-bypass instead of pacing the reply behind the
+ * owner's whole queue. Wake accounting stays exact: one kick, one consumed
+ * gen per writer. Targeting is preserved for the open-conn case, which keeps
+ * the single-owner wake the #367 test pins. */
 void server_writers_kick_conn(server_t *s, const conn_t *c)
 {
     int slot;
+    int closing;
+    int i;
 
     if (s == NULL || !s->writers_started || c == NULL) {
         return;
     }
-    slot = writer_owner_slot(s, c->fd);
+    closing =
+        (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING);
     pthread_mutex_lock(&s->wq_mu);
-    s->wq_slot_gen[slot]++;
-    pthread_cond_signal(&s->wq_slot_avail[slot]);
+    if (closing && s->writer_threads > 1) {
+        for (i = 0; i < s->writer_threads; i++) {
+            s->wq_slot_gen[i]++;
+            pthread_cond_signal(&s->wq_slot_avail[i]);
+        }
+    } else {
+        slot = writer_owner_slot(s, c->fd);
+        s->wq_slot_gen[slot]++;
+        pthread_cond_signal(&s->wq_slot_avail[slot]);
+    }
     pthread_mutex_unlock(&s->wq_mu);
 }
 
