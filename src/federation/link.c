@@ -325,17 +325,73 @@ void fed_dump(const server_t *s, const char *why)
  * ---------------------------------------------------------------------------
  */
 
-/* The ONE place server_link_t::state is written, which is what core/server.h
- * requires when it says the mirror "is written in exactly one place --
- * fed_link_set_state() -- and never assigned at a call site". hs.state is the
- * truth; this copies it. Every FSM transition in this file goes through the
- * helper below, so a transition cannot forget to resync the mirror, and T6 is
- * then a repair for a bug rather than the mechanism. */
-static void fed_link_set_state(server_link_t *link)
+/* The handshake FSM, inlined here (issue #284).
+ * ---------------------------------------------------------------------------
+ * One implementation, one caller, one field: every transition below writes
+ * server_link_t::state through fed_link_set_state() and nothing else assigns
+ * it, so there is no mirror to go stale. The handshake_state_t values live in
+ * federation_handshake.h for spec tracking, and the handshake_*() functions
+ * after the setter are the same transition rules over a caller-owned context
+ * for tests/federation/test_federate_handshake.c and test_heartbeat.c, which
+ * assert the rules directly. */
+static void fed_link_set_state(server_link_t *link, handshake_state_t state)
 {
     if (link != NULL) {
-        link->state = (int)link->hs.state;
+        link->state = (int)state;
     }
+}
+
+void handshake_init(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return;
+    ctx->state = INIT;
+}
+
+handshake_state_t handshake_state(const handshake_ctx_t *ctx) {
+    if (ctx == NULL) return INIT;
+    return ctx->state;
+}
+
+/* All transition functions share the same reject pattern: return -1 and do
+ * not modify the context when the precondition is unmet or the context is
+ * NULL. A rejected transition is therefore observable via the return value
+ * and leaves the state unchanged. */
+
+int handshake_send(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return -1;
+    if (ctx->state != INIT) return -1;
+    ctx->state = HANDSHAKE_SENT;
+    return 0;
+}
+
+int handshake_receive(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return -1;
+    if (ctx->state != HANDSHAKE_SENT) return -1;
+    ctx->state = ESTABLISHED;
+    return 0;
+}
+
+int handshake_fail(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return -1;
+    if (ctx->state != HANDSHAKE_SENT && ctx->state != ESTABLISHED) return -1;
+    ctx->state = FAILED;
+    return 0;
+}
+
+int handshake_timeout(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return -1;
+    if (ctx->state != HANDSHAKE_SENT) return -1;
+    ctx->state = TIMED_OUT;
+    return 0;
+}
+
+void handshake_reset(handshake_ctx_t *ctx) {
+    if (ctx == NULL) return;
+    ctx->state = INIT;
+}
+
+int heartbeat_check(const handshake_ctx_t *ctx) {
+    if (ctx == NULL) return 1; /* not linked */
+    return (ctx->state == ESTABLISHED) ? 0 : 1;
 }
 
 /* The link a CONNECTION belongs to, or NULL.
@@ -426,8 +482,7 @@ static server_link_t *fed_link_new(server_t *s, const char *name, int initiator)
     link->fd = -1;
     link->initiator = initiator;
     link->burst_done = 0;
-    handshake_init(&link->hs);
-    fed_link_set_state(link);
+    fed_link_set_state(link, INIT);
     s->nlinks++;
     return link;
 }
@@ -705,8 +760,7 @@ static void fed_link_down(server_t *s, server_link_t *link, int announce)
      * what made it safe to share the body in the first place: the epoch is
      * already 0, burst_done is already 0, the stamps are already 0, and
      * fed_burst_abandon() on a link with no transaction open returns at once. */
-    handshake_init(&link->hs);
-    fed_link_set_state(link);
+    fed_link_set_state(link, INIT);
     link->fd = -1;
     /* A link that has gone down has learned nothing about its peer's current
      * boot, and 4.3's burst carries the origin's epoch, so leaving the old one
@@ -1406,8 +1460,8 @@ static int fed_queue_federate(server_t *s, server_link_t *link, conn_t *c)
  *       should be able to silence a bug report. The volume argument that
  *       justifies the per-line trace does not apply to a line that appears
  *       once per rejected connection.
- *   (b) handshake_fail(), so the FSM records that this exchange ended wrongly.
- *       A link whose FSM still said HANDSHAKE_SENT after its connection is
+ *   (b) FAILED, so the state records that this exchange ended wrongly.
+ *       A link whose state still said HANDSHAKE_SENT after its connection is
  *       gone would sit in T2 until the timeout fired and would report a
  *       handshake timeout for something that was rejected in the first
  *       millisecond.
@@ -1434,9 +1488,9 @@ static void fed_reject(server_t *s, server_link_t *link, conn_t *c,
             s->n_link_duplicate++;
         }
     }
-    if (link != NULL) {
-        (void)handshake_fail(&link->hs);
-        fed_link_set_state(link);
+    if (link != NULL && (link->state == (int)HANDSHAKE_SENT ||
+                         link->state == (int)ESTABLISHED)) {
+        fed_link_set_state(link, FAILED);
     }
     if (c != NULL) {
         conn_mark_closing(c);
@@ -1791,9 +1845,9 @@ static void fed_refuse(server_t *s, server_link_t *link, conn_t *c,
  *
  * On the DIALLING side the link is already in HANDSHAKE_SENT -- this is the
  * peer's answer to the claim fed_link_promote() sent -- so only the second
- * transition applies. That is why the handshake_send() below is conditional
+ * transition applies. That is why the send below is conditional
  * rather than unconditional: the FSM has no HANDSHAKE_SENT -> HANDSHAKE_SENT
- * edge, and calling it anyway would be the dialling node rejecting the peer
+ * edge, and taking it anyway would be the dialling node rejecting the peer
  * that answered it correctly. */
 static int fed_claim_accepted(server_t *s, server_link_t *link, conn_t *c,
                               const char *claim, uint64_t peer_epoch)
@@ -1831,44 +1885,29 @@ static int fed_claim_accepted(server_t *s, server_link_t *link, conn_t *c,
          * secret re-run the exchange forever. Nothing to do. */
         return 0;
     }
-    if (handshake_state(&link->hs) == (handshake_state_t)INIT) {
-        if (handshake_send(&link->hs) != 0) {
-            /* A BUG REPORT, not a rejection. The context was INIT one line ago
-             * and the FSM has an INIT -> HANDSHAKE_SENT edge, so a refusal here
-             * is a disagreement between this file and federation_handshake.c. */
-            fed_refuse(s, link, c, claim, "FSM_REFUSED_SEND");
-            return -1;
-        }
-        fed_link_set_state(link);
+    if (link->state == (int)INIT) {
+        fed_link_set_state(link, HANDSHAKE_SENT);
         /* created_ms is stamped here as well as at the dial. The dial stamp is
          * what makes the latch; this one is what makes the field mean "when
          * this link's current attempt began", and it is what 3.4's file map
          * describes. */
         link->created_ms = server_now_ms();
         (void)fed_queue_federate(s, link, c);
-    } else if (handshake_state(&link->hs) != (handshake_state_t)HANDSHAKE_SENT) {
+    } else if (link->state != (int)HANDSHAKE_SENT) {
         /* The link is FAILED or TIMED_OUT -- a terminal state, with the
          * exchange that put it there long since closed. Reached only if
          * something reuses a link that is still in a terminal state, and the
          * correct response is to refuse the connection rather than to drag the
-         * FSM backwards: handshake_reset() exists, and the only caller that
-         * should be resetting a link is fed_link_reset(). */
+         * FSM backwards: fed_link_reset() is the only reset, and it takes the
+         * link back to INIT through fed_link_down(). */
         fed_refuse(s, link, c, claim, "LINK_TERMINAL");
         return -1;
     }
-    if (handshake_receive(&link->hs) != 0) {
-        /* Same reasoning as the send above: the context was HANDSHAKE_SENT one
-         * line ago and the FSM has a HANDSHAKE_SENT -> ESTABLISHED edge, so a
-         * refusal here is a disagreement between this file and
-         * federation_handshake.c, not something the peer did. */
-        fed_refuse(s, link, c, claim, "FSM_REFUSED_RECEIVE");
-        return -1;
-    }
-    /* The mirror, and this one was MISSING for a while with T6 repairing it
-     * silently on the next tick: handshake_receive() moves the FSM and nothing
-     * in this function told the copy. Every FSM transition in this file goes
+    /* HANDSHAKE_SENT -> ESTABLISHED, on both sides: the accepting side sent
+     * its claim above (or already had), the dialling side is answering the
+     * claim fed_link_promote() sent. Every FSM transition in this file goes
      * through fed_link_set_state() and no transition goes around it. */
-    fed_link_set_state(link);
+    fed_link_set_state(link, ESTABLISHED);
     fed_link_established(s, link, c, claim, peer_epoch);
     return 0;
 }
@@ -2305,15 +2344,11 @@ static void fed_link_promote(server_t *s, server_link_t *link, dial_t *d)
     d->fd = -1;
 
     link->fd = c->fd;
-    handshake_init(&link->hs);
+    fed_link_set_state(link, INIT);
     link->created_ms = server_now_ms();
-    if (handshake_send(&link->hs) != 0) {
-        /* A BUG REPORT. The link was INIT and the FSM has the edge; see
-         * fed_refuse(). */
-        fed_refuse(s, link, c, link->name, "FSM_REFUSED_SEND");
-        return;
-    }
-    fed_link_set_state(link);
+    /* INIT -> HANDSHAKE_SENT, unconditional: the state was just set above, so
+     * there is no precondition left to refuse. */
+    fed_link_set_state(link, HANDSHAKE_SENT);
     link->last_sent_ms = link->created_ms;
     link->last_recv_ms = link->created_ms;
     (void)fed_queue_federate(s, link, c);
@@ -2403,8 +2438,9 @@ static void fed_dead(server_t *s, server_link_t *link, conn_t *c,
 
     printf("[observable] link_dead: peer=%s silent_ms=%llu\n", link->name,
            (unsigned long long)silent);
-    (void)handshake_fail(&link->hs);
-    fed_link_set_state(link);
+    if (link->state == (int)HANDSHAKE_SENT || link->state == (int)ESTABLISHED) {
+        fed_link_set_state(link, FAILED);
+    }
     s->n_fed_dead++;
     /* THE FAILOVER ARM, and it is here rather than at the end of the tick for a
      * reason that is about the order of events: fed_link_down() is what clears
@@ -2502,18 +2538,6 @@ void fed_tick(server_t *s, uint64_t now_ms)
                 fed_link_promote(s, link, d);
                 c = server_link_conn(s, link);
             }
-        }
-
-        /* --- T6: resync the mirror ------------------------------------ */
-        /* hs.state is the truth and the mirror is a copy, so a disagreement is
-         * a bug in a writer. Repairing it here is what makes the dump and every
-         * routing predicate trustworthy in the tick after such a bug rather
-         * than permanently -- and it is reported, because a mirror that needed
-         * repairing is a finding and not a detail. */
-        if (link->state != (int)link->hs.state) {
-            printf("[observable] link_state_resync: peer=%s was=%d now=%d\n",
-                   link->name, link->state, (int)link->hs.state);
-            fed_link_set_state(link);
         }
 
         switch (link->state) {
@@ -2627,8 +2651,8 @@ void fed_tick(server_t *s, uint64_t now_ms)
              * AND IT IS ONLY ASKED OF A LINK THAT WAS DIALLING. link->fd is
              * stamped by fed_link_established() and by fed_link_promote() and by
              * nothing else, so a link that is HANDSHAKE_SENT because an INBOUND
-             * FEDERATE arrived -- fed_claim_accepted() runs handshake_send() and
-             * fed_link_set_state() on the way to fed_link_established() -- has
+             * FEDERATE arrived -- fed_claim_accepted() moves the state to
+             * HANDSHAKE_SENT on the way to fed_link_established() -- has
              * fd == -1 for the whole of the exchange while holding a perfectly
              * live conn_t. Reading fd == -1 there as "the socket is gone" would
              * tear down every inbound handshake in flight on its first tick,
@@ -2695,8 +2719,7 @@ void fed_tick(server_t *s, uint64_t now_ms)
             if (fed_hs_due(s, link->created_ms, now_ms) ||
                 (link->fd >= 0 &&
                  (c == NULL || fed_link_of_conn(s, c) != link))) {
-                (void)handshake_timeout(&link->hs);
-                fed_link_set_state(link);
+                fed_link_set_state(link, TIMED_OUT);
                 s->n_fed_hs_timeout++;
                 printf("[observable] link_timeout: peer=%s state=TIMED_OUT "
                        "cause=%s\n",
@@ -2855,10 +2878,9 @@ void fed_tick(server_t *s, uint64_t now_ms)
         default:
             /* FAILED and TIMED_OUT. Both are terminal until something resets
              * them, and in C2 nothing does: a link that failed stays failed and
-             * is reported by the dump, which is the honest state. A switch here
-             * would be a second opinion about handshake_state_t that the FSM
-             * owns, and this file's whole claim about the FSM is that it does
-             * not have one. */
+             * is reported by the dump, which is the honest state. No state of
+             * its own is tracked here beyond this switch, so there is nothing
+             * to disagree with it. */
             break;
         }
 
