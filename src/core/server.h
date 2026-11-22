@@ -854,12 +854,12 @@ struct server {
      * Phase 6 C4: the 4.3 resync, which is a TRANSACTION and therefore has two
      * ways to fail rather than one. federation/burst.c is the only writer.
      *
-     * n_burst_refused counts an OUTBOUND burst this node declined to send
-     * because it did not fit the staging budget (IRC_BURST_MAX_BYTES, which is
-     * half a link's write queue). It is "declined" rather than "failed": nothing
-     * was queued, the link was not touched, and the node's own view is
-     * untouched. A non-zero value is a node whose state is larger than half a
-     * link's queue, which is a finding rather than a statistic.
+    * n_burst_refused counts an OUTBOUND burst this node declined to send
+    * because it did not fit the staging budget (IRC_BURST_MAX_BYTES, which is
+    * four links' write queues). It is "declined" rather than "failed": nothing
+    * was queued, the link was not touched, and the node's own view is
+    * untouched. A non-zero value is a node whose state is larger than four
+    * links' queues, which is a finding rather than a statistic.
      *
      * n_burst_abandoned counts an INBOUND burst discarded before its terminator
      * -- a count mismatch, an over-large transaction, a malformed record, or a
