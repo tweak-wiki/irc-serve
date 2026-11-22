@@ -1103,9 +1103,10 @@ static int member_needs_slow_path(const conn_t *m)
  * take bytes -- without its reports: member selection above (chan_member_live()
  * filters CLOSING before any rendering) makes both arms unreachable, and an
  * unreachable arm that counted would be a counter that can only ever be
- * wrong. Saturation still travels the honest road: server_queue() marks
+ * wrong. Saturation still travels the honest road: server_queue_quiet() marks
  * CLOSING, prints writeq_overflow and counts, exactly as the per-member
- * path reaches it. */
+ * path reaches it -- with no kick; the member walk coalesces one kick per
+ * emission (fanout_kicks) instead of one per member. */
 static int queue_prebuilt(server_t *s, conn_t *m, const char *line, size_t len)
 {
     if (m == NULL || line == NULL || len == 0u) {
@@ -1117,10 +1118,44 @@ static int queue_prebuilt(server_t *s, conn_t *m, const char *line, size_t len)
     if (atomic_load_explicit(&m->state, memory_order_acquire) == CONN_CLOSING) {
         return -1;
     }
-    if (server_queue(s, m, line, len) != 0) {
+    if (server_queue_quiet(s, m, line, len) != 0) {
         return -1;
     }
     return 0;
+}
+
+/* #279: one kick per emission, not per member. Each member walk below queues
+ * quietly and notes its owner's slot here; the walk fires the set once at
+ * the end (one wq_mu hold for the emission, duplicate slots once). A slot
+ * noted without bytes behind it is a spurious wake -- one extra drain scan
+ * that finds nothing -- so walks note only members they actually attempt. */
+#define FANOUT_KICK_BATCH 64
+struct fanout_kicks {
+    server_t *s;
+    int slots[FANOUT_KICK_BATCH];
+    size_t n;
+};
+static void fanout_kick_note(struct fanout_kicks *k, int slot)
+{
+    size_t i;
+
+    for (i = 0; i < k->n; i++) {
+        if (k->slots[i] == slot) {
+            return;
+        }
+    }
+    if (k->n == FANOUT_KICK_BATCH) {
+        server_writers_kick_slots(k->s, k->slots, k->n);
+        k->n = 0;
+    }
+    k->slots[k->n++] = slot;
+}
+static void fanout_kick_fire(struct fanout_kicks *k)
+{
+    if (k->n > 0) {
+        server_writers_kick_slots(k->s, k->slots, k->n);
+        k->n = 0;
+    }
 }
 
 /* Write one line to every local member of `t->chan`, minus `exclude`.
@@ -1199,6 +1234,7 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
     size_t tag_acct_len = 0;
     size_t tag_both_len = 0;
     int tags_ok = 0;
+    struct fanout_kicks kicks;
 
     if (t->chan == NULL || nparams < 0 || nparams >= IRC_MAX_PARAMS) {
         return 0;
@@ -1224,6 +1260,8 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
         tag_acct_len = strlen(tag_acct);
         tag_both_len = strlen(tag_both);
     }
+    kicks.s = s;
+    kicks.n = 0;
     for (size_t i = 0; i < t->chan->nmembers; i++) {
         conn_t *m = t->chan->members[i].c;
         char tags[FANOUT_TAG_BLOCK_MAX + 1u];
@@ -1338,6 +1376,7 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
                     *w++ = '\r';
                     *w++ = '\n';
                     (void)queue_prebuilt(s, m, line, (size_t)(w - line));
+                    fanout_kick_note(&kicks, server_writer_slot(s, m->fd));
                     n++;
                     continue;
                 }
@@ -1353,11 +1392,13 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
         for (int k = 0; k < nuse; k++) {
             all[k + 1] = use[k];
         }
-        (void)send_line_tagged(s, m, prefix, verb, all, nuse + 1,
-                               fanout_tag_block(m, ident, account, tags,
-                                                sizeof tags));
+        (void)send_line_tagged_quiet(s, m, prefix, verb, all, nuse + 1,
+                                     fanout_tag_block(m, ident, account, tags,
+                                                      sizeof tags));
+        fanout_kick_note(&kicks, server_writer_slot(s, m->fd));
         n++;
     }
+    fanout_kick_fire(&kicks);
     return n;
 }
 
@@ -1500,6 +1541,7 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
     size_t tag_acct_len = 0;
     size_t tag_both_len = 0;
     int tags_ok = 0;
+    struct fanout_kicks kicks;
     /* #171: the union de-duplication set -- one bit per registrable fd, cleared
      * once per emission below and set channel-by-channel in the walk. */
     unsigned char seen[SERVER_FD_TABLE / 8];
@@ -1517,6 +1559,8 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
         plain->nparams >= IRC_MAX_PARAMS) {
         return 0;
     }
+    kicks.s = s;
+    kicks.n = 0;
     memset(seen, 0, sizeof seen);
     /* ONE IDENTITY FOR THE WHOLE EMISSION, computed once above the loops for the
      * reason fanout_deliver_forms() computes it once above its switch: the 2.4
@@ -1691,15 +1735,18 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
                         *w++ = '\r';
                         *w++ = '\n';
                         (void)queue_prebuilt(s, m, line, (size_t)(w - line));
+                        fanout_kick_note(&kicks, server_writer_slot(s, m->fd));
                         n++;
                         continue;
                     }
                 }
             }
-            /* THE SLOW PATH: today's per-member render, kept verbatim. */
-            (void)send_line_tagged(s, m, prefix, verb, use, nuse,
-                                   fanout_tag_block(m, &ident, account, tags,
-                                                    sizeof tags));
+            /* THE SLOW PATH: today's per-member render, kept verbatim -- queued
+             * quietly, with the slot noted for the emission's single kick. */
+            (void)send_line_tagged_quiet(s, m, prefix, verb, use, nuse,
+                                         fanout_tag_block(m, &ident, account, tags,
+                                                          sizeof tags));
+            fanout_kick_note(&kicks, server_writer_slot(s, m->fd));
             n++;
         }
         /* #171: publish this channel's members to `seen` AFTER its walk, so the
@@ -1715,6 +1762,7 @@ int fanout_deliver_union_local_gated(server_t *s, struct chan *const *chans,
             }
         }
     }
+    fanout_kick_fire(&kicks);
     return n;
 }
 
