@@ -1509,9 +1509,9 @@ static int server_mask_is_self(const server_t *s, const char *arg)
     return chan_same_name(s->name, arg);
 }
 
-/* Peers with an ESTABLISHED link. The state mirror is compared as an int, which
- * is what federation/link.c does at its three other call sites, because
- * server_link_t::state is documented as mirroring handshake_state_t and is only
+/* Peers with an ESTABLISHED link. The state is compared as an int, which
+ * is what federation/link.c does at its other call sites, because
+ * server_link_t::state holds a handshake_state_t and is only
  * ever written by fed_link_set_state(). */
 static size_t established_peers(const server_t *s)
 {
