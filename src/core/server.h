@@ -1312,12 +1312,17 @@ struct server {
      * predicate, so a kick landing while it is mid-drain (not yet waiting)
      * is still observed -- a blind wait would sleep past it and stall an
      * idle conn's queued bytes with no further kick coming and no
-     * POLLOUT-driven pump at N > 0. wq_wakes counts consumed wakeups per
-     * writer (one kick, one wake); tests pin one wake per queued conn. */
+     * POLLOUT-driven pump at N > 0. #316: a kick to a slot that already has
+     * an unconsumed one (wq_kick_pending) is dropped -- the pending bump
+     * already guarantees its writer will drain everything queued so far, so
+     * a fanout burst to one slot costs one wakeup, not one per member.
+     * wq_wakes counts consumed wakeups per writer; tests pin one wake per
+     * queued conn on an idle pool. */
     pthread_t *writers;          /* N thread handles, or NULL */
     pthread_mutex_t wq_mu;        /* guards wq_stop/slots below */
     pthread_cond_t *wq_slot_avail; /* N per-writer condvars, or NULL */
     unsigned long *wq_slot_gen;   /* N kick generations; wait predicate */
+    unsigned char *wq_kick_pending; /* N flags: 1 while a kick is unconsumed */
     atomic_ullong *wq_wakes;      /* N consumed-wakeup counters, one per writer */
     int       wq_stop;            /* 1: writers exit after draining what they hold */
     int       writers_started;    /* 1: wq_mu/slots/writers are live */
