@@ -104,8 +104,22 @@ override_dh_auto_clean:
 # skips. It would NOT work under `docker run --network host` on a host where another
 # copy of the suite is already binding the same ports, which is the one configuration
 # where this override can fail for a reason that is not a defect in this package.
+# The suite cannot run as root: the node refuses to start uid 0 without --user
+# (priv_drop), and the build usually runs as root (docker's default user), so every
+# binary-spawning test would fail. Weakening the shipped binary for the build's
+# convenience is not on the table, so the test step drops privileges instead.
+# `nobody` exists on every Debian (base-passwd) and `setpriv` is util-linux
+# (Essential), so neither is a new build-dep. The build dir is root-owned, hence
+# the chmod; HOME points at a directory nobody can use rather than at root's.
 override_dh_auto_test:
-	ctest --test-dir "obj-$(DEB_HOST_MULTIARCH)" --output-on-failure --timeout 200
+	if [ "$$(id -u)" = "0" ]; then \
+	  chmod -R a+rwX "obj-$(DEB_HOST_MULTIARCH)" && \
+	  setpriv --reuid=nobody --regid=nogroup --clear-groups \
+	    env HOME=/nonexistent \
+	    ctest --test-dir "obj-$(DEB_HOST_MULTIARCH)" --output-on-failure --timeout 200; \
+	else \
+	  ctest --test-dir "obj-$(DEB_HOST_MULTIARCH)" --output-on-failure --timeout 200; \
+	fi
 
 # dh_auto_install is deliberately NOT overridden. The cmake buildsystem installs
 # through CMake's own install rules, which honour DESTDIR, so the binary lands at
