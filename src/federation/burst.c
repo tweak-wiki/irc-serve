@@ -238,15 +238,6 @@ static int burst_parse_u64(const char *v, uint64_t *out)
     return 0;
 }
 
-static void burst_render_u64(char *out, size_t cap, uint64_t v)
-{
-    /* 24 is 20 digits plus room for a sign this path never emits, and the
-     * buffer is a fixed local at every call site -- so the truncation snprintf
-     * would report cannot happen, and the value is a number rather than a
-     * string a peer could have made longer. */
-    (void)snprintf(out, cap, "%llu", (unsigned long long)v);
-}
-
 /* ---------------------------------------------------------------------------
  * THE STAGING BUFFER -- all-or-nothing, and why it is not the queue
  * ---------------------------------------------------------------------------
@@ -642,8 +633,8 @@ int fed_burst_send(server_t *s, server_link_t *link)
         char epoch[24];
         char nis[24];
 
-        burst_render_u64(epoch, sizeof epoch, s->epoch);
-        burst_render_u64(nis, sizeof nis, (uint64_t)nnicks);
+        irc_format_u64(epoch, sizeof epoch, s->epoch);
+        irc_format_u64(nis, sizeof nis, (uint64_t)nnicks);
         params[0] = epoch;
         params[1] = nis;
         if (stage_line(&st, s, s->name, "SBURST", params, 2) != 0) {
@@ -664,7 +655,7 @@ int fed_burst_send(server_t *s, server_link_t *link)
         if (c == NULL) {
             continue;
         }
-        burst_render_u64(signon, sizeof signon, (uint64_t)c->signon_at);
+        irc_format_u64(signon, sizeof signon, (uint64_t)c->signon_at);
         params[0] = c->nick;
         /* The two fields a connection may not have filled in yet, through the same
          * placeholder as the rest. `nick` needs none: a connection is in the
@@ -697,7 +688,7 @@ int fed_burst_send(server_t *s, server_link_t *link)
         if (ch == NULL) {
             continue;
         }
-        burst_render_u64(when, sizeof when, (uint64_t)ch->topic_when);
+        irc_format_u64(when, sizeof when, (uint64_t)ch->topic_when);
         params[0] = ch->name;
         params[1] = ch->origin;
         /* topic_who is a MIDDLE parameter, so a channel with no topic set has to
@@ -777,10 +768,10 @@ int fed_burst_send(server_t *s, server_link_t *link)
         char cc[24];
         char cm[24];
 
-        burst_render_u64(epoch, sizeof epoch, s->epoch);
-        burst_render_u64(cn, sizeof cn, (uint64_t)nnicks);
-        burst_render_u64(cc, sizeof cc, (uint64_t)nchans);
-        burst_render_u64(cm, sizeof cm, (uint64_t)nmembers);
+        irc_format_u64(epoch, sizeof epoch, s->epoch);
+        irc_format_u64(cn, sizeof cn, (uint64_t)nnicks);
+        irc_format_u64(cc, sizeof cc, (uint64_t)nchans);
+        irc_format_u64(cm, sizeof cm, (uint64_t)nmembers);
         params[0] = epoch;
         params[1] = cn;
         params[2] = cc;
@@ -1693,22 +1684,18 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
  * is NOT an error: it is the state a live SJOIN leaves a member in, and
  * treating it as one would make a perfectly correct peer look broken. Hence
  * NULL, not -1. */
-static char burst_fold(char c)
-{
-    if (c >= 'A' && c <= 'Z') {
-        return (char)(c + ('a' - 'A'));
-    }
-    return c;
-}
 
-/* Folded order on two nicknames: negative/zero/positive like strcmp. */
+/* Folded order on two nicknames: negative/zero/positive like strcmp. The fold
+ * is message.h's irc_ascii_fold() (issue #212); this comparator only adds the
+ * ordering, which the equality-only irc_ascii_same() cannot give the sort and
+ * binary search below. */
 static int burst_fold_cmp(const char *a, const char *b)
 {
     size_t i = 0u;
 
     for (;; i++) {
-        char ca = burst_fold(a[i]);
-        char cb = burst_fold(b[i]);
+        char ca = irc_ascii_fold(a[i]);
+        char cb = irc_ascii_fold(b[i]);
 
         if (ca != cb) {
             return (ca < cb) ? -1 : 1;

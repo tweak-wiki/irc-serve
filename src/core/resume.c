@@ -105,50 +105,6 @@ struct resume_window {
 #define RESUME_SWEEP_DIVISOR ((uint64_t)16u)
 
 /* ---------------------------------------------------------------------------
- * Folds
- * ---------------------------------------------------------------------------
- *
- * THE NODE HAS THREE OF THESE and this is the third, added here for the reason
- * server.c records when it deleted its third copy: each module owns the fold for
- * the field it owns, because a shared "ascii fold" helper is a function whose
- * contract would have to be "fold anything, and the answer is right for
- * nicknames and server names and not for something else", and a contract like
- * that is a contract nobody can check.
- *
- * 2.1's nickname charset folds case; `Bob` and `bob` are one nickname. RFC 1459
- * 2.2's casemapping is `ascii`, and `005` advertises CASEMAPPING=ascii, so this
- * fold is the advertised one and not a guess. The same fold serves the ident
- * because USER has no charset rule of its own and a session that missed on case
- * would be a session a client could not get back by reconnecting correctly. */
-static char resume_fold(char ch)
-{
-    if (ch >= 'A' && ch <= 'Z') {
-        return (char)(ch - 'A' + 'a');
-    }
-    return ch;
-}
-
-static int same_folded(const char *a, const char *b)
-{
-    size_t i;
-
-    if (a == NULL || b == NULL) {
-        return 0;
-    }
-    for (i = 0;; i++) {
-        char ca = resume_fold(a[i]);
-        char cb = resume_fold(b[i]);
-
-        if (ca != cb) {
-            return 0;
-        }
-        if (ca == '\0') {
-            return 1;
-        }
-    }
-}
-
-/* ---------------------------------------------------------------------------
  * THE IDENT HALF OF bounded_copy(), AND WHY IT IS A FUNCTION OF ITS OWN
  * ---------------------------------------------------------------------------
  * `resume_window::ident` is a copy of `conn_t::user`, and `conn_t::user` is the
@@ -287,9 +243,11 @@ static const struct resume_window *resume_find_const(const server_t *s,
     for (i = 0; i < s->nresume_used; i++) {
         const struct resume_window *w = &s->resume_windows[i];
 
-        if (!same_folded(w->nick, c->nick) || !same_folded(w->ident, c->user) ||
-            !same_folded(w->host, c->host) ||
-            !same_folded(w->account, c->account)) {
+        /* Nickname/host comparisons fold via chan_same_name() (issue #212): one
+         * ASCII fold for the node, not one per store. */
+        if (!chan_same_name(w->nick, c->nick) || !chan_same_name(w->ident, c->user) ||
+            !chan_same_name(w->host, c->host) ||
+            !chan_same_name(w->account, c->account)) {
             continue;
         }
         if (now_ms < w->dropped_ms || (now_ms - w->dropped_ms) >= s->resume_window_ms) {
@@ -315,9 +273,9 @@ static struct resume_window *resume_find(server_t *s, const conn_t *c,
     for (i = 0; i < s->nresume_used; i++) {
         struct resume_window *w = &s->resume_windows[i];
 
-        if (!same_folded(w->nick, c->nick) || !same_folded(w->ident, c->user) ||
-            !same_folded(w->host, c->host) ||
-            !same_folded(w->account, c->account)) {
+        if (!chan_same_name(w->nick, c->nick) || !chan_same_name(w->ident, c->user) ||
+            !chan_same_name(w->host, c->host) ||
+            !chan_same_name(w->account, c->account)) {
             continue;
         }
         /* THE KEY AND NOTHING ELSE, and that is the difference from
@@ -748,7 +706,7 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
          * an account (an unauthenticated session) keeps the old behaviour, so
          * the feature still works for clients that do not use SASL; the
          * residual shared-host risk for those is documented in SECURITY.md. */
-        if (account[0] != '\0' && !same_folded(account, c->account)) {
+        if (account[0] != '\0' && !chan_same_name(account, c->account)) {
             flags = 0u;
         }
         if (chans[i].flags != 0u && flags != chans[i].flags) {
@@ -871,7 +829,7 @@ int resume_holds(const server_t *s, const char *chan)
             continue;
         }
         for (k = 0; k < w->nchans; k++) {
-            if (same_folded(w->chans[k].name, chan)) {
+            if (chan_same_name(w->chans[k].name, chan)) {
                 return 1;
             }
         }
