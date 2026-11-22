@@ -349,7 +349,7 @@ static void send_welcome(server_t *s, conn_t *c)
      * client that asked is told `ACCOUNT *` on a node with no registry, because
      * "you are not associated with an account" is a true and useful answer rather
      * than an absence. */
-    if (cap_account_notify_enabled(c) != 0) {
+    if (cap_enabled(c, CAP_ACCOUNT_NOTIFY) != 0) {
         account_notify_current(s, c);
     }
 }
@@ -1213,7 +1213,7 @@ static void handle_setname(server_t *s, conn_t *c, const message_t *m)
                c->fd, c->nick, m->nparams);
         return;
     }
-    if (cap_setname_enabled(c) == 0) {
+    if (cap_enabled(c, CAP_SETNAME) == 0) {
         /* THE SILENT REFUSAL. No reply, no change, and the only trace is this line,
          * which is the same observable output every other refusal in this file uses.
          * It is deliberately NOT a 417 and NOT a 482: a client that did not ask for

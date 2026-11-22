@@ -393,7 +393,7 @@ static const char *names_entry(const conn_t *dst, const char *nick,
                                const char *ident, const char *host, char *out,
                                size_t cap)
 {
-    const int long_form = cap_userhost_in_names_enabled(dst);
+    const int long_form = cap_enabled(dst, CAP_USERHOST_IN_NAMES);
 
     if (out == NULL || cap == 0u || nick == NULL) {
         return "";
@@ -527,7 +527,7 @@ static void send_names_list(server_t *s, conn_t *dst, const chan_t *ch)
      * `PREFIX=(ov)@+` is what says which sigils exist and what they mean, and it
      * is true either way -- multi-prefix changes how MANY are drawn, not which
      * sigils exist. See cap.h. */
-    const int multiprefix = cap_multiprefix_enabled(dst);
+    const int multiprefix = cap_enabled(dst, CAP_MULTIPREFIX);
     int produced = 0;
 
     for (int group = 0; group < 3; group++) {
