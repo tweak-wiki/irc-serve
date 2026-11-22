@@ -208,9 +208,11 @@ static const struct ps_shape k_shapes[] = {
      * the code reads, which is the same mistake as the parameter index. */
     { ":" PEER " ADVERTISE 10 irc.\x01 127.0.0.1 1234",
       "fed_advertise_refused:", "name=-", "peer=", 0 },
-    /* A SHUTDOWN naming a peer that is not this one, so the node reports it and
-     * refuses rather than leaving -- which keeps the link for the probes after it. */
-    { ":" PEER " SHUTDOWN irc.\x01 :going away", "fed_shutdown", NULL, NULL, 0 },
+    /* A SQUIT NAMING THIS NODE, so the node reports it and refuses rather than
+     * purging itself -- which keeps the link for the probes after it. A
+     * malformed SHUTDOWN used to serve here, but since #329 it tears the link
+     * down, which a mid-sweep probe must not do. */
+    { ":" PEER " SQUIT " NAME_A " :reason \x01 here", "fed_squit_refused", NULL, NULL, 0 },
     /* 0x00, AND IT IS HERE RATHER THAN IN THE LOOP BELOW, because it is the one
      * marker byte this framing layer cannot deliver at all: 3.2 refuses an embedded
      * NUL, so a line containing one is never a line. The client sweep has the same
