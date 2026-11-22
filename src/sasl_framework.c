@@ -209,10 +209,9 @@ static void sasl_wipe(void *p, size_t n)
     }
 }
 
-/* One salt per store, generated in sasl_store_new(): every *_load() builds its
- * store there, so every boot hashes under a fresh salt, and the in-memory
- * *_add() path hashes under the same one -- which is what makes the two agree.
- * Salt per boot is enough because the stores are per node (see the header). */
+/* One salt per RECORD, drawn fresh in sasl_store_add(): two records with the
+ * same password hash differently, so the store no longer reveals who shares a
+ * password. store->salt below survives only as the dummy-compare salt. */
 static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 {
 #if defined(__APPLE__)
@@ -264,18 +263,30 @@ static void sasl_gen_salt(unsigned char salt[SASL_SALT_LEN])
 #endif
 }
 
-/* SHA-256(salt || password). The heap's only copy of the secret is this
- * digest; the password bytes themselves are never stored. */
+/* Iterated SHA-256(salt || password): one fast round is GPU-brute-forceable,
+ * so the hash stretches over SASL_HASH_ROUNDS rounds. 8192 rounds cost a
+ * login well under a millisecond and a full 64-record load a few of them,
+ * while forcing the same factor onto every offline guess. */
+#define SASL_HASH_ROUNDS 8192u
 static void sasl_hash_password(const unsigned char salt[SASL_SALT_LEN],
                                const char *password,
                                unsigned char out[SASL_HASH_LEN])
 {
     sasl_sha256_t ctx;
+    size_t plen = strlen(password);
+    unsigned int r;
 
     sasl_sha256_init(&ctx);
     sasl_sha256_update(&ctx, salt, SASL_SALT_LEN);
-    sasl_sha256_update(&ctx, (const unsigned char *)password, strlen(password));
+    sasl_sha256_update(&ctx, (const unsigned char *)password, plen);
     sasl_sha256_final(&ctx, out);
+    for (r = 1u; r < SASL_HASH_ROUNDS; r++) {
+        sasl_sha256_init(&ctx);
+        sasl_sha256_update(&ctx, out, SASL_HASH_LEN);
+        sasl_sha256_update(&ctx, salt, SASL_SALT_LEN);
+        sasl_sha256_update(&ctx, (const unsigned char *)password, plen);
+        sasl_sha256_final(&ctx, out);
+    }
     /* The tail of the password may still sit in the context's block. */
     sasl_wipe(&ctx, sizeof ctx);
 }
@@ -285,7 +296,9 @@ static void sasl_hash_password(const unsigned char salt[SASL_SALT_LEN],
  * gone too, upgrade to a salted file format. */
 struct sasl_record {
     char authcid[SASL_MAX_AUTHCID + 1];
-    unsigned char phash[SASL_HASH_LEN]; /* SHA-256(salt || password) */
+    unsigned char salt[SASL_SALT_LEN]; /* fresh per record, so identical
+                                        * passwords hash differently */
+    unsigned char phash[SASL_HASH_LEN]; /* iterated SHA-256(salt || password) */
 };
 
 struct sasl_store {
@@ -373,7 +386,7 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
     size_t at = 0;
 
     if (store == NULL || authcid == NULL || password == NULL ||
-        authcid[0] == '\0') {
+        authcid[0] == '\0' || password[0] == '\0') {
         return -1;
     }
     alen = strlen(authcid);
@@ -401,7 +414,8 @@ int sasl_store_add(sasl_store_t *store, const char *authcid, const char *passwor
         store->n++;
     }
     memcpy(store->rec[at].authcid, authcid, alen + 1u);
-    sasl_hash_password(store->salt, password, store->rec[at].phash);
+    sasl_gen_salt(store->rec[at].salt);
+    sasl_hash_password(store->rec[at].salt, password, store->rec[at].phash);
     return 0;
 }
 
@@ -746,10 +760,11 @@ int sasl_plain_verify(const sasl_store_t *store,
         return 0;
     }
 
-    /* The offered password is hashed ONCE, under the store's salt; every
-     * comparison below is hash-against-hash, so the timing argument in the
-     * header holds over digests exactly as it did over passwords. */
-    sasl_hash_password(store->salt, passwd, want);
+    /* Each record carries its own salt, so the offered password is hashed under
+     * the candidate record's salt; every comparison is still hash-against-hash.
+     * The dummy keeps the store salt so a miss still pays a hash and a compare.
+     * Names are unique (add overwrites), so at most one record hashes per call.
+     */
     sasl_hash_password(store->salt, k_dummy_pass, dummy);
 
     /* The walk does not stop at a match. Two reasons, and both are timing: a
@@ -758,6 +773,7 @@ int sasl_plain_verify(const sasl_store_t *store,
      * operator list has turned a credential store into an index. */
     for (size_t i = 0; i < store->n; i++) {
         if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
+            sasl_hash_password(store->rec[i].salt, passwd, want);
             saw_match |=
                 (unsigned)secret_const_time_eq(store->rec[i].phash, want, SASL_HASH_LEN);
         }
