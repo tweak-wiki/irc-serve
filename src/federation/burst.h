@@ -214,10 +214,10 @@
  *   cap and is NOT what the budget turns on. SBURST and SBURSTE carry only
  *   numerics and are under 320.
  *
- *   THE BUDGET TURNS ON THE TOTAL, AND +64 ON A MEMBER LINE IS 64 ON EVERY MEMBER
- *   of every channel in the burst. On the 500-member channel the header prices,
- *   that is 32 KiB more of transaction -- which is 2% of the 128 KiB staging
- *   bound, so it does not change what fits, only what it costs to fit it.
+*   THE BUDGET TURNS ON THE TOTAL, AND +64 ON A MEMBER LINE IS 64 ON EVERY MEMBER
+*   of every channel in the burst. On the 500-member channel the header prices,
+*   that is 32 KiB more of transaction -- which is 3.1% of the 1 MiB staging
+*   bound, so it does not change what fits, only what it costs to fit it.
  *
  * 753 and 787 against 8192 is 9.2% and 9.6% of the cap, so LINE LENGTH IS NOT
  * THE BURST'S CONSTRAINT and a per-line check would be a formality. THE REAL
@@ -228,11 +228,15 @@
  * queue does not degrade, it DROPS, so the burst would be truncated in the
  * middle of a transaction and the receiver would discard the whole thing.
  *
- * So a burst is assembled into a bounded staging buffer and the whole
- * transaction is refused rather than truncated. Half the queue, not all of it:
- * a resync is worth at most half a link's queue so that a live message is never
- * starved by one, and a message is the thing 3.1 routes in steady state while a
- * burst is a once-per-establishment event.
+* So a burst is assembled into a bounded staging buffer and the whole
+* transaction is refused rather than truncated. Four queues, not half of one:
+* a resync is worth at most four links' queues of STAGING -- heap this node
+* owns, which costs nothing on the wire -- because 800 worst-case nicks are
+* ~630 KiB and half a queue refused every one of them past ~280 (#330). What
+* keeps a live message from starving behind one is not the staging bound but
+* the flush: the sender queues no more than a quarter queue before pumping
+* (see stage_flush's chunking), and a message is the thing 3.1 routes in
+* steady state while a burst is a once-per-establishment event.
  */
 #ifndef IRC_FEDERATION_BURST_H
 #define IRC_FEDERATION_BURST_H
@@ -247,27 +251,28 @@
  *
  * CONN_WQ_MAX is 3.4's "~256 KB per connection", and it is the number that
  * matters because a peer link IS a conn_t (2.3) -- the burst is queued through
- * server_queue() and is refused by the same bound as everything else. Half of
- * it is the fraction: see the header's argument, which is that a burst must
- * never be able to fill a link's queue.
+ * server_queue() and is refused by the same bound as everything else. Four of
+ * it is the multiple: see the header's argument, which is that 800 worst-case
+ * nicks must fit staging with room for their channels (#330), while the
+ * quarter-queue flush chunks keep the QUEUE from ever holding that much.
  *
- * WRITTEN AS THE EXPRESSION rather than as 131072 for the reason
+ * WRITTEN AS THE EXPRESSION rather than as 1048576 for the reason
  * IRC_FED_DEAD_MS is written as one: changing the queue bound must move this
  * with it, and a copy of the number is a number that agrees today and disagrees
  * the day somebody raises CONN_WQ_MAX for a client-facing reason. */
-#define IRC_BURST_MAX_BYTES (CONN_WQ_MAX / 2u)
+#define IRC_BURST_MAX_BYTES (CONN_WQ_MAX * 4u)
 
 /* THE SHADOW'S CHANNEL COUNT, CEILINGED EXPLICITLY (#122), and it is defence in
  * depth rather than the bound.
  *
  * WHY THERE IS A CEILING AT ALL WHEN THE BYTE BUDGET ALREADY BOUNDS IT. The
  * budget is real and it does hold: shadow_charge() runs before every record and
- * IRC_BURST_MAX_BYTES is 131072, while the SMALLEST possible SBURSTC charges 204
+ * IRC_BURST_MAX_BYTES is 1048576, while the SMALLEST possible SBURSTC charges 204
  * bytes -- IRC_MAX_TAG_OVERHEAD (179, frozen) + a one-byte origin + the seven-byte
  * verb + six parameters of one byte each with their six separators + the four the
  * accounting adds for CRLF and colons. So at the shipped budget the byte
- * arithmetic caps the channel count at 131072/204 = 642, and the staging array
- * cannot exceed 642 entries however many records a peer sends.
+ * arithmetic caps the channel count at 1048576/204 = 5140, and the staging array
+ * cannot exceed 5140 entries however many records a peer sends.
  *
  * BUT THAT BOUND IS ARITHMETIC ABOUT A CHARGE, NOT SOMETHING THE CODE STATES, and
  * that is a different kind of thing to rely on. It holds only as long as three
@@ -279,9 +284,9 @@
  * no log line, just a larger array.
  *
  * SO THIS IS THE BOUND THE CODE STATES, and the byte budget is the one that does
- * the work. 1024 is 1.59x the 642 the charge arithmetic allows at the shipped
+ * the work. 8192 is 1.59x the 5140 the charge arithmetic allows at the shipped
  * budget, so the ceiling cannot bind there; the cost of that headroom is at most
- * 382 unused burst_chan_t slots, about 196 KiB on a 64-bit build and nothing at
+ * 3052 unused burst_chan_t slots, about 1.5 MiB on a 64-bit build and nothing at
  * all, since the array only grows to what a transaction actually sends.
  *
  * WHAT IT IS FOR is the day the arithmetic moves. A burst record is a per-record
@@ -294,7 +299,7 @@
  * short by a local ceiling and a transaction cut short by a peer's volume are the
  * same event from this node's point of view: this node did not take the whole
  * thing, so it applies none of it. */
-#define IRC_BURST_MAX_CHANS ((size_t)1024u)
+#define IRC_BURST_MAX_CHANS ((size_t)8192u)
 
 /* The shipped bound for THIS NODE, and a per-node override of it. 0 keeps the
  * current value, which server_init() seeded with the built-in. Call it before
@@ -303,9 +308,9 @@
  *
  * WHY THERE IS A KNOB AT ALL, stated rather than smuggled: IRC_BURST_MAX_BYTES
  * is the SHIPPED bound and a deployment is what it says. Proving the refusal
- * path without a knob needs a fixture that actually exceeds half a link's
- * queue, and at the worst-case line sizes above that is roughly 170 records --
- * so a few hundred client connections and channels, on every run, forever, to
+ * path without a knob needs a fixture that actually exceeds four links'
+ * queues, and at the worst-case line sizes above that is roughly 1300 records --
+ * so over a thousand client connections and channels, on every run, forever, to
  * exercise one branch. This is the same per-node override the four link
  * timers have and for the same reason (see the #ifndef block at the top of
  * federation/link.h): a build default serves a deployment and a per-node
