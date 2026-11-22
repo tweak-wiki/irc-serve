@@ -52,10 +52,13 @@ int main(void)
                  "the honest client's PING was never answered with a PONG.\n"
                  "  saw: %s", tc_buffer(&honest));
 
-    /* The flooder: registers, then spends past its burst in one back-to-back
-     * run. The sends fit in the socket buffers, so no send can fail because
-     * the server closed early -- the close only happens after the server has
-     * read past the burst. */
+    /* The flooder: registers, then spends past its burst. The sends usually
+     * fit in the socket buffers, but they do not have to: a descheduled
+     * client can be outrun by the server, and a send that lands after the
+     * close then fails with EPIPE. That is not lost input: the only close
+     * path is the limiter, which flushes the 417 first, so a failed send
+     * proves the 417 below is already on its way and the loop stops early
+     * instead of failing on its own input. */
     tc_init(&flood);
     TF_CHECK_MSG(tc_connect(&flood, node.port) == 0, "flood connect failed");
     TF_CHECK_MSG(tc_send(&flood, "NICK flooder") == 0, "flood NICK failed");
@@ -64,8 +67,9 @@ int main(void)
     TF_CHECK_MSG(tc_expect(&flood, " 001 ", T_IO_MS) == 0,
                  "the flooding client never registered");
     for (i = 0; i < FLOOD_LINES; i++) {
-        TF_CHECK_MSG(tc_send(&flood, "PING :flood") == 0,
-                     "flood PING %d of %d could not be sent", i, FLOOD_LINES);
+        if (tc_send(&flood, "PING :flood") != 0) {
+            break;
+        }
     }
 
     /* One 417 on the wire, carrying the reason. The " 417 " needle is the
@@ -114,7 +118,11 @@ int main(void)
     /* #224: rejected lines spend too. "@" frames fine but fails
      * message_parse_n (empty tag block), so 300 of them back-to-back must
      * trip the same 417 and the same close as valid lines -- parser work is
-     * charged like dispatch work. */
+     * charged like dispatch work. Rejected lines earn no reply, so there is
+     * no PONG backpressure to keep the client ahead: the server routinely
+     * outruns it and a late send fails on the already-closed socket. Same
+     * shape as above -- the close proves the 417 was flushed first, so stop
+     * and let the assertions below verify it. */
     tc_init(&badflood);
     TF_CHECK_MSG(tc_connect(&badflood, node.port) == 0, "badflood connect failed");
     TF_CHECK_MSG(tc_send(&badflood, "NICK badflooder") == 0, "badflood NICK failed");
@@ -123,8 +131,9 @@ int main(void)
     TF_CHECK_MSG(tc_expect(&badflood, " 001 ", T_IO_MS) == 0,
                  "the invalid-line client never registered");
     for (i = 0; i < FLOOD_LINES; i++) {
-        TF_CHECK_MSG(tc_send(&badflood, "@") == 0,
-                     "badflood line %d of %d could not be sent", i, FLOOD_LINES);
+        if (tc_send(&badflood, "@") != 0) {
+            break;
+        }
     }
     TF_CHECK_MSG(tc_expect(&badflood, " 417 ", T_IO_MS) == 0,
                  "the invalid-line flood was never refused with 417: rejected "
