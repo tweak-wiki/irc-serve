@@ -972,38 +972,10 @@ static size_t writer_drain_slot(server_t *s, int wid)
             }
             if (fat >= 0 && (best >= (unsigned long long)WRITER_STEAL_BYTES ||
                                writer_owner_closing(s, fat, n))) {
-                /* A closing owner's 417 sits behind its whole backlog, and
-                 * this idle pass has nothing else to do: keep passing over
-                 * the stolen owner until its queues are empty (each pass
-                 * still one bounded slice per conn, so a fat conn cannot
-                 * hold the stealer past one slice per visit). Other owners
-                 * stay sticky -- only the stolen owner is re-scanned. */
-                for (;;) {
-                    size_t before_pass = drained;
-                    size_t j;
-                    int more = 0;
-
-                    writer_drain_owner(s, fat, n, &drained);
-                    for (j = 0; j < s->nactive; j++) {
-                        int fd = s->active_fds[j];
-                        conn_t *c;
-
-                        if (j >= s->nactive) {
-                            break;
-                        }
-                        if (writer_owner(fd, n) != fat) {
-                            continue;
-                        }
-                        c = writer_resolve(s, fd);
-                        if (c != NULL && conn_write_pending_locked(c) > 0u) {
-                            more = 1;
-                            break;
-                        }
-                    }
-                    if (drained == before_pass || !more) {
-                        break;
-                    }
-                }
+                /* A closing owner's 417 sits behind its whole backlog:
+                 * the bypass above lets an idle writer pick it up this
+                 * pass instead of waiting for the stickiness floor. */
+                writer_drain_owner(s, fat, n, &drained);
             }
         }
         if (s->writer_bytes != NULL && drained > 0u) {
@@ -1037,46 +1009,9 @@ static void *writer_main(void *arg)
 
     for (;;) {
         /* Drain first: queued work is handled without waiting for a wakeup.
-         * Re-scan while a CLOSING conn still holds queued bytes (the
-         * 417-flush shape): the reply the client waits for sits behind the
-         * backlog, so an idle pass must not park between slices. OPEN
-         * backlogs stop after the first extra pass -- one re-scan pays for
-         * a kick that landed mid-drain, then the writer parks instead of
-         * spinning on a live flood. Each pass is still one bounded slice
-         * per conn, so a fat conn cannot hold the writer. */
-        {
-            int extra = 0;
-
-            (void)writer_drain_slot(s, wid);
-            for (;;) {
-                size_t k;
-                int closing = 0;
-
-                for (k = 0; k < s->nactive; k++) {
-                    conn_t *c;
-
-                    if (k >= s->nactive) {
-                        break;
-                    }
-                    c = writer_resolve(s, s->active_fds[k]);
-                    if (c != NULL &&
-                        atomic_load_explicit(&c->state,
-                                             memory_order_acquire) ==
-                            CONN_CLOSING &&
-                        conn_write_pending_locked(c) > 0u) {
-                        closing = 1;
-                        break;
-                    }
-                }
-                if (!closing || extra >= 8) {
-                    break;
-                }
-                if (writer_drain_slot(s, wid) == 0u) {
-                    break;
-                }
-                extra++;
-            }
-        }
+         * One bounded slice per conn per pass (#369); a kick that landed
+         * mid-drain is consumed by the next pass's generation check. */
+        (void)writer_drain_slot(s, wid);
         pthread_mutex_lock(&s->wq_mu);
         for (;;) {
             if (s->wq_stop) {
