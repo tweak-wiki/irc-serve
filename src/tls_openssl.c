@@ -296,6 +296,9 @@ static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
      * second read into the SAME buf) is exactly what the advancing offset
      * avoids. Caller holds wq_lock throughout, so the drain is atomic with
      * the record that revealed it. */
+    /* Clear-before (#335): the ERR queue is per-thread and sticky, so a failure
+     * below must attribute THIS call's reason, not a stale one left behind. */
+    ERR_clear_error();
     int n = SSL_read(ssl, buf, (int)len);
     if (n > 0 && (size_t)n < len) {
         /* shortcut: only loop while OpenSSL says bytes remain; one extra call
@@ -306,6 +309,7 @@ static ssize_t tls_recv(conn_t *c, void *buf, size_t len)
             if (room == 0u || room > (size_t)INT_MAX) {
                 break;
             }
+            ERR_clear_error();
             m = SSL_read(ssl, (char *)buf + n, (int)room);
             if (m <= 0) {
                 break; /* WANT_READ or error: report what we have; next call resumes */
@@ -356,6 +360,7 @@ static ssize_t tls_send(conn_t *c, const void *buf, size_t len)
      * that has just been handed over. Without this arm the loop would have nothing
      * to call, and readiness intent would have nothing to publish. */
     if (SSL_in_init(ssl) != 0) {
+        ERR_clear_error();
         int rc = SSL_do_handshake(ssl);
 
         if (rc != 1) {
@@ -383,6 +388,7 @@ static ssize_t tls_send(conn_t *c, const void *buf, size_t len)
         return TRANSPORT_FATAL;
     }
     {
+        ERR_clear_error();
         int n = SSL_write(ssl, buf, (int)len);
 
         if (n > 0) {
@@ -926,6 +932,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
     char this_text[48];
     char next_text[48];
 
+    ERR_clear_error();
     leaf = SSL_get1_peer_certificate(ssl);
     if (leaf == NULL) {
         /* UNREACHABLE ON A VERIFIED LINK, and refused anyway for the reason
