@@ -808,6 +808,11 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
+    if (m->nparams > 2) {
+        (void)reply_refused(s, c, "JOIN", "TOO_MANY_PARAMS", "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
     if (n <= 0) {
@@ -1231,6 +1236,11 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
 
     if (m->nparams < 1) {
         (void)reply_refused(s, c, "PART", NULL, "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
+    if (m->nparams > 2) {
+        (void)reply_refused(s, c, "PART", "TOO_MANY_PARAMS", "461", NULL, 0,
                             "Not enough parameters");
         return;
     }
