@@ -812,7 +812,7 @@ static void child_tick(server_t *s, uint64_t now_ms)
  * CHAN_MAX_TOPIC, and no correctly behaving sender produces one. 4.3.1 prices the
  * <topic> parameter at CHAN_MAX_TOPIC + 1 on the wire, so this node's own
  * federation_resync() cannot emit it however it is configured -- which is exactly
- * why the bug this case exists for was invisible: burst_copy() REFUSES rather than
+ * why the bug this case exists for was invisible: bounded_copy() REFUSES rather than
  * truncates, the refusal left the field empty, the empty field fitted, and the
  * transaction counted as applied with dropped=0.
  *
@@ -1005,7 +1005,7 @@ static void send_overlong_member_burst(server_t *s, server_link_t *link)
  *
  * AND THE DELIBERATE OMISSION OF A LENGTH-BASED ATTACK: a `<host>` longer than
  * `fed_rnick::host` is refused too, and refused for a reason this case is not about --
- * `nickreg_copy()` would TRUNCATE it, which is the only cut in this file. It is left
+ * `bounded_copy()` would TRUNCATE it, which is the only cut in this file. It is left
  * for the width arm above to cover.
  */
 static void send_hostile_burst(server_t *s, server_link_t *link)
@@ -2729,7 +2729,7 @@ static void case_foreign_records_refused(void)
  * #122: A TOPIC WIDER THAN CHAN_MAX_TOPIC IS REFUSED, COUNTED, AND KEPT FROM
  * BECOMING A DIFFERENT TOPIC
  * ---------------------------------------------------------------------------
- * What used to happen: apply_chan() discarded burst_copy()'s result, so a 300-byte
+ * What used to happen: apply_chan() discarded bounded_copy()'s result, so a 300-byte
  * topic left `sc->topic` empty, the empty string fitted chan_set_topic() without
  * complaint, and the terminator's counts matched -- so the transaction committed and
  * reported `dropped=0`. The node had silently discarded a field a client can read
@@ -2752,7 +2752,7 @@ static void case_foreign_records_refused(void)
  *      the next 332, including every member who joins later.
  *
  * AND THE NEGATIVE, which is what makes assertions 1 and 3 worth having: put the
- * `(void)` back on burst_copy() in apply_chan() and the mask stays zero, so no
+ * `(void)` back on bounded_copy() in apply_chan() and the mask stays zero, so no
  * `fed_burst_chan_refused` line is printed and dropped=0, and this case fails on
  * both counts. Nothing else in the file notices: the record still installs and the
  * terminator's counts still match, which is exactly why the defect survived.
