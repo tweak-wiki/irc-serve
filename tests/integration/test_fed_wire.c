@@ -421,12 +421,7 @@ static void peer_link_up(server_t *s, wire_t *far, int listen_fd, int port)
      * it is stored on the link rather than looked up again from a name. */
     memcpy(&l->addr, &peer_addr, sizeof peer_addr);
     l->addrlen = peer_alen;
-    /* hs is the FSM context and `state` mirrors it -- written here the way
-     * fed_link_set_state() will, through hs first, so the mirror cannot be set
-     * without the context. */
-    handshake_init(&l->hs);
-    l->hs.state = ESTABLISHED;
-    l->state = (int)l->hs.state;
+    l->state = (int)ESTABLISHED;
     /* The peer's epoch is 0: this fixture has no handshake, so the peer has not
      * said. Nothing in the forwarding path reads it in this commit, and a link
      * that is ESTABLISHED with epoch 0 is exactly the "not yet told" case

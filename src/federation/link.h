@@ -777,7 +777,6 @@ server_link_t *fed_link_configure(server_t *s, const char *name,
  *        is not a connection: it is not in by_fd, there is no conn_t, and
  *        server.c already closes exactly these on the same grounds.
  *   - promotion of a link whose dial reported DIAL_CONNECTED.
- *   - T6  resynchronise server_link_t::state from hs.state when they disagree.
  *   - T2  HANDSHAKE_SENT older than IRC_FED_HS_TIMEOUT_MS.
  *   - T3  ESTABLISHED and due a keepalive.
  *   - T4  ESTABLISHED and silent for longer than IRC_FED_DEAD_MS.
