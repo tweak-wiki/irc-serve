@@ -56,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/chan_verbs.h"
 #include "core/channel.h"
 #include "core/commands.h"
 #include "core/server.h"
@@ -1175,6 +1176,83 @@ static void test_names_and_list(nf_node_t *node)
     tc_close(&lurker.c);
 }
 
+/* #220: a bare LIST / bare NAMES stops at CHAN_ENUM_MAX channels and says so.
+ * Joins CHAN_ENUM_MAX + 6 channels, so the truncation comes from this test's
+ * own channels alone rather than from whatever earlier tests left behind. The
+ * reply still closes normally (323, per-channel 366s); the truncation is the
+ * node's own observable, the same shape as WHO's who_truncated. */
+static void test_list_names_truncation(nf_node_t *node)
+{
+    enum { EXTRA = 6 };
+    client_t c;
+    char line[512];
+    size_t mark;
+    size_t found;
+    const char *p;
+    const char *buf;
+
+    client_open(&c, node, "lte");
+    /* Batched JOINs, 16 to a command like test_channel_cap: one line per
+     * channel would work but spends a drain each. */
+    for (size_t base = 0; base < (size_t)CHAN_ENUM_MAX + EXTRA; base += 16u) {
+        size_t used = 5; /* "JOIN " */
+
+        memcpy(line, "JOIN ", 5);
+        for (size_t k = 0; k < 16u && base + k < (size_t)CHAN_ENUM_MAX + EXTRA;
+             k++) {
+            char chan[16];
+
+            (void)snprintf(chan, sizeof chan, "#LT%04u",
+                           (unsigned)(base + k));
+            if (k != 0) {
+                line[used++] = ',';
+            }
+            memcpy(line + used, chan, strlen(chan) + 1u);
+            used += strlen(chan);
+        }
+        TF_CHECK_MSG(tc_send(&c.c, line) == 0, "batched JOIN send failed");
+    }
+    (void)send_and_drain(&c, "lt-joined");
+
+    /* A bare LIST answers exactly CHAN_ENUM_MAX 322s and still closes. */
+    mark = tc_received(&c.c);
+    client_send(&c, "LIST");
+    (void)send_and_drain(&c, "lt-list");
+    buf = tc_buffer(&c.c);
+    expect_line(&c.c, "321 opening a truncated LIST",
+                ":irc.test 321 lte Channel :Users  Name\r\n");
+    found = 0;
+    for (p = strstr(buf + mark, " 322 "); p != NULL;
+         p = strstr(p + 1, " 322 ")) {
+        found++;
+    }
+    TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
+                 "a bare LIST over %d channels drew %zu 322s, not %d",
+                 CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
+    expect_line(&c.c, "323 closing a truncated LIST",
+                ":irc.test 323 lte :End of LIST\r\n");
+    TF_CHECK_MSG(nf_expect(node, "list_truncated:", T_IO_MS) == 0,
+                 "the node never reported list_truncated for a LIST past the cap");
+
+    /* A bare NAMES answers exactly CHAN_ENUM_MAX channel groups. */
+    mark = tc_received(&c.c);
+    client_send(&c, "NAMES");
+    (void)send_and_drain(&c, "lt-names");
+    buf = tc_buffer(&c.c);
+    found = 0;
+    for (p = strstr(buf + mark, " 366 "); p != NULL;
+         p = strstr(p + 1, " 366 ")) {
+        found++;
+    }
+    TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
+                 "a bare NAMES over %d channels drew %zu 366s, not %d",
+                 CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
+    TF_CHECK_MSG(nf_expect(node, "names_truncated:", T_IO_MS) == 0,
+                 "the node never reported names_truncated for a NAMES past the cap");
+
+    tc_close(&c.c);
+}
+
 /* 324 and 329, and the two 472s: a mode letter this node does not evaluate, and
  * a mode string with no sign. */
 static void test_mode(nf_node_t *node)
@@ -2142,6 +2220,7 @@ int main(void)
     test_part(&node);
     test_join_skips_empty(&node);
     test_names_and_list(&node);
+    test_list_names_truncation(&node);
     test_mode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);
