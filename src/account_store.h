@@ -228,8 +228,8 @@ account_store_t *account_store_new(void);
 
 /* Add or replace the record for `name`. Returns 0, or -1 on a NULL/empty
  * `name`, an over-long name or password, a name or password containing a TAB,
- * or a full store. The name is COPIED; `password` is HASHED (salted SHA-256
- * under the registry's per-boot salt) and never stored. The timestamp is a
+ * or a full store. The name is COPIED; `password` is HASHED (iterated salted SHA-256
+ * under the record's own salt) and never stored. The timestamp is a
  * C long rather than a string because it is a NUMBER, and a number kept as
  * a string is a number two comparisons from being compared wrongly.
  *
@@ -263,7 +263,7 @@ int account_store_add(account_store_t *store, const char *name,
  * cost, stated rather than hidden: one bounded linear scan of at most
  * ACCOUNT_MAX_RECORDS constant-time comparisons per login, which is noise
  * next to the base64 decode that precedes it. The password itself is never
- * stored -- each record holds SHA-256(salt || password) under a per-boot
+ * stored -- each record holds iterated SHA-256(salt || password) under a per-record
  * salt -- so the comparison is hash-against-hash. */
 int account_store_verify(const account_store_t *store, const char *name,
                          const char *password);
