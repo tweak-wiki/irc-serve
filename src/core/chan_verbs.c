@@ -1255,7 +1255,7 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
             return;
         }
         kept_reason = conn_text_strip(clean, sizeof clean, reason);
-        reason = (kept_reason != 0u) ? clean : NULL;
+        reason = clean;
     }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
@@ -1301,7 +1301,7 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
          * one, where 3.1 forbids a second pass through the table. */
         chan_member_leave(s, ch, c, 1, reason);
         (void)chan_detach_conn(c, ch);
-        if (kept_reason != 0u && kept_reason != raw_reason_len) {
+        if (kept_reason != raw_reason_len) {
             /* Once per channel the client left, and only when something was
              * dropped. A client that names five channels in one PART gets five
              * lines, which is the right count: each is a separate channel's
