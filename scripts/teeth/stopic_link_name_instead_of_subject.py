@@ -20,11 +20,11 @@ It goes through a wrong-name rather than removing the call so that the function
 stays used and the build stays clean; a fault that does not compile proves
 nothing.
 """
+from util import apply_fault
+
 p = "src/federation/verbs.c"
-s = open(p).read()
 old = """    if (!chan_same_name(tags->origin, ch->origin) &&
         !chan_server_has(ch, tags->origin)) {"""
 new = """    /* FAULT: the transport rather than the line, which is the rule as it was. */
     if (!chan_same_name(link->name, ch->origin)) {"""
-assert old in s, "the topic authority check not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the topic authority check")

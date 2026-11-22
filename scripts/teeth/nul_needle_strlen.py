@@ -16,11 +16,10 @@ is a one-token change that a reader would not notice without the reason written 
 it -- which is the whole reason the reason is next to it.
 """
 
-PATH = "tests/harness/sweep_scan.h"
+from util import apply_fault
 
-src = open(PATH).read()
+PATH = "tests/harness/sweep_scan.h"
 old = "        if (hay[i] == needle[0] && memcmp(hay + i, needle, needle_len) == 0) {"
 new = ("        if (hay[i] == needle[0] &&\n"
        "            memcmp(hay + i, needle, strlen(needle)) == 0) { /* FAULT */")
-assert old in src, "the comparison not found"
-open(PATH, "w").write(src.replace(old, new))
+apply_fault(PATH, old, new, "the comparison")

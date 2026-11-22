@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   generate:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tweak-ci]
     timeout-minutes: 15
     env:
       STATS_BRANCH: docs/stats
