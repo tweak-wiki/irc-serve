@@ -62,6 +62,8 @@ install_manifest.txt
 *.secret
 *.pem
 *.key
+.omp/agents/
+.opencode/
 
 # CI / Test artifacts
 *.gcda
