@@ -174,6 +174,7 @@
 #define SECRET "irc-serve-federation-secret-a"
 #define NAME_A "irc.a"
 #define NAME_B "irc.b"
+#define NAME_C "irc.c"
 #define CHAN_T "#T"
 #define CHAN_U "#U"
 #define NICK_A "alice" /* on A, and the CREATOR of #T there */
@@ -239,6 +240,11 @@ static int g_trace;
  * forked child cannot see anything the parent writes after the fork, so the tick
  * hook has to know from the moment it is installed. */
 static int g_is_b;
+
+/* Node C dials node B rather than node A, for the one case that needs a second
+ * peer on the receiver: a foreign record is only foreign on a node that holds
+ * two links. Pre-fork state, like the rest. */
+static int g_is_c;
 
 /* The resyncs node A has already driven, which the tick hook walks. */
 static int g_stage;
@@ -335,6 +341,7 @@ static int g_big_resync;
  * first and the one case that bypasses it reads as the exception it is. */
 static void send_truncated_burst(server_t *s, server_link_t *link);
 static void send_open_burst(server_t *s, server_link_t *link);
+static int send_foreign_burst(server_t *s, server_link_t *link);
 static void send_hostile_burst(server_t *s, server_link_t *link);
 static void send_overlong_topic_burst(server_t *s, server_link_t *link);
 static void send_overlong_member_burst(server_t *s, server_link_t *link);
@@ -352,6 +359,30 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link,
 static void offer_resync(server_t *s)
 {
     chan_t *ch;
+
+    /* NODE C SENDS ONE PARTIAL TRANSACTION AND HOLDS IT OPEN. C is the second
+     * peer on the receiver under test: its SBURST makes it the shadow's owner,
+     * and the missing SBURSTE is what keeps the transaction open while node A
+     * bursts beside it. Above every other arm because C has no channel, and
+     * the arms below would otherwise read that as "not yet". */
+    if (g_is_c != 0) {
+        if (g_stage == 0) {
+            /* After B's establishment burst has been APPLIED here, not merely
+             * after the link exists: queuing ahead of C's own establishment
+             * lines would put them first on the wire (one TCP connection, one
+             * order), and the establishment SBURST would then supersede the
+             * very transaction this case needs open. burst_done is set on the
+             * commit path, so it is the establishment having LANDED, and
+             * everything C queued at link-up is ahead of what is queued here. */
+            server_link_t *bl = server_find_link(s, NAME_B);
+
+            if (bl != NULL && bl->burst_done != 0 &&
+                send_foreign_burst(s, bl) != 0) {
+                g_stage = 3;
+            }
+        }
+        return;
+    }
 
     /* THE FLOOD IS ABOVE EVERY GATE, including the `ch == NULL` return below, and
      * that placement is the case's whole arrangement rather than an ordering
@@ -717,6 +748,54 @@ static void send_open_burst(server_t *s, server_link_t *link)
     }
     printf("[fixture] open_sent: ok=%d\n", ok);
     fflush(stdout);
+}
+
+/* ---------------------------------------------------------------------------
+ * #225: A SECOND PEER'S PARTIAL TRANSACTION
+ * ---------------------------------------------------------------------------
+ * C opens a burst on the receiver and never finishes it: one SBURST and one
+ * SBURSTN, and no SBURSTE. The missing terminator is the whole arrangement --
+ * it is what keeps C's transaction open while node A bursts beside it, which
+ * is the interleaving whose records used to land in the wrong shadow. The one
+ * nick record is enough to own the shadow; any more would only be more lines
+ * for the same assertion.
+ */
+static int send_foreign_burst(server_t *s, server_link_t *link)
+{
+    conn_t *peer;
+    const char *n0[2];
+    const char *n1[6];
+    char signon[24];
+    char epoch[24];
+    int ok = 0;
+
+    if (link == NULL) {
+        return 0;
+    }
+    peer = server_link_conn(s, link);
+    if (peer == NULL) {
+        return 0;
+    }
+    burst_render_u64(epoch, sizeof epoch, s->epoch);
+    burst_render_u64(signon, sizeof signon, 0u);
+
+    n0[0] = epoch;
+    n0[1] = "1"; /* one nick follows */
+    n1[0] = NICK_E;
+    n1[1] = NICK_E;
+    n1[2] = "127.0.0.1";
+    n1[3] = "-";
+    n1[4] = signon;
+    n1[5] = "";
+    if (fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURST", n0, 2,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTN", n1, 6,
+                       NULL) == 0) {
+        ok = 1;
+    }
+    printf("[fixture] foreign_sent: ok=%d\n", ok);
+    fflush(stdout);
+    return ok;
 }
 
 static void child_tick(server_t *s, uint64_t now_ms)
@@ -1107,6 +1186,7 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
 static void child_setup(server_t *s)
 {
     struct sockaddr_in sa;
+    const char *peer_name;
 
     /* The client command surface, installed BEFORE fed_open(): fed_open() saves
      * whatever dispatch is there and replaces it with its own, so a
@@ -1192,9 +1272,12 @@ static void child_setup(server_t *s)
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = htons((unsigned short)g_peer_port);
-    TF_CHECK_MSG(fed_link_configure(s, NAME_A, (const struct sockaddr *)&sa,
+    /* Node C dials B, so the receiver under test holds two links. Every other
+     * child dials A; C is the one case's second peer. */
+    peer_name = (g_is_c != 0) ? NAME_B : NAME_A;
+    TF_CHECK_MSG(fed_link_configure(s, peer_name, (const struct sockaddr *)&sa,
                                     (socklen_t)sizeof sa) != NULL,
-                 "the child could not configure peer %s on port %d", NAME_A,
+                 "the child could not configure peer %s on port %d", peer_name,
                  g_peer_port);
 }
 
@@ -2506,6 +2589,143 @@ static void case_open_transaction_released_at_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * #225: RECORDS FROM A PEER THAT DOES NOT OWN THE TRANSACTION ARE REFUSED
+ * ---------------------------------------------------------------------------
+ * What used to happen: the BUSY refusal guarded only the SBURST start, so a
+ * second peer's follow-up records were appended to the owner's shadow. The
+ * owner's terminator counts then mismatched and its legitimate burst was
+ * discarded -- a routine near-simultaneous resync destroyed the transaction it
+ * raced with. The fix checks the owner on every record and on the commit.
+ *
+ * The arrangement is three nodes because a foreign record is only foreign on a
+ * node that holds two links: C opens a burst on B and holds it open (no
+ * SBURSTE), then A resyncs beside it. B must refuse A's start with BUSY and
+ * every one of A's records and terminator with NOT_OWNER, and abandon nothing.
+ *
+ * THE ORDER IS LOAD-BEARING. C's two lines are queued before the parent starts
+ * any of A's client registrations, and each registration is a full round trip
+ * against A while B's poll loop runs continuously -- so C's SBURST is applied
+ * on B long before A's SBURST arrives, and the BUSY below is a statement about
+ * a receiver that already had an owner rather than a race the case happened
+ * to win.
+ *
+ * AND THE NEGATIVE: without the owner check, A's records land in C's shadow
+ * and A's terminator mismatches C's epoch and counts, so B prints
+ * fed_burst_truncated and fed_burst_abandon and this case fails on the
+ * NOT_OWNER needle, on burst_abandoned=0 and on burst_truncated=0 together.
+ */
+static void case_foreign_records_refused(void)
+{
+    nf_node_t a;
+    nf_node_t b;
+    nf_node_t c;
+    test_client_t alice;
+    test_client_t ann;
+    test_client_t bob;
+    const char *const just_alice[] = { "@" NICK_A };
+
+    g_peer_port = 0;
+    g_trace = 0;
+    g_is_b = 0;
+    g_is_c = 0;
+    g_stage = 0;
+    g_tiny_send = 0;
+    g_tiny_recv = 0;
+    g_raised_recv = 0;
+    g_flood_count = 0u;
+    g_open_burst = 0;
+    g_truncate = 0;
+    g_overlong = 0;
+    g_hostile = 0;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node A");
+    g_peer_port = a.port;
+    g_is_b = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
+                 "could not spawn node B");
+    /* C dials B: g_peer_port is B's port and g_is_c steers the dial at NAME_B. */
+    g_peer_port = b.port;
+    g_is_b = 0;
+    g_is_c = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&c, NAME_C, child_setup) == 0,
+                 "could not spawn node C");
+
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never established its link to node B: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never established its link to node A: %s", b.out);
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_C, T_IO_MS) == 0,
+                 "node B never established its link to node C: %s", b.out);
+    TF_CHECK_MSG(nf_expect(&c, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node C never established its link to node B: %s", c.out);
+
+    /* C's partial transaction first: the fixture line says the lines were
+     * queued, and the registrations below are what make "queued" mean
+     * "applied" -- several round trips against A pass before A has anything
+     * to burst. */
+    TF_CHECK_MSG(nf_expect(&c, "foreign_sent: ok=1", T_IO_MS) == 0,
+                 "node C never sent its partial burst: %s", c.out);
+
+    /* Then A's resync beside it: two nicks fire the tick hook, alice's JOIN
+     * gives the burst a channel and a member. */
+    register_client(&alice, a.port, NICK_A);
+    register_client(&ann, a.port, NICK_E);
+    TF_CHECK_MSG(tc_send(&alice, "JOIN " CHAN_T) == 0, "alice's JOIN send failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
+                 "alice's JOIN never completed on the node that owns the channel");
+
+    /* 1. THE START IS REFUSED WITH BUSY, naming the owner. Unchanged behavior,
+     * and the baseline the new assertions stand on: without an open
+     * transaction owned by C, nothing below would be foreign. */
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_refused: peer=" NAME_A
+                                   " reason=BUSY owner=" NAME_C,
+                           T_IO_MS) == 0,
+                 "node B did not refuse A's SBURST against C's open transaction, "
+                 "so the interleaving under test never happened: %s",
+                 b.out);
+    /* 2. EVERY FOLLOW-UP RECORD IS REFUSED AS FOREIGN, and the shadow is left
+     * alone. One needle per verb would pin the count; one needle pins the
+     * rule, and the counters below pin that nothing was thrown away. */
+    TF_CHECK_MSG(nf_expect(&b, "reason=NOT_OWNER owner=" NAME_C, T_IO_MS) == 0,
+                 "node B accepted a record from a peer that does not own the "
+                 "open transaction, so the owner's shadow is being poisoned: %s",
+                 b.out);
+    /* 3. NOTHING ABANDONED, NOTHING TRUNCATED. Before the fix this is where
+     * the case fails: A's records landed in C's shadow and A's terminator
+     * mismatched, so the receiver threw the whole transaction away. */
+    TF_CHECK_MSG(nf_expect_u64(&b, "burst_abandoned=", 0, 2000) == 0,
+                 "node B abandoned a transaction, so a foreign record reached "
+                 "the owner's shadow: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_u64(&b, "burst_truncated=", 0, 2000) == 0,
+                 "node B truncated a transaction, so a foreign record reached "
+                 "the owner's shadow: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_u64(&b, "fed_malformed=", 0, 2000) == 0,
+                 "node B counted a refusal as malformed: a well-formed record "
+                 "from the wrong peer is refused, not malformed: %s",
+                 b.out);
+    /* 4. THE RECEIVER'S ROSTER IS C'S SILENCE, NOT A'S BURST. B holds #T from
+     * alice's relayed SJOIN, so a B-side NAMES lists her -- and only her. A
+     * receiver that installed A's refused records would show ann here. */
+    register_client(&bob, b.port, NICK_B);
+    expect_names(&bob, "bob after the refused burst", NICK_B, CHAN_T,
+                 just_alice, 1u, NICK_E);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&c) == 0, "node C did not exit cleanly");
+
+    tc_close(&alice);
+    tc_close(&ann);
+    tc_close(&bob);
+    nf_free(&a);
+    nf_free(&b);
+    nf_free(&c);
+    g_is_c = 0;
+}
+
+/* ---------------------------------------------------------------------------
  * #122: A TOPIC WIDER THAN CHAN_MAX_TOPIC IS REFUSED, COUNTED, AND KEPT FROM
  * BECOMING A DIFFERENT TOPIC
  * ---------------------------------------------------------------------------
@@ -3527,6 +3747,7 @@ int main(void)
     case_over_budget_changes_nothing();
     case_truncated_burst_changes_nothing();
     case_open_transaction_released_at_shutdown();
+    case_foreign_records_refused();
     case_over_long_topic_is_refused();
     case_overlong_member_account_discards();
     case_identifiers_are_refused_and_the_record_kept();
