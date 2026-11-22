@@ -915,6 +915,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
     int reason_code = 0;
     int found = 0;
     int good = 0;
+    int revoked = 0;
     int rc;
     const char *peer = tls_peer_name_of(c);
     const char *verdict = "NO_CHECK";
@@ -1070,6 +1071,7 @@ static int tls_peer_revocation(conn_t *c, SSL *ssl, tls_node_t *node)
          * still no. tests/integration/test_tls_revocation.c builds exactly that. */
         verdict = "REVOKED";
         why = OCSP_crl_reason_str((long)reason_code);
+        revoked = 1;
         goto done;
     }
     verdict = "GOOD";
@@ -1099,7 +1101,9 @@ done:
            tls_seconds_text(not_after_in, sizeof not_after_in,
                             (leaf != NULL) ? X509_get0_notAfter(leaf) : NULL),
            verdict);
-    rc = (good != 0 || node->staple_strict == 0) ? 0 : -1;
+    /* A REVOKED ANSWER IS NEVER TOLERATED, not even in permissive mode: the
+     * flag waives proof the certificate is still good, never proof it is bad. */
+    rc = (good != 0 || (node->staple_strict == 0 && revoked == 0)) ? 0 : -1;
     /* THE VERDICT. `action=` is what this node DID, not what it recommends, and it is
      * decided HERE rather than by the caller so the two cannot disagree. In
      * permissive mode this is the whole of what the insecure mode does: the link
@@ -1229,7 +1233,14 @@ static int tls_status_cb(SSL *ssl, void *arg)
     if (node == NULL || node->staple == NULL) {
         return SSL_TLSEXT_ERR_NOACK;
     }
-    (void)SSL_set_tlsext_status_ocsp_resp(ssl, node->staple, (long)node->staple_len);
+    /* THE RETURN IS CHECKED, because returning OK with nothing attached would
+     * send an empty CertificateStatus: a strict peer would read it as a broken
+     * staple rather than a missing one, and the operator here would never know
+     * this side caused it. NOACK is the honest answer either way. */
+    if (SSL_set_tlsext_status_ocsp_resp(ssl, node->staple, (long)node->staple_len) != 1) {
+        printf("[observable] tls_staple_serve: reason=ATTACH_FAILED action=NOACK\n");
+        return SSL_TLSEXT_ERR_NOACK;
+    }
     return SSL_TLSEXT_ERR_OK;
 }
 
@@ -1810,7 +1821,15 @@ int tls_backend_starttls_peer(conn_t *c, int as_server, const char *peer_host)
 
         if (strlen(peer_host) < sizeof sni) {
             memcpy(sni, peer_host, strlen(peer_host) + 1u);
-            (void)SSL_set_tlsext_host_name(ssl, sni);
+            /* THE RETURN IS CHECKED: without SNI the peer may present the wrong
+             * certificate for this link, which the NAME check would then refuse
+             * as a peer fault. Refusing here names the real cause. */
+            if (SSL_set_tlsext_host_name(ssl, sni) != 1) {
+                printf("[observable] tls_sni: fd=%d reason=SNI_SET_FAILED\n",
+                       c->fd);
+                SSL_free(ssl);
+                return -1;
+            }
         } else {
             printf("[observable] tls_sni: fd=%d reason=NAME_TOO_LONG "
                    "bytes=%zu\n", c->fd, strlen(peer_host));
@@ -1847,7 +1866,15 @@ int tls_backend_starttls_peer(conn_t *c, int as_server, const char *peer_host)
          * verifier for. A request with no extension would also be a request the
          * server's own CertID-matching (see tls_status_cb) could not satisfy for a
          * multi-certificate chain. */
-        (void)SSL_set_tlsext_status_type(ssl, TLSEXT_STATUSTYPE_ocsp);
+        /* THE RETURN IS CHECKED: without the status_request extension the peer
+         * staples nothing, and a strict self would then refuse its own link
+         * with MISSING_STAPLE. Refusing here names the real cause. */
+        if (SSL_set_tlsext_status_type(ssl, TLSEXT_STATUSTYPE_ocsp) != 1) {
+            printf("[observable] tls_error: fd=%d op=SSL_set_tlsext_status_type "
+                   "reason=failed\n", c->fd);
+            SSL_free(ssl);
+            return -1;
+        }
         if (tls_peer_verify(ssl, node, peer_host, c->fd) != 0) {
             /* THE SSL* IS RELEASED HERE RATHER THAN HANDED TO THE CONNECTION, and
              * this is the only place that can happen: c->t_ctx has NOT been assigned
