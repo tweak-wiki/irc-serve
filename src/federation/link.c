@@ -44,7 +44,7 @@
 #error "link.c's FED_RESULT_COUNT and server.h's IRC_FED_REJECT_REASONS disagree"
 #endif
 /* Wipe `n` bytes at `p`. Written through a volatile pointer for the same reason
- * account_store.c's account_wipe() and sasl_framework.c's sasl_wipe() are: a
+ * core/secret_util.c's secret_wipe() is: a
  * memset() to memory that stays live is a store the compiler may prove dead
  * and delete. */
 static void link_wipe(void *p, size_t n)
