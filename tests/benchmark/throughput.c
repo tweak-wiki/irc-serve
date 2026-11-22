@@ -317,7 +317,7 @@ static void build_production_workload(void)
     /* An ESCAPED tag value, so the unescape path is measured and not just the
      * split. '\:' ';', '\s', '\\', '\r' and '\n' are the whole escape set. */
     PRODUCTION[n++] = make_psample(
-        "@k=a\\:b\\;c\\sd\\\\e\\r\\n :alice!u@h PRIVMSG #general :escaped",
+        "@k=a\\:b\\:c\\sd\\\\e\\r\\n :alice!u@h PRIVMSG #general :escaped",
         "escaped tag value", 1, 1, 2);
     PRODUCTION[n++] = make_psample("JOIN #general", "JOIN", -1, 0, 1);
     PRODUCTION[n++] = make_psample("NICK alice", "NICK", -1, 0, 1);

@@ -180,7 +180,7 @@ struct burst_shadow;
  * from here -- link.h includes this file, so including it back would be a
  * cycle -- so the width is a literal with a preprocessor #error tie at the
  * definition (link.c) rather than a second spelling nobody checks. */
-#define IRC_FED_REJECT_REASONS 11
+#define IRC_FED_REJECT_REASONS 12
 
 /* The node-wide channel cap (issue #169): the most chan_t objects one node
  * will hold at once. The per-connection cap (CONN_MAX_CHANNELS, 128) bounds
@@ -501,6 +501,21 @@ typedef struct server_link {
  * next connection is fine, and the drain must continue. */
 #define SERVER_ACCEPT_REJECTED (-2)
 
+/* MT #366: demand-steal bound. A writer whose owned scan found no work steals
+ * whole conns off the most-backlogged other owner once that owner's aggregate
+ * unsent bytes exceed this. Twice the per-conn cap (CONN_WQ_MAX): a single
+ * conn can never hold more than its cap, so one full conn alone never trips
+ * the steal and owned queues stay sticky until there is real imbalance. */
+#define WRITER_STEAL_BYTES ((size_t)2u * CONN_WQ_MAX)
+
+/* MT #366: one per pool thread; writer_main's argument, carrying the server
+ * and the thread's owner index (fd % N == wid is sticky-owned). Allocated
+ * with writers[] in server_writers_start(), freed in server_writers_stop(). */
+typedef struct writer_slot {
+    server_t *s;
+    int wid;
+} writer_slot_t;
+
 struct server {
     char      name[IRC_MAX_SERVER_NAME + 1];
     int       listen_fd;
@@ -517,6 +532,11 @@ struct server {
     int      *active_fds;
     size_t    nactive;
     size_t    active_cap;
+    /* #216: budget-cutoff dirty flag. conn_readable() caps a burst at 128
+     * lines per tick; when it stops with a full line still buffered it sets
+     * this, and the loop's pre-poll scan runs only then. Idle ticks skip the
+     * scan entirely. Zeroed by server_init()'s memset. */
+    int       lines_pending;
 
     /* Registries. Both are string -> pointer maps. The nick one is FOLDED
      * (ASCII, case-insensitive keys) and the channel one is EXACT -- for the
@@ -742,26 +762,35 @@ struct server {
      * than this node's cache. */
     uint64_t  n_rnick_evicted;
 
-    /* The registry itself: a vector of entries, ordered least-recently-LEARNED
-     * first (so index 0 is the eviction candidate), LAZILY allocated so a node
-     * with no peers pays nothing, and released by fed_nickreg_close() from
-     * server_shutdown().
+    /* The registry itself: a vector of entries with an intrusive LRU list over
+     * it (dedup's arrangement), LAZILY allocated so a node with no peers pays
+     * nothing, and released by fed_nickreg_close() from server_shutdown().
+     * Entries never move -- removal unlinks and zeroes in place -- so the
+     * list's pointers into the calloc stay valid for the table's life.
      *
-     * `nrnicks` is the ALLOCATED length and `nrnick_used` is how much of it holds
-     * an entry, which is a distinction worth making explicit: the eviction policy
-     * is a bound on USED entries, not on the allocation, and a node that has
-     * learned one nick and then forgotten it still holds the whole 86 KiB. That
-     * is deliberate -- freeing and reallocating a table on a quiet mesh would put
-     * an allocator call on the path a burst takes, and 86 KiB of untouched heap is
-     * cheaper than that.
+     * `nrnick_lru_head` is the most recently seen entry and `nrnick_lru_tail`
+     * the eviction candidate; both NULL on an empty table, which server_init()'s
+     * memset establishes and fed_nickreg_close() restores.
+     *
+     * `nrnicks` is the ALLOCATED length and `nrnick_used` is how many entries
+     * are LIVE, which is a distinction worth making explicit: freed slots stay
+     * as holes for the next append to reuse, so the live count is not a scan
+     * bound -- every scan runs over the allocation and skips holes, which costs
+     * the same walk the old dense scan cost now that no scan moves memory. That
+     * a node that has learned one nick and then forgotten it still holds the
+     * whole 88 KiB is deliberate -- freeing and reallocating a table on a quiet
+     * mesh would put an allocator call on the path a burst takes, and 88 KiB of
+     * untouched heap is cheaper than that.
      *
      * `nrnick_swept_ms` is the sweep throttle and 0 means "never swept", which is
      * also the state of a node that has just learned its first nick, so the first
      * sweep is immediate rather than being delayed by an interval measured from
      * zero. */
     struct fed_rnick *rnicks;
+    struct fed_rnick *nrnick_lru_head; /* LRU: most recently seen */
+    struct fed_rnick *nrnick_lru_tail; /* LRU: least recently seen */
     size_t    nrnicks;   /* allocated entries */
-    size_t    nrnick_used; /* entries in use */
+    size_t    nrnick_used; /* live entries */
     uint64_t  nrnick_swept_ms;
 
     /* ------------------------------------------------------------------------
@@ -825,12 +854,12 @@ struct server {
      * Phase 6 C4: the 4.3 resync, which is a TRANSACTION and therefore has two
      * ways to fail rather than one. federation/burst.c is the only writer.
      *
-     * n_burst_refused counts an OUTBOUND burst this node declined to send
-     * because it did not fit the staging budget (IRC_BURST_MAX_BYTES, which is
-     * half a link's write queue). It is "declined" rather than "failed": nothing
-     * was queued, the link was not touched, and the node's own view is
-     * untouched. A non-zero value is a node whose state is larger than half a
-     * link's queue, which is a finding rather than a statistic.
+    * n_burst_refused counts an OUTBOUND burst this node declined to send
+    * because it did not fit the staging budget (IRC_BURST_MAX_BYTES, which is
+    * four links' write queues). It is "declined" rather than "failed": nothing
+    * was queued, the link was not touched, and the node's own view is
+    * untouched. A non-zero value is a node whose state is larger than four
+    * links' queues, which is a finding rather than a statistic.
      *
      * n_burst_abandoned counts an INBOUND burst discarded before its terminator
      * -- a count mismatch, an over-large transaction, a malformed record, or a
@@ -1292,15 +1321,24 @@ struct server {
     atomic_ullong *wq_wakes;      /* N consumed-wakeup counters, one per writer */
     int       wq_stop;            /* 1: writers exit after draining what they hold */
     int       writers_started;    /* 1: wq_mu/slots/writers are live */
-    /* MT 2.2 (#241): registry mutex. The loop thread is the only mutator
+    /* MT #366: per-writer slot args + drained-byte totals, parallel to
+     * writers[] (N entries, or NULL). The pass writes its own total under
+     * reg_mu, which every pass already holds -- so no lock order change
+     * (reg_mu -> wq_lock still holds). */
+    writer_slot_t *slots;          /* N slot args, or NULL */
+    atomic_ullong *writer_bytes; /* per-writer drained-byte totals */
+
+    /* MT 2.2 (#241) + #279: registry mutex. The loop thread is the only mutator
      * (server_add_conn / the detach half of server_close_conn), but writers
      * resolve conns through the same by_fd/active structures -- without this
      * the writer scan races the loop's accept/reap (TSan). Lock order is
      * reg_mu -> wq_lock: a holder of wq_lock never takes reg_mu. The loop's
      * own (same-thread) resolutions need no lock; only cross-thread
-     * resolve/pump paths take it. Writers hold it across resolve+pump, so a
-     * conn cannot be detached/freed mid-pump (the close handoff in #242 will
-     * replace this coarse hold with a per-conn scheme). */
+     * resolve/pump paths take it. Writers hold reg_mu only across the
+     * registry scan, never across a pump: wq_lock is taken as a trylock
+     * under reg_mu, then reg_mu drops across conn_pump_slice_locked. The
+     * held wq_lock keeps the reaper (#242: trylock fails, close defers) from
+     * detaching/freeing mid-pump, so resolve-to-pump has no gap. */
     pthread_mutex_t reg_mu;
     int       reg_started;        /* 1: reg_mu is live */
     /* MT 2.2: reap-deferral deadline per fd (monotonic ms, 0 = none). At N > 0
@@ -1374,6 +1412,15 @@ int server_init(server_t *s, const char *name);
  * startup failure with a partially built node, and a guard that asked a question of
  * a half-built node would be a new way to fail during startup. */
 void server_shutdown(server_t *s);
+
+/* Issue #288: server_shutdown() in two phases, so the goodbye-before-close
+ * ordering is unit-testable. Phase 1 queues and drains SHUTDOWN on every
+ * ESTABLISHED link and closes nothing; phase 2 stops writers and frees every
+ * allocation on the struct. server_shutdown() is phase 1 then phase 2, and
+ * every existing caller keeps calling it. Both phases are NULL-safe and safe
+ * on a half-built node, for the same startup-failure paths stated above. */
+void server_shutdown_phase1_say_goodbye(server_t *s);
+void server_shutdown_phase2_close(server_t *s);
 
 /* Bind and listen on `port` (host 0.0.0.0), nonblocking, with SO_REUSEADDR.
  * `port` may be 0, which asks the kernel for an ephemeral port -- that is how
@@ -1708,11 +1755,16 @@ void server_set_writer_threads(server_t *s, int n);
 int server_writers_start(server_t *s);
 void server_writers_kick(server_t *s);
 /* Issue #367: targeted wakeup. Queueing bytes on one conn signals exactly
- * its owning writer (fd % N); other writers stay parked. NULL conn (or a
- * conn with no usable fd) falls back to slot 0, which always exists at
- * N > 0 -- never a broadcast. */
+ * its owning writer (fd % N); other writers stay parked -- never a
+ * broadcast. NULL server or conn is a no-op. */
 void server_writers_kick_conn(server_t *s, const conn_t *c);
 void server_writers_stop(server_t *s);
+/* MT #366: deterministic single-pass seam for tests. Runs one owned-slice
+ * pass for writer `wid` (plus steal when idle) without threads; the test
+ * pins thread-less accounting via server_writers_start_pool(), so no worker
+ * can drain the fixture backlog before the asserted pass runs. */
+void server_writer_pass(server_t *s, int wid);
+int server_writers_start_pool(server_t *s);
 
 /* The tick hook and the clock, called by the loop. server_tick() stamps the
  * clock, counts the invocation and forwards to s->on_tick when set. */

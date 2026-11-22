@@ -431,6 +431,46 @@ static int stage_flush(burst_stage_t *st, server_t *s, conn_t *peer)
     return 0;
 }
 
+/* The most this node ever has queued-but-unsent of one burst (#330). A quarter
+ * of CONN_WQ_MAX, so that even with no drain at all four chunks still fit the
+ * link's queue -- and with the pump below draining each chunk, any number of
+ * them does. */
+#define BURST_FLUSH_CHUNK (CONN_WQ_MAX / 4u)
+
+/* Queue one chunk of a large burst and pump the link, then reset the staging
+ * buffer so the next chunk renders into it. 0 when there was nothing worth
+ * flushing or the chunk went out, -1 when the link saturated mid-burst.
+ *
+ * WHY THIS EXISTS when the staging budget already bounds the transaction: the
+ * budget bounds MEMORY (staging and the receiver's shadow), but 800 worst-case
+ * nicks are ~630 KiB and the link's queue is 256 KiB -- staging the whole burst
+ * and flushing it at once would saturate every resync past ~280 nicks, and a
+ * saturated link is DROPPED, so the mesh would never converge after a flap.
+ * Flushing in quarter-queue chunks with a pump between them keeps the queue
+ * from ever holding the whole burst, while the BEGIN/COMMIT framing on the
+ * wire is unchanged: the receiver sees one transaction, whatever its size.
+ *
+ * THE PUMP IS BEST EFFORT: a peer that reads keeps up and the burst goes out
+ * in full; a peer that does not is a saturated link, which 3.4 drops -- the
+ * same verdict a burst past the queue would always have earned, now earned for
+ * the right reason (the link cannot take it) rather than the wrong one (the
+ * burst was rendered all at once). */
+static int burst_chunk_flush(burst_stage_t *st, server_t *s, conn_t *peer,
+                             size_t *flushed_total)
+{
+    if (st->len < BURST_FLUSH_CHUNK) {
+        return 0;
+    }
+    if (stage_flush(st, s, peer) != 0) {
+        return -1;
+    }
+    *flushed_total += st->len;
+    (void)conn_pump(peer);
+    st->len = 0u;
+    st->n = 0u;
+    return 0;
+}
+
 /* An empty MIDDLE parameter as the one byte that means "there is none of it here".
  *
  * 3.2 forces a literal rather than a convention: an empty middle parameter is not
@@ -574,6 +614,7 @@ int fed_burst_send(server_t *s, server_link_t *link)
     size_t nnicks;
     size_t nchans = 0u;
     size_t nmembers = 0u;
+    size_t flushed = 0u; /* bytes already chunk-flushed; st.len is the rest */
 
     if (s == NULL || link == NULL) {
         return -1;
@@ -659,6 +700,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
         if (stage_line(&st, s, s->name, "SBURSTN", params, 6) != 0) {
             goto refused;
         }
+        if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+            goto saturated;
+        }
     }
 
     /* --- every channel, and its members immediately after it -------------- */
@@ -684,6 +728,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
         params[5] = ch->topic;
         if (stage_line(&st, s, s->name, "SBURSTC", params, 6) != 0) {
             goto refused;
+        }
+        if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+            goto saturated;
         }
         for (size_t k = 0; k < ch->nmembers; k++) {
             char flags[4];
@@ -714,6 +761,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
             if (stage_line(&st, s, s->name, "SBURSTM", params, 5) != 0) {
                 goto refused;
             }
+            if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+                goto saturated;
+            }
         }
         for (size_t k = 0; k < ch->nremotes; k++) {
             const chan_remote_t *r = chan_remote_at(ch, k);
@@ -732,6 +782,9 @@ int fed_burst_send(server_t *s, server_link_t *link)
             params[4] = burst_account_token(NULL, r->account);
             if (stage_line(&st, s, s->name, "SBURSTM", params, 5) != 0) {
                 goto refused;
+            }
+            if (burst_chunk_flush(&st, s, peer, &flushed) != 0) {
+                goto saturated;
             }
         }
     }
@@ -758,27 +811,37 @@ int fed_burst_send(server_t *s, server_link_t *link)
     }
 
     if (stage_flush(&st, s, peer) != 0) {
-        size_t was = st.len;
+        goto saturated;
+    }
+    printf("[observable] fed_burst_sent: peer=%s epoch=%llu nicks=%zu chans=%zu "
+           "members=%zu bytes=%zu budget=%zu\n",
+           link->name, (unsigned long long)s->epoch, nnicks, nchans, nmembers,
+           flushed + st.len, s->burst_max_bytes);
+    stage_free(&st);
+    return 0;
+
+saturated:
+    {
+        size_t was = flushed + st.len;
 
         stage_free(&st);
         printf("[observable] fed_burst_saturated: peer=%s bytes=%zu\n", link->name,
                was);
         return -1;
     }
-    printf("[observable] fed_burst_sent: peer=%s epoch=%llu nicks=%zu chans=%zu "
-           "members=%zu bytes=%zu budget=%zu\n",
-           link->name, (unsigned long long)s->epoch, nnicks, nchans, nmembers,
-           st.len, s->burst_max_bytes);
-    stage_free(&st);
-    return 0;
 
 refused:
-    /* NOTHING WAS QUEUED. The whole transaction is still in a staging buffer
-     * that is about to be freed, the link has not been touched, and this node's
-     * own state is exactly what it was. That difference from a saturation
-     * mid-flush is the entire reason the burst is rendered before it is sent. */
+    /* NOTHING WAS QUEUED, in every case the budget can still refuse. Chunk
+    * flushes only ever move QUEUE-FITTING prefixes a link that keeps up
+    * drains, and the budget trips long before the first chunk can go out --
+    * at the shipped bound after a megabyte of staging, at a shrunken test
+    * bound after a few hundred bytes. A refusal after a flushed chunk would
+    * take the saturation path's shape instead: a prefix with no terminator,
+    * which the receiver discards by the same rule that catches a lost line.
+    * That difference from a saturation mid-flush is the entire reason the
+    * burst is rendered before it is sent. */
     {
-        size_t was = st.len;
+        size_t was = flushed + st.len;
 
         stage_free(&st);
         s->n_burst_refused++;
@@ -1101,7 +1164,28 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
     return 0;
 }
 
-/* SBURSTN <nick> <user> <host> <modes> <signon> :<away>. */
+/* A record belongs to the peer that opened the transaction. The dispatch gate
+ * refuses records when nothing is open, so an apply_* only runs for an owned
+ * shadow -- and a record from any other link is a second peer's burst landing
+ * in the first peer's shadow, which turns the owner's terminator counts into a
+ * mismatch and discards its legitimate burst. Refused WITHOUT touching the
+ * shadow: discarding here would let any peer kill another peer's in-flight
+ * burst with a single line. */
+static int burst_foreign(server_t *s, server_link_t *link)
+{
+    burst_shadow_t *sh = sh_of(s);
+
+    if (sh != NULL && !chan_same_name(sh->origin, link->name)) {
+        /* NOT_OWNER, not BUSY: BUSY is the start being refused, this is a
+         * record for a transaction that is already somebody else's. */
+        printf("[observable] fed_burst_refused: peer=%s reason=NOT_OWNER "
+               "owner=%s\n",
+               link->name, sh->origin);
+        return 1;
+    }
+    return 0;
+}
+
 static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
 {
     burst_shadow_t *sh = sh_of(s);
@@ -1109,6 +1193,9 @@ static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
     uint64_t signon = 0u;
 
     if (sh == NULL) {
+        return -1;
+    }
+    if (burst_foreign(s, link)) {
         return -1;
     }
 
@@ -1214,6 +1301,9 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     if (sh == NULL) {
         return -1;
     }
+    if (burst_foreign(s, link)) {
+        return -1;
+    }
 
     if (m->nparams != 6 || !chan_name_valid(m->params[0]) ||
         !irc_serve_server_name_valid(m->params[1]) ||
@@ -1243,7 +1333,7 @@ static int apply_chan(server_t *s, server_link_t *link, const message_t *m)
     /* THE EXPLICIT CEILING (#122), and it is checked BEFORE the realloc rather
      * than after it so that the refusal costs no allocation. See
      * IRC_BURST_MAX_CHANS for why this is not the bound: the charge above already
-     * caps the count at 642 at the shipped budget, and this arm exists so that
+     * caps the count at 5140 at the shipped budget, and this arm exists so that
      * the day that arithmetic moves, the count this node will allocate for is a
      * number somebody wrote down rather than a quotient. */
     if (sh->nchan_used >= IRC_BURST_MAX_CHANS) {
@@ -1451,6 +1541,9 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
     if (sh == NULL) {
         return -1;
     }
+    if (burst_foreign(s, link)) {
+        return -1;
+    }
     sc = sh->cur;
 
     /* FIVE PARAMETERS NOW: <chan> <server> <nick> <flags> <account>. The arity is
@@ -1560,26 +1653,30 @@ static int apply_member(server_t *s, server_link_t *link, const message_t *m)
     /* THE SLOT IS ZEROED BEFORE IT IS WRITTEN, and this is the third of the three
      * record functions in this file that does it -- apply_nick() memsets, and
      * apply_chan() zeroes the region it grows into. It is here because
-     * realloc() does not, and because the three burst_copy() calls below are all
-     * `(void)`: <nick> and <server> are bounded by their own validators, so those
-     * two always land, but the pattern of "a copy whose failure is discarded
-     * writes into a field nothing has initialised" is exactly the one that turns a
-     * refusal into an uninitialised READ rather than into an absent value.
-     *
-     * The two siblings say the same thing in their own words at their own lines:
-     * a RECYCLED element carrying the previous member's field is impersonation
-     * wearing a memory bug's clothes. `account` is the field that can be left
-     * unwritten, and channel.c's chan_remote_add() is where a garbage value read
-     * out of here becomes a roster entry. */
+     * realloc() does not, and a recycled element carrying the previous member's
+     * field is impersonation wearing a memory bug's clothes. The checked copies
+     * below are what keep a refusal explicit: without the check a refused copy
+     * would silently keep the zeroed field, and the two nodes would disagree
+     * with no malformed count to show for it. */
     slot = &sc->members[sc->nmembers++];
     memset(slot, 0, sizeof *slot);
-    (void)burst_copy(slot->nick, sizeof slot->nick, m->params[2]);
-    (void)burst_copy(slot->server, sizeof slot->server, m->params[1]);
-    /* `*` BECOMES "" on the way in, for the reason channel.h's chan_remote_add()
-     * gives: `*` is a rendering of the absence, and storing it would make an
-     * account named "*" representable in a roster. */
-    (void)burst_copy(slot->account, sizeof slot->account,
-                     (m->params[4][0] == '*') ? "" : m->params[4]);
+    /* THE COPIES ARE CHECKED, and a refusal discards the transaction rather
+     * than installing a member with a missing field: the validators above
+     * bound every value to its field, so a refusal here is unreachable, but
+     * an unchecked one would silently keep "" and leave the two nodes
+     * disagreeing about the roster with no malformed count to show for it. */
+    if (!burst_copy(slot->nick, sizeof slot->nick, m->params[2]) ||
+        !burst_copy(slot->server, sizeof slot->server, m->params[1]) ||
+        /* `*` BECOMES "" on the way in, for the reason channel.h's
+         * chan_remote_add() gives: `*` is a rendering of the absence, and
+         * storing it would make an account named "*" representable. */
+        !burst_copy(slot->account, sizeof slot->account,
+                    (m->params[4][0] == '*') ? "" : m->params[4])) {
+        s->n_fed_malformed++;
+        shadow_discard(s, "BAD_MEMBER_RECORD", sh->origin, sh->nnicks,
+                       sh->nchans, sh->nmembers);
+        return -1;
+    }
     slot->flags = flags;
     sh->nmembers++;
     return 0;
@@ -1863,6 +1960,81 @@ static void apply_topic(chan_t *ch, const burst_chan_t *sc)
     ch->topic_when = (time_t)sc->topic_when;
 }
 
+/* Whether the staged roster for one channel can be installed (#209): every
+ * member the commit loop would ADD must pass chan_remote_add()'s own checks,
+ * and the survivors plus the new members must fit under
+ * CHAN_MAX_REMOTE_MEMBERS. Runs BEFORE the purge, against the post-purge
+ * state (locals plus other servers' remotes plus earlier staged members), so
+ * a burst whose re-add would partly fail discards the whole record instead of
+ * shrinking the roster. Conservative on duplicates: a nick matching anything
+ * already counted is skipped, exactly as the commit loop's member_known()
+ * would skip it. Returns 0 when the install may proceed, -1 to discard. */
+static int burst_roster_fits(const server_t *s, const chan_t *ch,
+                             const char *origin, const burst_chan_t *sc)
+{
+    size_t keep = 0;
+    size_t fresh = 0;
+
+    if (ch == NULL || origin == NULL || sc == NULL ||
+        !irc_serve_server_name_valid(origin)) {
+        return -1;
+    }
+    for (size_t i = 0; i < ch->nremotes; i++) {
+        if (!chan_same_name(ch->remotes[i].server, origin)) {
+            keep++;
+        }
+    }
+    for (size_t k = 0; k < sc->nmembers; k++) {
+        const char *nick = sc->members[k].nick;
+        const char *ms = sc->members[k].server;
+        const char *acct = sc->members[k].account;
+        int seen = 0;
+
+        if (s != NULL) {
+            conn_t *local = server_nick_lookup(s, nick);
+
+            if (local != NULL && chan_find_member(ch, local) != NULL) {
+                continue;
+            }
+        } else if (chan_find_nick(ch, nick) != NULL) {
+            continue;
+        }
+        for (size_t i = 0; i < ch->nremotes; i++) {
+            if (!chan_same_name(ch->remotes[i].server, origin) &&
+                chan_same_name(ch->remotes[i].nick, nick)) {
+                seen = 1;
+                break;
+            }
+        }
+        if (seen == 0) {
+            for (size_t j = 0; j < k; j++) {
+                if (chan_same_name(sc->members[j].nick, nick)) {
+                    seen = 1;
+                    break;
+                }
+            }
+        }
+        if (seen != 0) {
+            continue;
+        }
+        /* THE SAME THREE REFUSALS chan_remote_add() APPLIES to a new entry:
+         * bad nick, bad holder server, bad account. Staging already filtered
+         * these, so this arm is the cap (and a second implementation's
+         * record) rather than the common path -- but the check is here and
+         * not only there because the purge below must not run first. */
+        if (!valid_nick(nick) ||
+            (ms[0] != '\0' && !irc_serve_server_name_valid(ms)) ||
+            (acct[0] != '\0' && acct[0] != '*' &&
+             account_name_wire_safe(acct) == 0)) {
+            return -1;
+        }
+        if (++fresh > (size_t)CHAN_MAX_REMOTE_MEMBERS - keep) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* SBURSTE <epoch> <nnicks> <nchans> <nmembers>. */
 static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 {
@@ -1904,6 +2076,13 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
         printf("[observable] fed_malformed: fd=%d command=SBURSTE "
                "reason=NO_TRANSACTION\n",
                link->fd);
+        return -1;
+    }
+    /* A COMMIT for somebody else's transaction: refused like a foreign record,
+     * and before the arity check -- a terminator that is not yours is not
+     * yours to validate. The NO_TRANSACTION arm above stays first, so a
+     * terminator with nothing open keeps its existing report. */
+    if (burst_foreign(s, link)) {
         return -1;
     }
     if (m->nparams != 4 || burst_parse_u64(m->params[0], &epoch) != 0 ||
@@ -2025,6 +2204,19 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 
         if (ch == NULL) {
             dropped++;
+            continue;
+        }
+        /* TWO-PASS COMMIT (#209). The purge below destroys the roster the
+         * re-add may then refuse (member cap, bad account), so the fit is
+         * checked first and a burst that would shrink the channel discards
+         * the whole record instead. A channel this burst created has nothing
+         * to keep and is disposed so it does not linger empty. */
+        if (burst_roster_fits(s, ch, origin, sc) != 0) {
+            printf("[observable] fed_burst_chan_discarded: channel=%s peer=%s "
+                   "reason=ROSTER_WOULD_NOT_FIT\n",
+                   ch->name, origin);
+            dropped++;
+            (void)chan_dispose_if_empty(s, ch);
             continue;
         }
         /* THE REPLACEMENT. Everything the origin contributed to this channel

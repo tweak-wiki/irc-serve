@@ -11,8 +11,8 @@
  * This one is not that. The bound is IRC_FED_MAX_REMOTE_NICKS, which is 256, and
  * a linear scan of 256 POD entries on a path that runs at most once per inbound
  * burst record is a few hundred comparisons -- and a burst is a transaction that
- * is already O(nicks + members) with a staging buffer the size of half a link's
- * write queue. A hash table here would be a second table, a probe function, a
+ * is already O(nicks + members) with a staging buffer the size of four links'
+ * write queues. A hash table here would be a second table, a probe function, a
  * growth policy and a second teardown arm, all to turn a comparison that happens
  * inside an O(n) transaction into a comparison that happens once.
  *
@@ -25,22 +25,17 @@
  * n_rnick_evicted) and whose cost is better spent on a bigger bound.
  *
  * ---------------------------------------------------------------------------
- * EVICTION IS LEAST-RECENTLY-SEEN, AND WHY THE ORDER IS AN INDEX NOT A FLAG
+ * EVICTION IS LEAST-RECENTLY-SEEN, AND WHY THE ORDER IS A LIST NOT AN INDEX
  * ---------------------------------------------------------------------------
- * A learn() moves its entry to the END of the vector. That single convention is
- * what makes eviction a scan for the lowest index, what makes the sweep
- * (which drops by AGE) a suffix walk once the vector is ordered by seen_ms, and
+ * Every learn, refresh and rename links its entry at the head of an intrusive
+ * LRU list (dedup.c's arrangement: two pointers per entry, +16 B). That single
+ * convention is what makes eviction the tail, what makes a refresh O(1), and
  * what makes "most recent" and "last" the same thing without a field saying so.
- * The cost is that a learn() is O(n) rather than O(1) -- a memmove of the tail --
- * and at 256 entries of 336 bytes that is 86 KiB moved, once per inbound nick
- * record, inside a transaction that is already assembling a megabyte on a large
- * node. The honest comparison is against the alternative: an LRU list (dedup.c's
- * arrangement) is O(1) and costs two pointers per entry, so it is strictly better
- * on the write path and strictly worse on nothing. It is not used here because
- * the write path is a burst and a burst's cost is already accounted for
- * elsewhere; a reader who disagrees should reach for the list and the reasoning
- * to change with it, and the comment is here so that the choice is visible rather
- * than inherited.
+ * The vector itself is unordered storage: scans run over the allocation and
+ * skip holes, and entries never move, which is what keeps the list's pointers
+ * valid. A learn used to move its entry to the END of the vector -- a memmove
+ * of up to 86 KiB per inbound nick record, ~21 MiB inside one 250-nick burst
+ * tick -- and that is why the list is here rather than the index.
  */
 #include "federation/nickreg.h"
 
@@ -61,7 +56,7 @@
  * that is not due. */
 #define IRC_FED_RNICK_SWEEP_MS (IRC_FED_RNICK_TTL_MS / 16u)
 
-/* One remote user, as some server last reported it.
+/* One remote user, as some server last reported.
  *
  * THE LAYOUT IS WRITTEN OUT AS ARITHMETIC rather than left implicit, and it is
  * the same reason dedup.h gives for its entry size: a size that is quoted in a
@@ -80,16 +75,18 @@
  *   host[CHAN_MAX_REMOTE_HOST+1]  128
  *   signon                         8
  *   seen_ms                        8
+ *   lru_prev + lru_next            16
  *                                  ---
- *                                  336   == IRC_FED_RNICK_ENTRY_BYTES
+ *                                  352   == IRC_FED_RNICK_ENTRY_BYTES
  *
- * AND IT IS NOT PADDED DELIBERATELY. A `used` flag or an explicit LRU pair would
- * push the entry to 344 or 352 and the table from 86 KiB to 90, and the
- * occupancy is already implied: a freed slot is emptied and a learned one is
- * written whole. The empty-slot marker is `nick[0] == '\0'`, which is
- * unambiguous because 2.1's valid_nick() rejects an empty nickname -- so a zeroed
- * entry is free and a used entry is not, with no field to disagree. */
-#define IRC_FED_RNICK_ENTRY_BYTES 336u
+ * THE LRU PAIR IS WHAT MAKES LEARN O(1): the links live in the entry the way
+ * dedup's do, so touching a record unlinks and re-links two pointers instead of
+ * memmoving the 88 KiB tail behind it. Pointers and not indices because entries
+ * never move -- nothing compacts the vector any more, so a pointer into the
+ * calloc stays valid for the table's life. A freed slot is emptied AND unlinked,
+ * and the empty-slot marker is still `nick[0] == '\0'`, which is unambiguous
+ * because 2.1's valid_nick() rejects an empty nickname. */
+#define IRC_FED_RNICK_ENTRY_BYTES 352u
 
 struct fed_rnick {
     char     nick[IRC_MAX_NICK + 1];
@@ -98,6 +95,8 @@ struct fed_rnick {
     char     host[CHAN_MAX_REMOTE_HOST + 1];
     uint64_t signon;
     uint64_t seen_ms;
+    struct fed_rnick *lru_prev; /* LRU: less recently seen (NULL at the tail) */
+    struct fed_rnick *lru_next; /* LRU: more recently seen (NULL at the head) */
 };
 
 /* Nickname and server-name comparison is message.h's irc_ascii_same()
@@ -152,11 +151,10 @@ static struct fed_rnick *nickreg_find(server_t *s, const char *nick,
     if (s == NULL || nick == NULL || s->rnicks == NULL) {
         return NULL;
     }
-    /* OVER nrnick_used AND NOT nrnicks, and the difference is a correctness
-     * matter rather than a speed one: nrnicks is the ALLOCATED length (see
-     * server.h) and the tail of it is calloc-zeroed, so a scan over nrnicks reads
-     * 256 entries to find one. The two are equal only when the table is full. */
-    for (i = 0; i < s->nrnick_used; i++) {
+    /* OVER nrnicks, skipping holes: entries never move, so a freed slot stays a
+     * hole and `nrnick_used` is a live count, not a bound. The zeroed tail and
+     * the holes are skipped the same way. */
+    for (i = 0; i < s->nrnicks; i++) {
         struct fed_rnick *e = &s->rnicks[i];
 
         if (e->nick[0] == '\0') {
@@ -173,43 +171,68 @@ static struct fed_rnick *nickreg_find(server_t *s, const char *nick,
     return NULL;
 }
 
-/* Move entry `idx` to the END of the vector, which is what makes the vector
- * ordered least-recently-used first. A memmove rather than a swap: a swap would
- * leave the vector unordered and the eviction scan would have to compare
- * seen_ms across all of them. The cost is O(n) per learn and the benefit is that
- * eviction AND the sweep are both index walks, which the header explains. */
-static void nickreg_touch(server_t *s, size_t idx)
+/* The LRU list, dedup's operations on server_t's head and tail: the head is the
+ * most recently seen, the tail the eviction candidate. Push and unlink are
+ * separate because eviction unlinks WITHOUT re-linking, and the sweep unlinks
+ * the entries it drops the same way. */
+static void nickreg_lru_push_head(server_t *s, struct fed_rnick *e)
 {
-    struct fed_rnick tmp;
-
-    /* OVER nrnick_used, and the reason is eviction: append() drops index 0 when
-     * the table is full, so "the least recently seen" is only index 0 if the
-     * vector's LIVE part is ordered. Touching against the allocated length would
-     * rotate 200-odd zeroed slots instead of the entries, and the ordering the
-     * eviction depends on would never be established at all. */
-    if (idx >= s->nrnick_used || (idx + 1u) >= s->nrnick_used) {
-        return;
+    e->lru_prev = NULL;
+    e->lru_next = s->nrnick_lru_head;
+    if (s->nrnick_lru_head != NULL) {
+        s->nrnick_lru_head->lru_prev = e;
     }
-    tmp = s->rnicks[idx];
-    memmove(&s->rnicks[idx], &s->rnicks[idx + 1u],
-            (s->nrnick_used - idx - 1u) * sizeof *s->rnicks);
-    s->rnicks[s->nrnick_used - 1u] = tmp;
+    s->nrnick_lru_head = e;
+    if (s->nrnick_lru_tail == NULL) {
+        s->nrnick_lru_tail = e;
+    }
 }
 
-/* Append a new entry, growing the vector geometrically like every other registry
- * on server_t, and EVICTING the least recently seen when it is at its bound.
+static void nickreg_lru_unlink(server_t *s, struct fed_rnick *e)
+{
+    if (e->lru_prev != NULL) {
+        e->lru_prev->lru_next = e->lru_next;
+    } else if (s->nrnick_lru_head == e) {
+        s->nrnick_lru_head = e->lru_next;
+    }
+    if (e->lru_next != NULL) {
+        e->lru_next->lru_prev = e->lru_prev;
+    } else if (s->nrnick_lru_tail == e) {
+        s->nrnick_lru_tail = e->lru_prev;
+    }
+    e->lru_prev = NULL;
+    e->lru_next = NULL;
+}
+
+/* Mark `e` most recently seen. Pointer writes rather than the memmove this
+ * replaced: a touch per burst record is what made a 250-nick burst copy
+ * ~21 MiB inside one tick. */
+static void nickreg_touch(server_t *s, struct fed_rnick *e)
+{
+    if (s->nrnick_lru_head == e) {
+        return;
+    }
+    nickreg_lru_unlink(s, e);
+    nickreg_lru_push_head(s, e);
+}
+
+/* Hand out a slot for a new entry, EVICTING the least recently seen when the
+ * table is full.
  *
  * THE EVICTION IS NOT A REFUSAL, and the reason is 2.2's rule for the topic
  * cache: a cache that can refuse is a cache that can break a client command. A
  * node that has been told about more remote users than it will remember drops
- * the oldest and counts it, because the alternative -- refusing to learn a nick at
- * all -- would make a peer's resync silently incomplete, which is a far worse
+ * the oldest and counts it, because the alternative -- refusing to learn a nick
+ * at all -- would make a peer's resync silently incomplete, which is a far worse
  * failure than a forgotten entry that the next resync will supply again. */
 static struct fed_rnick *nickreg_append(server_t *s)
 {
+    size_t i;
+    struct fed_rnick *e = NULL;
+
     if (s->rnicks == NULL) {
         /* LAZILY, and the reason is the cost argument in the header: a node with
-         * no peers never learns a remote nick, so allocating 86 KiB at
+         * no peers never learns a remote nick, so allocating 88 KiB at
          * server_init() would be a cost paid by every single-node deployment for
          * a feature none of them can use. This is the same arrangement the dedup
          * table makes and for the same reason. */
@@ -225,28 +248,30 @@ static struct fed_rnick *nickreg_append(server_t *s)
         }
         s->nrnicks = IRC_FED_MAX_REMOTE_NICKS;
     }
-    if (s->nrnick_used >= IRC_FED_MAX_REMOTE_NICKS) {
-        /* Oldest first, which the touch() convention makes index 0. The dropped
-         * entry is CLEARED rather than merely skipped so a later reuse of the slot
-         * cannot inherit a prefix of it.
-         *
-         * AND THEN THE VECTOR IS COMPACTED, which is the part that makes the
-         * append below in-bounds: with the table full, dropping index 0 and
-         * appending at index 256 would write one element PAST the calloc, and the
-         * only reason that is worth stating is that it is the kind of bug a
-         * 256-entry bound makes easy to reach and hard to see. Shifting the tail
-         * down by one keeps `nrnick_used` at the bound and the vector dense, at a
-         * cost of one memmove that only happens on a table that is already full. */
-        memmove(&s->rnicks[0], &s->rnicks[1],
-                (IRC_FED_MAX_REMOTE_NICKS - 1u) * sizeof s->rnicks[0]);
-        memset(&s->rnicks[IRC_FED_MAX_REMOTE_NICKS - 1u], 0,
-               sizeof s->rnicks[0]);
+    /* A freed hole first: the scan reads first bytes only, not whole entries.
+     * No hole means the table is full, so the LRU tail is evicted and its slot
+     * reused in place -- no memmove on either path. */
+    for (i = 0; i < s->nrnicks; i++) {
+        if (s->rnicks[i].nick[0] == '\0') {
+            e = &s->rnicks[i];
+            break;
+        }
+    }
+    if (e == NULL) {
+        /* The dropped slot is CLEARED rather than merely unlinked so a reused
+         * entry cannot inherit a prefix of the evicted one. */
+        e = s->nrnick_lru_tail;
+        nickreg_lru_unlink(s, e);
+        memset(e, 0, sizeof *e);
         s->nrnick_used--;
         s->n_rnick_evicted++;
         printf("[observable] fed_nick_evicted: table=%zu bound=%zu\n",
-               s->nrnick_used, IRC_FED_MAX_REMOTE_NICKS);
+               s->nrnick_used, (size_t)IRC_FED_MAX_REMOTE_NICKS);
     }
-    return &s->rnicks[s->nrnick_used++];
+    memset(e, 0, sizeof *e);
+    s->nrnick_used++;
+    nickreg_lru_push_head(s, e);
+    return e;
 }
 
 /* The shared body of the two learn functions. `server` may be "" and the
@@ -456,7 +481,6 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
                           uint64_t now_ms)
 {
     struct fed_rnick *e;
-    size_t idx;
     int have;
 
     if (s == NULL || nick == NULL || nick[0] == '\0' || !valid_nick(nick)) {
@@ -470,7 +494,6 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
     }
     e = nickreg_find(s, nick, server);
     if (e != NULL) {
-        idx = (size_t)(e - s->rnicks);
         /* A REPEAT REFRESHES rather than adding, which is what makes this a map
          * and not a log. `server` is deliberately not overwritten when it is
          * empty: an entry that came from a live SJOIN has no holder, and a later
@@ -503,17 +526,16 @@ static void nickreg_learn(server_t *s, const char *nick, const char *server,
             e->signon = signon;
         }
         e->seen_ms = now_ms;
-        nickreg_touch(s, idx);
+        nickreg_touch(s, e);
         return;
     }
     e = nickreg_append(s);
     if (e == NULL) {
         return;
     }
-    /* Cleared whole before the copies, so a reused slot cannot keep a field the
-     * new report does not carry. This is the reason eviction memsets rather than
-     * overwriting only what it knows. */
-    memset(e, 0, sizeof *e);
+    /* Already zeroed by append(), which is what keeps a reused slot from keeping
+     * a field the new report does not carry -- and why the zeroing lives there
+     * rather than here, where it would also clear the links append() just set. */
     have = nickreg_copy(e->nick, sizeof e->nick, nick);
     (void)nickreg_copy(e->server, sizeof e->server, server);
     /* The two hostmask components go through the SAME predicate as the refresh arm
@@ -579,13 +601,14 @@ void fed_nickreg_learn_member(server_t *s, const char *nick,
 void fed_nickreg_forget(server_t *s, const char *nick, const char *server)
 {
     size_t i;
-    size_t j;
 
     if (s == NULL || s->rnicks == NULL || nick == NULL) {
         return;
     }
-    /* nrnick_used, not nrnicks -- see nickreg_find(). */
-    for (i = 0; i < s->nrnick_used; i++) {
+    /* Over the allocation, skipping holes: entries never move, so removal only
+     * unlinks and zeroes, and a wildcard forget needs no re-examination of an
+     * index the compaction used to shift into. A PART is not a hot path. */
+    for (i = 0; i < s->nrnicks; i++) {
         if (s->rnicks[i].nick[0] == '\0' || !irc_ascii_same(s->rnicks[i].nick, nick)) {
             continue;
         }
@@ -593,28 +616,9 @@ void fed_nickreg_forget(server_t *s, const char *nick, const char *server)
             !irc_ascii_same(s->rnicks[i].server, server)) {
             continue;
         }
-        /* COMPACT rather than clear-and-leave-a-hole, and the reason is the
-         * index-based eviction: a hole would mean the least-recently-seen entry is
-         * not at index 0, and the eviction would have to scan. Compacting keeps
-         * the vector dense and the order intact, and a PART is not a hot path. */
-        for (j = i + 1u; j < s->nrnick_used; j++) {
-            s->rnicks[j - 1u] = s->rnicks[j];
-        }
+        nickreg_lru_unlink(s, &s->rnicks[i]);
+        memset(&s->rnicks[i], 0, sizeof s->rnicks[0]);
         s->nrnick_used--;
-        memset(&s->rnicks[s->nrnick_used], 0, sizeof s->rnicks[0]);
-        if (server == NULL || server[0] == '\0') {
-            /* A wildcard forget may have several entries for this nick, and
-             * after compacting the next one has moved into `i`, so the loop must
-             * re-examine this index rather than advance past it. THE TEST IS
-             * `i > 0` AND NOT `i--`: i is a size_t, so an unconditional decrement
-             * at i == 0 wraps to SIZE_MAX, the `i < nrnick_used` test passes, and
-             * the next iteration indexes the vector at the end of the address
-             * space. That is the one place in this file where a loop counter needs
-             * a guard rather than an idiom. */
-            if (i > 0u) {
-                i--;
-            }
-        }
     }
 }
 
@@ -622,7 +626,7 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
                        const char *new_nick, uint64_t now_ms)
 {
     size_t i;
-    size_t at = s != NULL ? s->nrnick_used : 0u;
+    size_t at = s != NULL ? s->nrnicks : 0u;
 
     if (s == NULL || s->rnicks == NULL || server == NULL || old_nick == NULL ||
         new_nick == NULL) {
@@ -646,7 +650,7 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
          * that sends both is not asking for a rename. */
         return 0;
     }
-    for (i = 0; i < s->nrnick_used; i++) {
+    for (i = 0; i < s->nrnicks; i++) {
         if (s->rnicks[i].nick[0] == '\0' || !irc_ascii_same(s->rnicks[i].nick, new_nick)) {
             continue;
         }
@@ -664,7 +668,7 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
          * make one of two live users unreachable. */
         return -1;
     }
-    for (i = 0; i < s->nrnick_used; i++) {
+    for (i = 0; i < s->nrnicks; i++) {
         if (s->rnicks[i].nick[0] == '\0' || !irc_ascii_same(s->rnicks[i].nick, old_nick)) {
             continue;
         }
@@ -674,7 +678,7 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
         at = i;
         break;
     }
-    if (at == s->nrnick_used) {
+    if (at == s->nrnicks) {
         return 0;
     }
 
@@ -693,19 +697,11 @@ int fed_nickreg_rename(server_t *s, const char *server, const char *old_nick,
      * 2.2's mode timestamps are derived from. */
     s->rnicks[at].seen_ms = now_ms;
 
-    /* TO THE RECENT END, because eviction is index-0-driven and an entry left at
-     * its old index would be the next evicted one despite having just been
-     * confirmed. The move is a rotate, not a remove-and-append, so the entry's
+    /* TO THE LRU HEAD, because eviction is tail-driven and an entry left where
+     * it was would be evicted next despite having just been confirmed. The
      * fields are not rebuilt -- in particular `user` and `host` are carried
      * through unchanged, which is the point of a rename over a re-learn. */
-    if (at + 1u < s->nrnick_used) {
-        struct fed_rnick moved = s->rnicks[at];
-
-        for (i = at + 1u; i < s->nrnick_used; i++) {
-            s->rnicks[i - 1u] = s->rnicks[i];
-        }
-        s->rnicks[s->nrnick_used - 1u] = moved;
-    }
+    nickreg_touch(s, &s->rnicks[at]);
     return 1;
 }
 
@@ -739,7 +735,7 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
     {
         int have = 0;
 
-        for (size_t i = 0; i < s->nrnick_used; i++) {
+        for (size_t i = 0; i < s->nrnicks; i++) {
             const struct fed_rnick *e = &s->rnicks[i];
 
             if (e->nick[0] == '\0' || !irc_ascii_same(e->nick, nick)) {
@@ -907,21 +903,20 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
 void fed_nickreg_purge_server(server_t *s, const char *server)
 {
     size_t i;
-    size_t j;
 
     if (s == NULL || s->rnicks == NULL || server == NULL) {
         return;
     }
-    for (i = 0; i < s->nrnick_used; i++) {
+    /* No compaction and no index repair: entries never move, so removal only
+     * unlinks and zeroes -- which also retires purge's wraparound `i--`, whose
+     * correctness depended on the shift it compensated for. */
+    for (i = 0; i < s->nrnicks; i++) {
         if (s->rnicks[i].nick[0] == '\0' || !irc_ascii_same(s->rnicks[i].server, server)) {
             continue;
         }
-        for (j = i + 1u; j < s->nrnick_used; j++) {
-            s->rnicks[j - 1u] = s->rnicks[j];
-        }
+        nickreg_lru_unlink(s, &s->rnicks[i]);
+        memset(&s->rnicks[i], 0, sizeof s->rnicks[0]);
         s->nrnick_used--;
-        memset(&s->rnicks[s->nrnick_used], 0, sizeof s->rnicks[0]);
-        i--;
     }
 }
 
@@ -943,33 +938,29 @@ size_t fed_nickreg_sweep(server_t *s, uint64_t now_ms)
         return 0;
     }
     s->nrnick_swept_ms = now_ms;
-    /* A SUFFIX WALK, and the reason it can be one is the touch() convention: the
-     * vector is ordered least-recently-USED first, which for a store where
-     * "used" means "last learned" is the same order as "least recently SEEN". An
-     * entry is expired exactly when every entry after it is, so the walk stops at
-     * the first live one rather than examining all of them. */
-    for (i = 0; i < s->nrnick_used; i++) {
+    /* A FULL SCAN, unlinking the expired: the vector is no longer ordered by
+     * recency, so the suffix walk's early break would be wrong. A sweep runs at
+     * most every TTL/16 and unlinks rather than shifting, so examining all of
+     * the table costs a walk, not a copy. */
+    for (i = 0; i < s->nrnicks; i++) {
         struct fed_rnick *e = &s->rnicks[i];
 
         if (e->nick[0] == '\0') {
             continue;
         }
         if ((now_ms - e->seen_ms) < IRC_FED_RNICK_TTL_MS) {
-            break;
+            continue;
         }
-        last = e->seen_ms;
+        if (dropped == 0u || e->seen_ms < last) {
+            last = e->seen_ms;
+        }
+        nickreg_lru_unlink(s, e);
+        memset(e, 0, sizeof *e);
         dropped++;
     }
     if (dropped == 0u) {
         return 0;
     }
-    /* Shifting the live tail down over the dropped prefix rather than clearing
-     * each entry, so a sweep of 200 entries is two memmoves and not 200. */
-    for (i = 0; i + dropped < s->nrnick_used; i++) {
-        s->rnicks[i] = s->rnicks[i + dropped];
-    }
-    memset(&s->rnicks[s->nrnick_used - dropped], 0,
-           dropped * sizeof s->rnicks[0]);
     s->nrnick_used -= dropped;
     printf("[observable] fed_nick_swept: dropped=%zu ttl_ms=%llu oldest_ms=%llu "
            "left=%zu\n",
@@ -996,6 +987,8 @@ void fed_nickreg_close(server_t *s)
     held = s->nrnick_used;
     free(s->rnicks);
     s->rnicks = NULL;
+    s->nrnick_lru_head = NULL;
+    s->nrnick_lru_tail = NULL;
     s->nrnick_used = 0;
     s->nrnick_swept_ms = 0;
     /* WHETHER IT HELD ANYTHING, which is the fact a reader of a node's last line
@@ -1008,7 +1001,7 @@ void fed_nickreg_close(server_t *s)
 const char *fed_nickreg_holder(const server_t *s, const char *nick, char *out,
                                size_t cap, int *ambiguous_out)
 {
-    size_t i;
+    const struct fed_rnick *e;
     int found = 0;
 
     if (ambiguous_out != NULL) {
@@ -1020,9 +1013,10 @@ const char *fed_nickreg_holder(const server_t *s, const char *nick, char *out,
     if (s == NULL || s->rnicks == NULL || nick == NULL || out == NULL || cap == 0u) {
         return NULL;
     }
-    for (i = 0; i < s->nrnick_used; i++) {
-        const struct fed_rnick *e = &s->rnicks[i];
-
+    /* From the LRU TAIL, which is what keeps "the first holder is the answer"
+     * meaning what it meant when the vector itself was LRU-ordered: the least
+     * recently seen holder answers, and the flag names the rest. Still O(256). */
+    for (e = s->nrnick_lru_tail; e != NULL; e = e->lru_prev) {
         if (e->nick[0] == '\0' || !irc_ascii_same(e->nick, nick)) {
             continue;
         }
@@ -1162,12 +1156,12 @@ int fed_nickreg_next_name(const server_t *s, const char *nick, char *out,
          * fed_nickreg_local_loses() on whatever this returns, which is the
          * check against a REMOTE holder -- this one is against a local one and
          * the two are different tables. */
-        for (i = 0; i < s->nrnick_used; i++) {
+        for (i = 0; i < s->nrnicks; i++) {
             if (s->rnicks[i].nick[0] != '\0' && irc_ascii_same(s->rnicks[i].nick, candidate)) {
                 break;
             }
         }
-        if (i < s->nrnick_used) {
+        if (i < s->nrnicks) {
             continue;
         }
         /* The LOCAL nick registry is the other thing a candidate can collide

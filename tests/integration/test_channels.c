@@ -56,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/chan_verbs.h"
 #include "core/channel.h"
 #include "core/commands.h"
 #include "core/server.h"
@@ -1175,6 +1176,83 @@ static void test_names_and_list(nf_node_t *node)
     tc_close(&lurker.c);
 }
 
+/* #220: a bare LIST / bare NAMES stops at CHAN_ENUM_MAX channels and says so.
+ * Joins CHAN_ENUM_MAX + 6 channels, so the truncation comes from this test's
+ * own channels alone rather than from whatever earlier tests left behind. The
+ * reply still closes normally (323, per-channel 366s); the truncation is the
+ * node's own observable, the same shape as WHO's who_truncated. */
+static void test_list_names_truncation(nf_node_t *node)
+{
+    enum { EXTRA = 6 };
+    client_t c;
+    char line[512];
+    size_t mark;
+    size_t found;
+    const char *p;
+    const char *buf;
+
+    client_open(&c, node, "lte");
+    /* Batched JOINs, 16 to a command like test_channel_cap: one line per
+     * channel would work but spends a drain each. */
+    for (size_t base = 0; base < (size_t)CHAN_ENUM_MAX + EXTRA; base += 16u) {
+        size_t used = 5; /* "JOIN " */
+
+        memcpy(line, "JOIN ", 5);
+        for (size_t k = 0; k < 16u && base + k < (size_t)CHAN_ENUM_MAX + EXTRA;
+             k++) {
+            char chan[16];
+
+            (void)snprintf(chan, sizeof chan, "#LT%04u",
+                           (unsigned)(base + k));
+            if (k != 0) {
+                line[used++] = ',';
+            }
+            memcpy(line + used, chan, strlen(chan) + 1u);
+            used += strlen(chan);
+        }
+        TF_CHECK_MSG(tc_send(&c.c, line) == 0, "batched JOIN send failed");
+    }
+    (void)send_and_drain(&c, "lt-joined");
+
+    /* A bare LIST answers exactly CHAN_ENUM_MAX 322s and still closes. */
+    mark = tc_received(&c.c);
+    client_send(&c, "LIST");
+    (void)send_and_drain(&c, "lt-list");
+    buf = tc_buffer(&c.c);
+    expect_line(&c.c, "321 opening a truncated LIST",
+                ":irc.test 321 lte Channel :Users  Name\r\n");
+    found = 0;
+    for (p = strstr(buf + mark, " 322 "); p != NULL;
+         p = strstr(p + 1, " 322 ")) {
+        found++;
+    }
+    TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
+                 "a bare LIST over %d channels drew %zu 322s, not %d",
+                 CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
+    expect_line(&c.c, "323 closing a truncated LIST",
+                ":irc.test 323 lte :End of LIST\r\n");
+    TF_CHECK_MSG(nf_expect(node, "list_truncated:", T_IO_MS) == 0,
+                 "the node never reported list_truncated for a LIST past the cap");
+
+    /* A bare NAMES answers exactly CHAN_ENUM_MAX channel groups. */
+    mark = tc_received(&c.c);
+    client_send(&c, "NAMES");
+    (void)send_and_drain(&c, "lt-names");
+    buf = tc_buffer(&c.c);
+    found = 0;
+    for (p = strstr(buf + mark, " 366 "); p != NULL;
+         p = strstr(p + 1, " 366 ")) {
+        found++;
+    }
+    TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
+                 "a bare NAMES over %d channels drew %zu 366s, not %d",
+                 CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
+    TF_CHECK_MSG(nf_expect(node, "names_truncated:", T_IO_MS) == 0,
+                 "the node never reported names_truncated for a NAMES past the cap");
+
+    tc_close(&c.c);
+}
+
 /* 324 and 329, and the two 472s: a mode letter this node does not evaluate, and
  * a mode string with no sign. */
 static void test_mode(nf_node_t *node)
@@ -1245,6 +1323,28 @@ static void test_mode(nf_node_t *node)
                     "#MO\r\n");
         expect_472_fields(&a.c, from, "472 for a mode string with no sign", "#MO",
                           "k");
+    }
+
+    /* An EMPTY mode string is 461, not 472: "" names no letter at all, so there
+     * is nothing for 472's <char> field to hold, and "not enough parameters"
+     * is the true statement. `MODE #mo :` is the wire form -- a trailing colon
+     * with nothing after it parses to params[1] == "". */
+    {
+        (void)send_and_drain(&a, "m-461-empty");
+        client_send(&a, "MODE #mo :");
+        (void)send_and_drain(&a, "m-461-empty-after");
+        expect_line(&a.c, "461 for an empty mode string",
+                    ":irc.test 461 moa MODE :Not enough parameters\r\n");
+    }
+
+    /* A LONE SIGN is 461 too: "+" carries the sign and no letters, which is the
+     * same too-FEW shape as the empty string. */
+    {
+        (void)send_and_drain(&a, "m-461-sign");
+        client_send(&a, "MODE #mo +");
+        (void)send_and_drain(&a, "m-461-sign-after");
+        expect_line(&a.c, "461 for a lone-sign mode string",
+                    ":irc.test 461 moa MODE :Not enough parameters\r\n");
     }
 
     /* A THIRD CHARACTER, to prove the field is the client's byte and not a
@@ -2101,8 +2201,39 @@ static void test_remote_server_cache(nf_node_t *node)
     tc_close(&c.c);
 }
 
+/* Issue #213: servers[] is filled from peer reports, so it is capped at
+ * CHAN_MAX_MEMBER_SERVERS the way the remote roster is capped -- a peer
+ * reporting new server names must not grow it without bound. In-process: no
+ * node is needed to prove the bound holds. */
+static void test_server_list_cap(void)
+{
+    chan_t *ch = chan_new("#captest", "irc.fixture", 1u);
+    char name[CHAN_MAX_SERVER + 1];
+    size_t i;
+
+    TF_CHECK_MSG(ch != NULL, "chan_new failed for the cap probe");
+    for (i = 0; i < (size_t)CHAN_MAX_MEMBER_SERVERS; i++) {
+        (void)snprintf(name, sizeof name, "srv%zu", i);
+        TF_CHECK_MSG(chan_server_add(ch, name) == 0,
+                     "servers[] refused entry %zu of %d", i,
+                     CHAN_MAX_MEMBER_SERVERS);
+    }
+    TF_CHECK_MSG(chan_server_add(ch, "one-too-many") == -1,
+                 "servers[] grew past CHAN_MAX_MEMBER_SERVERS (%d)",
+                 CHAN_MAX_MEMBER_SERVERS);
+    TF_CHECK_MSG(ch->nservers == (size_t)CHAN_MAX_MEMBER_SERVERS,
+                 "servers[] holds %zu entries after a refused add, not %d",
+                 ch->nservers, CHAN_MAX_MEMBER_SERVERS);
+    TF_CHECK_MSG(chan_server_add(ch, "srv0") == 0,
+                 "a full servers[] stopped being idempotent for a known name");
+    chan_free(ch);
+}
+
 int main(void)
 {
+    /* In-process bound check first: needs no node, and a red here means the
+     * cap below never held rather than that the wire hid it. */
+    test_server_list_cap();
     nf_node_t node;
 
     /* ------------------------------------------------------------------ */
@@ -2120,6 +2251,7 @@ int main(void)
     test_part(&node);
     test_join_skips_empty(&node);
     test_names_and_list(&node);
+    test_list_names_truncation(&node);
     test_mode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);

@@ -206,7 +206,8 @@ static void check_roundtrip(const hostile_t *h)
  *
  *   - a '' before a character outside the escape set has its BACKSLASH DROPPED,
  *     so `\b` is `b` and NOT `\b`;
- *   - a lone trailing '' produces no output character;
+ *   - a lone trailing '' is malformed and refuses the block (#278): decoding
+ *     it would silently drop a byte, merging distinct wire values;
  *   - `\:` is a SEMICOLON and `\;` is an invalid escape that also decodes to a
  *     semicolon, so a block written with the wrong table still yields the value
  *     its author meant.
@@ -223,11 +224,10 @@ static void check_noncanonical(void)
     assert(ircv3_tags_parse("@v=\\b", &t) == 0);
     assert(strcmp(ircv3_tags_get(&t, "v"), "b") == 0);
 
-    assert(ircv3_tags_parse("@v=ab\\", &t) == 0);
-    assert(strcmp(ircv3_tags_get(&t, "v"), "ab") == 0);
-
-    assert(ircv3_tags_parse("@v=\\", &t) == 0);
-    assert(strcmp(ircv3_tags_get(&t, "v"), "") == 0);
+    /* A lone trailing backslash is malformed, not silent truncation (#278):
+     * the block is refused rather than decoded with a byte missing. */
+    assert(ircv3_tags_parse("@v=ab\\", &t) != 0);
+    assert(ircv3_tags_parse("@v=\\", &t) != 0);
 
     assert(ircv3_tags_parse("@v=\\:", &t) == 0);
     assert(strcmp(ircv3_tags_get(&t, "v"), ";" ) == 0);
@@ -292,9 +292,11 @@ static void check_table(void)
     assert(ircv3_unescape_value("\\\\", 2, e, sizeof e) == 0 && strcmp(e, "\\") == 0);
     assert(ircv3_unescape_value("\\r", 2, e, sizeof e) == 0 && strcmp(e, "\r") == 0);
     assert(ircv3_unescape_value("\\n", 2, e, sizeof e) == 0 && strcmp(e, "\n") == 0);
-    /* An invalid escape loses the backslash; a lone trailing one loses itself. */
+    /* An invalid escape loses the backslash; a lone trailing one is malformed
+     * and refuses (#278) rather than decoding to nothing. */
     assert(ircv3_unescape_value("\\b", 2, e, sizeof e) == 0 && strcmp(e, "b") == 0);
-    assert(ircv3_unescape_value("\\", 1, e, sizeof e) == 0 && strcmp(e, "") == 0);
+    assert(ircv3_unescape_value("\\", 1, e, sizeof e) == -1);
+    assert(ircv3_unescape_value("ab\\", 3, e, sizeof e) == -1);
 
     /* Capacity: never truncate. A cap one byte short of the value plus its NUL
      * refuses and leaves the output empty, which is 3.2's rule applied to a
@@ -321,7 +323,9 @@ static void check_message_wrappers(void)
     assert(message_tag_escape(" ", e, sizeof e) == 2 && strcmp(e, "\\s") == 0);
     assert(message_tag_unescape("\\:", e, sizeof e) == 0 && strcmp(e, ";") == 0);
     assert(message_tag_unescape("\\b", e, sizeof e) == 0 && strcmp(e, "b") == 0);
-    assert(message_tag_unescape("ab\\", e, sizeof e) == 0 && strcmp(e, "ab") == 0);
+    /* A lone trailing backslash refuses (#278), like the function it wraps. */
+    assert(message_tag_unescape("ab\\", e, sizeof e) == -1);
+    assert(message_tag_unescape("\\", e, sizeof e) == -1);
 }
 
 /* The legacy pair is a parse -> list -> serialize now, not a copy, so a block

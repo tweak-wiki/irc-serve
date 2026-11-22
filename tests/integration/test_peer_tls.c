@@ -75,8 +75,10 @@
 #include <unistd.h>
 
 #include "harness/node_fixture.h"
+#include "harness/irc_client.h"
 #include "harness/test_util.h"
 #include "harness/tls_fixture.h"
+#include "core/server.h"
 
 /* THE FIXTURE'S DIRECTORY AND THE PATHS BUILT FROM IT.
  *
@@ -318,7 +320,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -505,7 +507,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -590,7 +592,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const cert_opt = "--tls-cert";
         static const char *const key_opt = "--tls-key";
@@ -695,7 +697,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -778,7 +780,7 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -898,6 +900,121 @@ int main(void)
                 (void)nf_stop(&na);
                 nf_free(&na);
             }
+            (void)nf_stop(&nb);
+            nf_free(&nb);
+        }
+    }
+
+    /* ===== CASE 6: A PLAINTEXT FEDERATE FOR A TLS-REQUIRED PEER ==========
+     * Issue #221: --peer-tls enforced only the direction this node dials, so
+     * a FEDERATE arriving on the plaintext port -- carrying the shared secret
+     * in the clear -- still established the link. The handshake now refuses
+     * it as TLS_REQUIRED before the secret is compared. The control (the same
+     * FEDERATE to a node without --peer-tls for that peer) proves a plaintext
+     * FEDERATE still establishes, so a plaintext mesh is untouched.
+     *
+     * No TLS handshake happens anywhere in this case: both FEDERATEs go to
+     * the node's PLAINTEXT port, which is exactly the path that used to leak.
+     * The peer address both nodes dial is a dead port -- link establishment
+     * is never via the dial, only via the FEDERATE under test. */
+    {
+        static const char *const prog = "irc-serve";
+        static const char *const zero = "0";
+        static const char *const name_opt = "--name";
+        static const char *const secret_opt = "--secret";
+        /* 16-byte floor (#205): the same shared secret the other cases
+         * use would also pass, but a distinct long value keeps this
+         * case's wire bytes distinguishable in logs. */
+        static const char *const shared_secret = "shared-tls-case6-secret";
+        static const char *const peer_opt = "--peer";
+        static const char *const peer_tls_opt = "--peer-tls";
+        static const char *const cert_opt = "--tls-cert";
+        static const char *const key_opt = "--tls-key";
+        static const char *const ca_opt = "--tls-ca";
+        static const char *const dead_peer = "irc.a,127.0.0.1,1";
+        /* Built, not literal: test_version_truth forbids a hardcoded version,
+         * and the macro is what the node compares against. */
+        char fed_line[128];
+        argv_build_t b;
+        test_client_t fc;
+
+        (void)snprintf(fed_line, sizeof fed_line,
+                       ":irc.a FEDERATE irc.a 1700000000 shared-tls-case6-secret %s",
+                       IRC_SERVE_VERSION);
+
+        /* The refusing node: irc.b requires TLS for irc.a, and the FEDERATE
+         * below arrives on irc.b's plaintext port. */
+        ab_init(&b);
+        ab_add(&b, prog);
+        ab_add(&b, zero);
+        ab_opt(&b, name_opt, "irc.b");
+        ab_opt(&b, secret_opt, shared_secret);
+        ab_opt(&b, peer_opt, dead_peer);
+        ab_opt(&b, peer_tls_opt, "irc.a");
+        ab_opt(&b, cert_opt, b_cert);
+        ab_opt(&b, key_opt, b_key);
+        ab_opt(&b, ca_opt, a_cert);
+        if (nf_spawn_binary_argv(&nb, ab_finish(&b)) != 0) {
+            check(0, "spawn irc.b, which requires TLS for irc.a", NULL);
+        } else {
+            check(nf_expect(&nb, "link_tls: peer=irc.a require_tls=1", 5000) == 0,
+                  "irc.b records that the link to irc.a is REQUIRED to carry TLS",
+                  nb.out);
+            tc_init(&fc);
+            check(tc_connect(&fc, nb.port) == 0,
+                  "the test could not open a plaintext connection to irc.b",
+                  NULL);
+            check(tc_send(&fc, fed_line) == 0,
+                  "the test could not send a plaintext FEDERATE to irc.b",
+                  NULL);
+            check(nf_expect(&nb, "link_rejected: peer=irc.a reason=TLS_REQUIRED",
+                            5000) == 0,
+                  "a plaintext FEDERATE for a TLS-required peer was not refused "
+                  "as TLS_REQUIRED: the secret travelled in the clear and the "
+                  "refusal names nothing",
+                  nb.out);
+            check(nf_expect(&nb, "rej_tls=1", 5000) == 0,
+                  "the refusal is not counted under its own reason",
+                  nb.out);
+            check(tc_expect_eof(&fc, 5000) == 0,
+                  "the refused connection was left open: a refused handshake "
+                  "must close the descriptor",
+                  NULL);
+            tc_close(&fc);
+            (void)nf_stop(&nb);
+            nf_free(&nb);
+        }
+        /* The control: the same node without --peer-tls accepts the same
+         * plaintext FEDERATE, so the refusal above is the requirement and
+         * not the port. */
+        ab_init(&b);
+        ab_add(&b, prog);
+        ab_add(&b, zero);
+        ab_opt(&b, name_opt, "irc.b");
+        ab_opt(&b, secret_opt, shared_secret);
+        ab_opt(&b, peer_opt, dead_peer);
+        ab_opt(&b, cert_opt, b_cert);
+        ab_opt(&b, key_opt, b_key);
+        ab_opt(&b, ca_opt, a_cert);
+        if (nf_spawn_binary_argv(&nb, ab_finish(&b)) != 0) {
+            check(0, "spawn the control irc.b, with no --peer-tls", NULL);
+        } else {
+            tc_init(&fc);
+            check(tc_connect(&fc, nb.port) == 0,
+                  "the test could not open a connection to the control node",
+                  NULL);
+            check(tc_send(&fc, fed_line) == 0,
+                  "the test could not send FEDERATE to the control node",
+                  NULL);
+            check(nf_expect(&nb, "link_established: peer=irc.a", 10000) == 0,
+                  "a plaintext FEDERATE with no TLS requirement did not "
+                  "establish: the refusal above must not have changed the "
+                  "plaintext mesh",
+                  nb.out);
+            check(strstr(nb.out, "link_rejected:") == NULL,
+                  "the control node rejected something it should have accepted",
+                  nb.out);
+            tc_close(&fc);
             (void)nf_stop(&nb);
             nf_free(&nb);
         }

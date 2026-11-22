@@ -148,16 +148,25 @@ int conn_fill(conn_t *c)
         }
 
         room = c->rcap - c->rlen;
-        /* MT 2.2 (#241, from MT31SSL's deadlock question): transport_recv()
-         * (notably TLS's SSL_read) runs under wq_lock here, matching
-         * conn_pump()'s hold around transport_send. Once writers exist the
-         * loop's SSL_read would otherwise race writers' SSL_write on the same
-         * SSL* with no serialization; OpenSSL needs external locking per
-         * SSL*. tls_send/tls_recv take no lock themselves (caller-holds
-         * precondition); this hold plus the pump's is the whole invariant. */
-        pthread_mutex_lock(&c->wq_lock);
+        /* MT 2.2 (#241, from MT31SSL's deadlock question) narrowed by #280:
+         * transport_recv() runs under wq_lock ONLY for the SSL* call. TLS's
+         * SSL_read must serialize against writers' SSL_write on the same
+         * SSL* -- OpenSSL needs external locking per SSL*, tls_send/tls_recv
+         * take no lock themselves (caller-holds precondition), and this hold
+         * plus the pump's is the whole invariant. A plaintext recv touches
+         * nothing a writer touches -- rbuf is the loop thread's alone, and
+         * the publish snapshots the queue tail atomically -- so taking the
+         * write-queue lock around it only contends full-duplex peer traffic
+         * against a drain for no reason. tls_active is loop-thread-only
+         * (set in transport_starttls, read here), so the branch itself races
+         * with nothing. */
+        if (c->tls_active != 0) {
+            pthread_mutex_lock(&c->wq_lock);
+        }
         n = transport_recv(c, c->rbuf + c->rlen, room);
-        pthread_mutex_unlock(&c->wq_lock);
+        if (c->tls_active != 0) {
+            pthread_mutex_unlock(&c->wq_lock);
+        }
         if (n > 0) {
             c->rlen += (size_t)n;
             /* Bytes arrived, so the connection is not idle. This is the only
@@ -227,10 +236,17 @@ int conn_next_line(conn_t *c, char *dst, size_t dstcap, size_t *len)
 int conn_queue(conn_t *c, const char *data, size_t len)
 {
     size_t pending;
+    size_t wlen;
+    size_t woff;
     int rc = 0;
 
     pthread_mutex_lock(&c->wq_lock);
-    pending = c->wlen - c->woff;
+    /* The pair is loaded once, under the lock that owns mutation; the
+     * transport's publish may read it lock-free, which is why the fields
+     * are atomic rather than merely lock-guarded. */
+    wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+    pending = wlen - woff;
 
     if (len == 0) {
         goto out;
@@ -255,26 +271,28 @@ int conn_queue(conn_t *c, const char *data, size_t len)
      *
      * With woff == 0 the allocation is the tail, so the cap check above already
      * guarantees the growth fits and this cannot trigger. */
-    if (c->woff > 0 && (c->woff == c->wlen || c->woff >= CONN_WQ_COMPACT ||
-                        c->wlen + len > CONN_WQ_MAX)) {
-        if (c->woff == c->wlen) {
-            c->wlen = 0;
-            c->woff = 0;
+    if (woff > 0 && (woff == wlen || woff >= CONN_WQ_COMPACT ||
+                     wlen + len > CONN_WQ_MAX)) {
+        if (woff == wlen) {
+            wlen = 0;
+            woff = 0;
         } else {
-            memmove(c->wbuf, c->wbuf + c->woff, c->wlen - c->woff);
-            c->wlen -= c->woff;
-            c->woff = 0;
+            memmove(c->wbuf, c->wbuf + woff, wlen - woff);
+            wlen -= woff;
+            woff = 0;
         }
     }
 
-    if (c->wlen + len > c->wcap) {
-        if (buf_grow(&c->wbuf, &c->wcap, c->wlen + len, CONN_WQ_MAX) != 0) {
+    if (wlen + len > c->wcap) {
+        if (buf_grow(&c->wbuf, &c->wcap, wlen + len, CONN_WQ_MAX) != 0) {
             rc = -1;
             goto out;
         }
     }
-    memcpy(c->wbuf + c->wlen, data, len);
-    c->wlen += len;
+    memcpy(c->wbuf + wlen, data, len);
+    wlen += len;
+    atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+    atomic_store_explicit(&c->woff, woff, memory_order_release);
     /* Phase 12: the queue grew, so poll() must be asked for POLLOUT. This is the
      * ONE place outside a transport that may set the intent, and the reason is
      * in connection.h: a transport's last publish predates these bytes, so it
@@ -296,11 +314,13 @@ void conn_want(conn_t *c, int read, int write)
 
 int conn_pump_locked(conn_t *c)
 {
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
     int rc = 0;
 
     /* MT 2.1: loop still calls queue/pump single-threaded; lock changes nothing. */
     for (;;) {
-        size_t pending = c->wlen - c->woff;
+        size_t pending = wlen - woff;
 
         /* Phase 12: the EMPTY pass. A TLS handshake writes before this node has
          * any application bytes to send, so the transport gets one unconditional
@@ -317,10 +337,11 @@ int conn_pump_locked(conn_t *c)
          * EPIPE, never as a process-killing SIGPIPE, whichever transport is
          * carrying the bytes. */
         {
-            ssize_t n = transport_send(c, c->wbuf + c->woff, pending);
+            ssize_t n = transport_send(c, c->wbuf + woff, pending);
 
             if (n > 0) {
-                c->woff += (size_t)n;
+                woff += (size_t)n;
+                atomic_store_explicit(&c->woff, woff, memory_order_release);
                 continue;
             }
             if (n == TRANSPORT_RETRY) {
@@ -331,9 +352,11 @@ int conn_pump_locked(conn_t *c)
         }
     }
 
-    if (c->woff == c->wlen) {
-        c->wlen = 0;
-        c->woff = 0;
+    if (woff == wlen) {
+        wlen = 0;
+        woff = 0;
+        atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+        atomic_store_explicit(&c->woff, woff, memory_order_release);
     }
     /* Phase 12: a STARTTLS whose 670 has now been fully written may start its
      * handshake. Doing it HERE rather than in the handler is the whole of the
@@ -342,7 +365,7 @@ int conn_pump_locked(conn_t *c)
      * flight racing the 670 down the same socket -- a client that received a
      * ServerHello before the line that authorised it would have no way to know
      * the ordering was intended. See transport_starttls(). */
-    if (c->starttls_pending && c->woff == c->wlen) {
+    if (c->starttls_pending && woff == wlen) {
         c->starttls_pending = 0;
         if (transport_starttls(c, 1) != 0) {
             printf("[observable] starttls_failed: fd=%d reason=HANDSHAKE_START\n",
@@ -359,11 +382,13 @@ out:
  * for its whole backlog. The caller already holds wq_lock (see _locked). */
 int conn_pump_slice_locked(conn_t *c)
 {
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
     size_t moved = 0u;
     int rc = 0;
 
     for (;;) {
-        size_t pending = c->wlen - c->woff;
+        size_t pending = wlen - woff;
         size_t budget;
         ssize_t n;
 
@@ -378,9 +403,10 @@ int conn_pump_slice_locked(conn_t *c)
         if (budget < pending) {
             pending = budget;
         }
-        n = transport_send(c, c->wbuf + c->woff, pending);
+        n = transport_send(c, c->wbuf + woff, pending);
         if (n > 0) {
-            c->woff += (size_t)n;
+            woff += (size_t)n;
+            atomic_store_explicit(&c->woff, woff, memory_order_release);
             moved += (size_t)n;
             continue;
         }
@@ -391,13 +417,15 @@ int conn_pump_slice_locked(conn_t *c)
         goto out;
     }
 
-    if (c->woff == c->wlen) {
-        c->wlen = 0;
-        c->woff = 0;
+    if (woff == wlen) {
+        wlen = 0;
+        woff = 0;
+        atomic_store_explicit(&c->wlen, wlen, memory_order_release);
+        atomic_store_explicit(&c->woff, woff, memory_order_release);
     }
     /* Same STARTTLS ordering as conn_pump_locked(): the handshake starts only
      * once the 670 is fully written. Arm on the drained queue, as there. */
-    if (c->starttls_pending && c->woff == c->wlen) {
+    if (c->starttls_pending && woff == wlen) {
         c->starttls_pending = 0;
         if (transport_starttls(c, 1) != 0) {
             printf("[observable] starttls_failed: fd=%d reason=HANDSHAKE_START\n",
@@ -422,7 +450,17 @@ int conn_pump(conn_t *c)
 
 size_t conn_write_pending(const conn_t *c)
 {
-    return c->wlen - c->woff;
+    /* The lock-free snapshot (#280): the fields are atomic, so a transport's
+     * publish can read the pending tail without taking wq_lock -- which is
+     * what lets the read path stop contending with a writer's drain. Exact
+     * under the lock; outside it stale by a concurrent drain at worst, and
+     * only upward (a drain removes bytes), which the next publish corrects.
+     * A concurrent queue cannot make it stale downward: queueing happens on
+     * the same thread that publishes, and it raises want_write itself. */
+    size_t wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    size_t woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+
+    return (wlen >= woff) ? wlen - woff : 0u;
 }
 
 /* MT 2.2 (#241): locked read of the pending tail, for threads that already
@@ -437,7 +475,8 @@ size_t conn_write_pending_locked(conn_t *c)
         return 0;
     }
     pthread_mutex_lock(&c->wq_lock);
-    n = c->wlen - c->woff;
+    n = atomic_load_explicit(&c->wlen, memory_order_acquire) -
+        atomic_load_explicit(&c->woff, memory_order_acquire);
     pthread_mutex_unlock(&c->wq_lock);
     return n;
 }
@@ -534,8 +573,9 @@ size_t conn_hostmask(const conn_t *c, char *out, size_t cap)
  *
  * IT WAS LATENT rather than live, and the reason is worth stating because it is the
  * only reason this survived: `311` renders the realname through
- * `emit_numeric_ex()`, which runs `conn_text_strip_wire()`, so the byte was removed
- * before it could reach a third party. What was left was a stored value this node
+ * `emit_numeric_ex()`, which runs `conn_text_strip()` under STRIP_STORED, so
+ * the byte was removed before it could reach a third party. What was left was
+ * a stored value this node
  * had accepted and would then quietly mangle -- `Ma<0x9F>llory` shown to every
  * member of every channel as `Mallory`-with-a-hole, and a realname that no longer
  * matched the one the user typed, on a field whose whole policy is "refuse rather
@@ -639,24 +679,24 @@ size_t conn_text_bad_count(const char *s)
 }
 
 /* ---------------------------------------------------------------------------
- * conn_text_strip: A STORED VALUE, made safe to render to other people
+ * conn_text_strip: A STORED VALUE (STRIP_STORED) or MESSAGE TEXT (STRIP_RELAY)
  * ---------------------------------------------------------------------------
- * THE STRICT POLICY, through the same walk as the two strippers below, and this is the
+ * THE STRICT POLICY, through the same walk as the switch below, and this is the
  * one that found the last live leak: a TOPIC whose stored value held a bare
  * `0x80`-`0x9F` byte was broadcast to every member, because the old version of this
  * function only understood `conn_byte_is_bad()` -- C0 and DEL -- and let the whole
  * C1 range through. A raw `0x9B` is CSI on an 8-bit terminal, so a topic is exactly as
  * dangerous as a nickname and was being filtered against a narrower set.
  *
- * It is the SAME set the numeric-echo filter uses (`conn_text_strip_wire()`), and they
- * are the same function for the same reason `valid_nick()` and the nickname check share
- * one walk: two functions answering "which bytes are dangerous" is how they come to
- * disagree, and this tree has now been bitten by that three times.
+ * The numeric-echo filter passes STRIP_STORED, for the same reason `valid_nick()`
+ * and the nickname check share one walk: two functions answering "which bytes are
+ * dangerous" is how they come to disagree, and this tree has now been bitten by
+ * that three times.
  *
- * IT IS NOT `conn_text_strip_relay()`, which keeps the eight mIRC bytes. A stored topic
+ * STRIP_STORED is not STRIP_RELAY, which keeps the eight mIRC bytes. A stored topic
  * or away message is not message text: no client renders formatting codes out of a
  * topic, so keeping them would be keeping bytes that only look meaningful. The
- * difference is named at the walk's own enum rather than being discovered.
+ * difference is the policy argument rather than a second function.
  *
  * ONE PASS, two outputs: the kept bytes go to `dst` and the KEPT COUNT comes back to
  * the caller, which derives "how many were dropped" by subtracting the input's own
@@ -670,7 +710,7 @@ size_t conn_text_bad_count(const char *s)
  * which is what makes their `bad_bytes=` figure a measurement of what the client sent
  * rather than of what survived. */
 /* ---------------------------------------------------------------------------
- * conn_text_strip_relay: the KEEP half of the split, as a switch
+ * relay_byte_kept: the KEEP half of the split, as a switch
  * ---------------------------------------------------------------------------
  * EIGHT BYTES, NAMED, rather than a range test -- because a range test is the
  * mistake waiting to happen here. `u >= 0x02 && u <= 0x1F` looks like the keep list
@@ -702,12 +742,8 @@ static int relay_byte_kept(unsigned char u)
 /* WHICH ASCII BYTES SURVIVE, and it is two answers rather than one because the
  * hazard and the semantics overlap in exactly eight bytes. `connection.h` states the
  * two policies and why they differ; this is the switch that implements the RELAY half,
- * and the WIRE half is "none of them", which is what makes the strict policy strict
+ * and the STORED half is "none of them", which is what makes the strict policy strict
  * rather than merely different. */
-typedef enum {
-    CONN_TEXT_WIRE = 0,  /* every C0 control goes: nothing is kept for cause */
-    CONN_TEXT_RELAY = 1  /* the eight mIRC bytes stay: they are message semantics */
-} conn_text_policy_t;
 
 /* WHAT TO DO WITH ONE BYTE. Split out of the loop so the walk below is a walk and
  * not a decision tree, and so the rule for a single byte can be read in one place. */
@@ -732,11 +768,11 @@ enum {
  *
  * THREE ANSWERS BECAUSE THREE CALLERS NEED THREE DIFFERENT VERDICTS:
  *
- *   CONN_TEXT_WIRE   strip: a byte that can control a terminal goes, everything
+ *   STRIP_STORED     strip: a byte that can control a terminal goes, everything
  *                    else stays. Used where a value is RENDERED into a field the
  *                    sender will read again -- a numeric that echoes the client's
- *                    own argument back to it.
- *   CONN_TEXT_RELAY  strip, but the eight mIRC bytes STAY, because in message text
+ *                    own argument back to it -- and for every other stored value.
+ *   STRIP_RELAY      strip, but the eight mIRC bytes STAY, because in message text
  *                    they are semantics rather than hazard.
  *   `verdict`        non-NULL: report instead of strip, and stop at the first fault.
  *                    Used where the value is STORED, so the caller can refuse rather
@@ -757,7 +793,7 @@ enum {
  * why every range tested below excludes `0x00`.
  */
 static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip,
-                     conn_text_policy_t policy, conn_display_verdict_t *verdict)
+                     conn_text_strip_policy_t policy, conn_display_verdict_t *verdict)
 {
     *skip = 0;
 
@@ -783,7 +819,7 @@ static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip
     /* ASCII. The deny half of the split, plus DEL. ESC and BEL arrive here. */
     if (u < 0x80u) {
         if (u < 0x20u) {
-            if (policy == CONN_TEXT_RELAY && relay_byte_kept(u) != 0) {
+            if (policy == STRIP_RELAY && relay_byte_kept(u) != 0) {
                 return TEXT_EMIT;
             }
             if (verdict != NULL) {
@@ -941,7 +977,7 @@ static int text_step(unsigned char u, const char *at, size_t *need, size_t *skip
  * function rather than three so that the order above cannot be got right in one
  * place and wrong in another. */
 static size_t conn_text_walk(char *dst, size_t cap, const char *src,
-                             conn_text_policy_t policy,
+                             conn_text_strip_policy_t policy,
                              conn_display_verdict_t *verdict)
 {
     size_t kept = 0;
@@ -999,19 +1035,10 @@ static size_t conn_text_walk(char *dst, size_t cap, const char *src,
     return kept;
 }
 
-size_t conn_text_strip(char *dst, size_t cap, const char *src)
+size_t conn_text_strip(char *dst, size_t cap, const char *src,
+                       conn_text_strip_policy_t policy)
 {
-    return conn_text_walk(dst, cap, src, CONN_TEXT_WIRE, NULL);
-}
-
-size_t conn_text_strip_relay(char *dst, size_t cap, const char *src)
-{
-    return conn_text_walk(dst, cap, src, CONN_TEXT_RELAY, NULL);
-}
-
-size_t conn_text_strip_wire(char *dst, size_t cap, const char *src)
-{
-    return conn_text_walk(dst, cap, src, CONN_TEXT_WIRE, NULL);
+    return conn_text_walk(dst, cap, src, policy, NULL);
 }
 
 conn_display_verdict_t conn_text_display_check(const char *s)
@@ -1021,7 +1048,7 @@ conn_display_verdict_t conn_text_display_check(const char *s)
     if (s == NULL) {
         return CONN_DISPLAY_OK;
     }
-    (void)conn_text_walk(NULL, 0u, s, CONN_TEXT_WIRE, &verdict);
+    (void)conn_text_walk(NULL, 0u, s, STRIP_STORED, &verdict);
     return verdict;
 }
 

@@ -28,8 +28,8 @@
  *
  * A reader who "simplifies" this back into a deny-list silently breaks colour on
  * every client that uses it, which is a functional regression traded for a
- * cosmetic one. The comment at `conn_text_strip_relay()` says the same thing and
- * this file is what makes it true.
+ * cosmetic one. The comment at `conn_text_strip()` (STRIP_RELAY) says the same thing
+ * and this file is what makes it true.
  *
  * ---------------------------------------------------------------------------
  * THE FIVE CLAIMS, AND EACH ONE IS A DIFFERENT FAILURE
@@ -685,7 +685,7 @@ static void case_the_two_groups(void)
 
         in[0] = (char)b;
         in[1] = '\0';
-        n = conn_text_strip_relay(out, sizeof out, in);
+        n = conn_text_strip(out, sizeof out, in, STRIP_RELAY);
         TF_CHECK_MSG(want ? (n == 1u && (unsigned char)out[0] == b)
                           : (n == 0u && out[0] == '\0'),
                      "byte 0x%02x alone: the table says %s, but the strip returned %lu "
@@ -719,7 +719,7 @@ static void case_the_two_groups(void)
         in[0] = (char)0xc2u;
         in[1] = (char)b;
         in[2] = '\0';
-        n = conn_text_strip_relay(out, sizeof out, in);
+        n = conn_text_strip(out, sizeof out, in, STRIP_RELAY);
         TF_CHECK_MSG(in_c1 ? (n == 0u) : (n == 2u),
                      "`0xC2 0x%02x` should be %s as a PAIR, but the strip returned %lu "
                      "byte(s). 0x80-0x9F after 0xC2 are the encoded C1 controls and "
@@ -729,7 +729,7 @@ static void case_the_two_groups(void)
         in[0] = (char)0xd0u;
         in[1] = (char)b;
         in[2] = '\0';
-        n = conn_text_strip_relay(out, sizeof out, in);
+        n = conn_text_strip(out, sizeof out, in, STRIP_RELAY);
         TF_CHECK_MSG(n == 2u,
                      "`0xD0 0x%02x` is the start of a real character and both bytes "
                      "must survive, but the strip returned %lu. Every one of these is "
@@ -745,7 +745,7 @@ static void case_the_two_groups(void)
     {
         static const char emoji[] = "\360\237\230\200"; /* U+1F600 */
         char out[16];
-        size_t n = conn_text_strip_relay(out, sizeof out, emoji);
+        size_t n = conn_text_strip(out, sizeof out, emoji, STRIP_RELAY);
 
         TF_CHECK_MSG(n == 4u && memcmp(out, emoji, 4u) == 0,
                      "a four-byte emoji came back as %lu byte(s) \"%s\" rather than 4 "
@@ -765,7 +765,7 @@ static void case_the_two_groups(void)
      * while still producing the right string. */
     {
         char out[16];
-        size_t n = conn_text_strip_relay(out, sizeof out, "\303\251z");
+        size_t n = conn_text_strip(out, sizeof out, "\303\251z", STRIP_RELAY);
 
         TF_CHECK_MSG(n == 3u && (unsigned char)out[0] == 0xc3u &&
                      (unsigned char)out[1] == 0xa9u && out[2] == 'z',
@@ -816,7 +816,7 @@ static void case_the_two_groups(void)
 
         for (size_t i = 0; i < sizeof named / sizeof named[0]; i++) {
             char out[16];
-            size_t n = conn_text_strip_relay(out, sizeof out, named[i].bytes);
+            size_t n = conn_text_strip(out, sizeof out, named[i].bytes, STRIP_RELAY);
 
             TF_CHECK_MSG(n == named[i].len && memcmp(out, named[i].bytes, n) == 0,
                          "%s came back as %lu byte(s) rather than %lu intact. This is "
@@ -843,8 +843,8 @@ static void case_the_two_groups(void)
     {
         char out[64];
 
-        (void)conn_text_strip_relay(out, sizeof out,
-                                    ESC "a" BEL "b" DEL "c" CTCP "d" "\302\233" "e");
+        (void)conn_text_strip(out, sizeof out,
+                              ESC "a" BEL "b" DEL "c" CTCP "d" "\302\233" "e", STRIP_RELAY);
         TF_CHECK_MSG(strcmp(out, "abc" CTCP "de") == 0,
                      "the strip did not merely remove bytes: it produced \"%s\" where "
                      "\"abc\\001de\" was expected (input ESC a BEL b DEL c CTCP d C1 "

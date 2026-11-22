@@ -254,6 +254,22 @@ int main(void)
         /* And so would a tag block that already carries the '@'. */
         assert(message_build(&m, "@a=1", NULL, "PING", NULL, 0) == -1);
         assert(m.command == NULL);
+        /* A block the parser rejects is refused, never emitted: one bad
+         * field must not poison a whole burst (#276). */
+        assert(message_build(&m, "a=1;", NULL, "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
+        assert(message_build(&m, "a=;b=bad;", NULL, "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
+        assert(message_build(&m, "a=1;;b=2", NULL, "PING", NULL, 0) == -1);
+        assert(m.command == NULL);
+        assert(message_parse("@a=1 PING", &m) == 0);
+        m.tags = (char *)"a=1;";
+        memset(out, 'X', sizeof out);
+        assert(message_format(&m, out, sizeof out) == 0);
+        assert(out[0] == '\0');
+        m.tags = (char *)"a=1;b=2";
+        assert_format(&m, "@a=1;b=2 PING");
+        message_free(&m);
         /* An empty prefix string is treated as no prefix, not as ":". */
         assert(message_build(&m, NULL, "", "PING", NULL, 0) == 0);
         assert_format(&m, "PING");
@@ -445,12 +461,11 @@ int main(void)
         assert(strcmp(u, "\r") == 0);
         assert(message_tag_unescape("\\n", u, sizeof u) == 0);
         assert(strcmp(u, "\n") == 0);
-        /* The lone-trailing-backslash rule: dropped on the way in, and a
-         * literal backslash is therefore SENT as '\\' (above). */
-        assert(message_tag_unescape("\\", u, sizeof u) == 0);
-        assert(strcmp(u, "") == 0);
-        assert(message_tag_unescape("ab\\", u, sizeof u) == 0);
-        assert(strcmp(u, "ab") == 0);
+        /* The lone-trailing-backslash rule: malformed, refuses with -1 (#278)
+         * rather than decoding to nothing, and a literal backslash is
+         * therefore SENT as '\\' (above). */
+        assert(message_tag_unescape("\\", u, sizeof u) == -1);
+        assert(message_tag_unescape("ab\\", u, sizeof u) == -1);
         /* An escape before a character outside the set DROPS the backslash and
          * yields the character, so `\b` is `b`. */
         assert(message_tag_unescape("a\\qb", u, sizeof u) == 0);

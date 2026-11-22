@@ -71,7 +71,7 @@ static void overflow_dispatch(server_t *s, conn_t *c, const message_t *m)
                      "the send path must not have closed the descriptor");
         free(chunk);
         printf("[fixture] flooded fd=%d pending=%zu\n", c->fd,
-               conn_write_pending(c));
+               conn_write_pending_locked(c));
         fflush(stdout);
         return;
     }
@@ -93,6 +93,10 @@ static void overflow_dispatch(server_t *s, conn_t *c, const message_t *m)
 
 static void setup(server_t *s)
 {
+    /* Writers ON (#293): the overflow printf on the loop thread must stay
+     * race-free while a writer pumps under wq_lock. At N=0 the race cannot
+     * happen, so the default would prove nothing about it. */
+    server_set_writer_threads(s, 4);
     s->dispatch = overflow_dispatch;
 }
 
@@ -146,6 +150,36 @@ int main(void)
      * closed by the shutdown reap, not by the cap. */
     TF_CHECK_MSG(nf_expect_u64(&node, "closed=", 2, T_IO_MS) == 0,
                  "closed should be 2");
+
+    /* ---- the overflow report samples depth under wq_lock (#293) ---- */
+    /* server_queue() runs on the loop thread while a writer may be advancing
+     * woff under wq_lock; an unlocked conn_write_pending() there is a C11
+     * race on plain size_t (torn depth), TSan-visible only at N > 0 -- which
+     * is why this fixture enables writers above. Looking is the check, the
+     * same move test_close_sites.c makes: the report must use the locked
+     * accessor. Literals are stripped by the reader, so this is code only. */
+    {
+        char code[TF_SRC_MAX];
+        size_t len = 0;
+        long got = tf_read_code_into(code, sizeof code, "src/core/server.c",
+                                     &len);
+        const char *fn;
+        const char *use;
+        const char *next;
+
+        TF_CHECK_MSG(got >= 0,
+                     "could not read src/core/server.c (is IRCSERVE_SRC_DIR "
+                     "set?)");
+        fn = strstr(code, "int server_queue(server_t");
+        TF_CHECK_MSG(fn != NULL,
+                     "could not find server_queue() in server.c");
+        use = strstr(fn, "conn_write_pending_locked(c)");
+        next = strstr(fn, "int server_reap(server_t");
+        TF_CHECK_MSG(use != NULL && next != NULL && use < next,
+                     "server_queue() reports the overflow depth without "
+                     "wq_lock: the loop thread races the writer's woff "
+                     "updates (#293)");
+    }
 
     tc_close(&flooder);
     tc_close(&survivor);

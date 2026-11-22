@@ -12,16 +12,18 @@
  * issuer, with real thisUpdate/nextUpdate -- rather than a corrupted something
  * dressed up as a revocation:
  *
- *   GOOD      status GOOD, inside its window          ESTABLISHES
- *   REVOKED   status REVOKED, keyCompromise, signed by the issuing CA
- *                                                        REFUSED
- *   STALE     status GOOD, nextUpdate an hour ago      REFUSED
- *   NO_NEXT_UPDATE  status GOOD, no nextUpdate at all  REFUSED
- *   UNVERIFIED  a correct CertID, signed by a stranger  REFUSED
- *   MISSING   the peer staples nothing
- *                    strict:                            REFUSED
- *                    permissive:                        ESTABLISHES, with a line
- *
+    *   GOOD      status GOOD, inside its window          ESTABLISHES
+     *   REVOKED   status REVOKED, keyCompromise, signed by the issuing CA
+     *                                                        REFUSED, strict or
+     *                                                        permissive: the flag
+     *                                                        waives missing proof,
+     *                                                        never proof of harm
+     *   STALE     status GOOD, nextUpdate an hour ago      REFUSED
+     *   NO_NEXT_UPDATE  status GOOD, no nextUpdate at all  REFUSED
+     *   UNVERIFIED  a correct CertID, signed by a stranger  REFUSED
+     *   MISSING   the peer staples nothing
+     *                    strict:                            REFUSED
+     *                    permissive:                        ESTABLISHES, with a line
  * WHY THE REVOKED CASE IS SIGNED BY THE ISSUING CA, which is the whole difficulty
  * and the reason this file builds responses with OpenSSL's OCSP API instead of
  * corrupting a handshake: a response signed by the issuer, carrying a CertID that
@@ -170,7 +172,7 @@ static void run_case(const char *label, const char *a_crt,
 {
     static const char *const prog = "irc-serve";
     static const char *const zero = "0";
-    static const char *const shared = "shared";
+    static const char *const shared = "shared-tls-federation-secret";
     char buf[256];
     char why[256];
     char line[512];
@@ -702,6 +704,21 @@ int main(void)
              "freshness window, and it says revoked -- so every other check passes "
              "and the answer is still no");
 
+    /* ============ CASE 2b: REVOKED, PERMISSIVE: STILL REFUSED =================
+     * THE FLAG WAIVES PROOF A CERTIFICATE IS STILL GOOD, never proof it is bad.
+     * A permissive node tolerates a missing, stale or unverifiable staple -- but
+     * a response that verifies and says REVOKED is answered no under either
+     * policy, because accepting it would mean knowingly linking a compromised
+     * key. This is the pair with the missing-permissive case below: that one
+     * establishes, this one does not, and swapping the verdict logic inverts
+     * exactly one of them. */
+    run_case("revoked-permissive", a_crt, a_key, b_crt, b_key, ca_crt,
+             good_a_ocsp, revoked_ocsp, 1, 0, "REVOKED",
+             "--tls-staple-permissive does NOT admit a REVOKED certificate: the "
+             "link is refused with policy=permissive and action=REFUSE, so the "
+             "flag stays an explicit tolerance for missing proof rather than a "
+             "silent downgrade of peer authentication");
+
     /* ================== CASE 3: EXPIRED STAPLE: FRESHNESS IS CHECKED =========== */
     run_case("stale-strict", a_crt, a_key, b_crt, b_key, ca_crt, good_a_ocsp,
              stale_ocsp, 0, 0, "STALE",
@@ -744,11 +761,23 @@ int main(void)
              "with no stapled status through: the link establishes, so an operator "
              "who typed the flag gets the tolerance they asked for rather than a "
              "refusal they have to work around");
-    /* ================== CASE 7: THE STARTUP LINE ============================== */
+    /* ============ CASE 7b: EXPIRED STAPLE, PERMISSIVE: THE STALE FLIP =========
+     * THE PAIR WITH CASE 3, AND IT IS A PAIR ON PURPOSE. The same expired staple,
+     * once under each policy: strict refuses, permissive accepts, and the two
+     * cases differ ONLY in the flag they pass and in policy=/action=. A flipped
+     * strict/permissive sense goes red in both places, which is what makes the
+     * pair a flip test rather than two runs. */
+    run_case("stale-permissive", a_crt, a_key, b_crt, b_key, ca_crt,
+             good_a_ocsp, stale_ocsp, 1, 1, "STALE",
+             "the SAME expired staple is ACCEPTED under --tls-staple-permissive: "
+             "the status is still reported as STALE on the revocation line, but the "
+             "link establishes, so the flag and not silence is what weakens the "
+             "policy");
+    /* ================== CASE 8: THE STARTUP LINE ============================== */
     {
         static const char *const prog = "irc-serve";
         static const char *const zero = "0";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         nf_node_t na;
         argv_build_t b;
 
@@ -788,7 +817,7 @@ int main(void)
         (void)shared;
     }
 
-    /* ================== CASE 8: NOTHING FETCHES ================================= */
+    /* ================== CASE 9: NOTHING FETCHES ================================= */
     check_no_fetch();
 
     tf_tls_rmtree(dir);

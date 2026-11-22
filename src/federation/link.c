@@ -38,13 +38,13 @@
  * against this number, so a reason added to the enum without a counter here is
  * a reason that is counted nowhere rather than a reason that writes past the
  * array -- and the dump prints "?" for it, which is how it gets noticed. */
-#define FED_RESULT_COUNT 11
+#define FED_RESULT_COUNT 12
 
 #if FED_RESULT_COUNT != IRC_FED_REJECT_REASONS
 #error "link.c's FED_RESULT_COUNT and server.h's IRC_FED_REJECT_REASONS disagree"
 #endif
 /* Wipe `n` bytes at `p`. Written through a volatile pointer for the same reason
- * account_store.c's account_wipe() and sasl_framework.c's sasl_wipe() are: a
+ * core/secret_util.c's secret_wipe() is: a
  * memset() to memory that stays live is a store the compiler may prove dead
  * and delete. */
 static void link_wipe(void *p, size_t n)
@@ -95,7 +95,8 @@ static const char *const FED_REASON_NAME[FED_RESULT_COUNT] = {
     "NAME_MISMATCH",
     "BAD_NAME",   /* FED_BAD_NAME      */
     "BAD_EPOCH",  /* FED_BAD_EPOCH     */
-    "BAD_VERSION" /* FED_BAD_VERSION   */
+    "BAD_VERSION", /* FED_BAD_VERSION   */
+    "TLS_REQUIRED" /* FED_TLS_REQUIRED  */
 };
 
 /* The per-reason keys, for the dump. A table rather than ten literals in a
@@ -107,7 +108,7 @@ static const char *const FED_REASON_NAME[FED_RESULT_COUNT] = {
 static const char *const FED_REASON_KEY[FED_RESULT_COUNT] = {
     "", "rej_arity=", "rej_secret=", "rej_nosecret=", "rej_self=",
     "rej_in_use=", "rej_dup=", "rej_mismatch=", "rej_name=", "rej_epoch=",
-    "rej_version="
+    "rej_version=", "rej_tls="
 };
 
 const char *fed_federate_reason(fed_federate_result_t result)
@@ -134,6 +135,7 @@ const char *fed_federate_reason(fed_federate_result_t result)
     case (int)FED_BAD_NAME:
     case (int)FED_BAD_EPOCH:
     case (int)FED_BAD_VERSION:
+    case (int)FED_TLS_REQUIRED:
         break;
     default:
         /* Unreachable while fed_federate_result_t is closed and every member
@@ -500,32 +502,29 @@ int fed_link_set_tls(server_t *s, const char *name, int require_tls)
         return -1;
     }
     link->require_tls = (require_tls != 0) ? 1 : 0;
-    /* THE INBOUND HALF IS NOT ENFORCED BY THIS FLAG, and an operator who reads
-     * `--peer-tls irc.a` as "this link is encrypted whichever way round it is
-     * connects" is going to be wrong about one of the two directions. So the line
-     * says which:
+    /* THE INBOUND HALF IS ENFORCED ON THE HANDSHAKE, and an operator who read
+     * an older version of this comment -- "NOT enforced here" -- should read
+     * on. The accept site still cannot tell a peer from a client, and it still
+     * does not sniff the plain port for a ClientHello: any client that sends
+     * something other than a ClientHello first defeats a detector, and a
+     * detector that guesses is a downgrade waiting to be asked for. What
+     * changed (issue #221) is that the handshake itself refuses: a FEDERATE
+     * arriving on a plaintext connection for a link with require_tls is
+     * rejected as TLS_REQUIRED before the secret is compared. The secret has
+     * already travelled at that point, so this does not unsend it -- what it
+     * stops is the cleartext LINK, which would otherwise carry the mesh's
+     * traffic in the clear against the operator's stated requirement. A
+     * plaintext FEDERATE for a link WITHOUT require_tls is accepted exactly
+     * as before, which is what keeps a mixed mesh working.
      *
-     *   this node DIALS  require_tls is enforced: the handshake is started on the
-     *                    socket, the peer's certificate is verified against this
-     *                    link's name, and a failure closes the link and spends a
-     *                    retry rather than continuing in the clear.
+     * An inbound peer link over TLS arrives on the implicit-TLS listener,
+     * where every byte is TLS before anything is interpreted, so a peer that
+     * points at --tls-port never trips the refusal above.
      *
-     *   this node ACCEPTS  NOT enforced here, and deliberately not by SNIFFING the
-     *                    plain port for a ClientHello. A port that serves plaintext
-     *                    clients and must also auto-detect TLS has no correct
-     *                    discriminator: any client that sends something other than a
-     *                    ClientHello first defeats it, and a detector that guesses
-     *                    is a downgrade waiting to be asked for. The answer an
-     *                    operator actually wants -- "nothing on the plain port may
-     *                    be plaintext" -- is `--tls-require`, which refuses every
-     *                    plaintext connection at accept and leaves the operator to
-     *                    point peers at --tls-port.
-     *
-     * An inbound peer link over TLS therefore arrives on the implicit-TLS
-     * listener, where every byte is TLS before anything is interpreted, and it is
-     * protected by exactly the mechanism a client's is. That is a real property and
-     * it is NOT the same property as the outbound one, which is why the line
-     * distinguishes them. */
+     * TO CLOSE EVERY PLAINTEXT CONNECTION, the answer is still `--tls-require`,
+     * which refuses them at accept and leaves the operator to point peers at
+     * --tls-port.
+     */
     printf("[observable] link_tls: peer=%s require_tls=%d enforced=%s inbound_hint=%s\n",
            link->name, link->require_tls,
            (link->initiator != 0) ? "outbound_dial"
@@ -843,18 +842,6 @@ int fed_mark_clean_leave(server_t *s, server_link_t *link, int set)
     return (was != link->clean_leave) ? 1 : 0;
 }
 
-/* How many bytes this node is willing to absorb from a peer, per link, on its way
- * out. See the drain inside fed_send_shutdown(): the bound exists so a teardown
- * cannot be made to spin by a peer that is streaming at it.
- *
- * 8 KiB is chosen for what it has to cover rather than for tidiness: it is above
- * what a receive queue holds in every realistic case, so the close that follows is a
- * FIN in every realistic case, and it is small enough that the whole drain is a
- * handful of recv() calls. It is NOT a limit on what a peer may have sent -- nothing
- * here refuses data, the bytes are read and discarded either way -- it is a limit on
- * how long this node will spend reading them. */
-#define FED_SHUTDOWN_DRAIN_MAX 8192u
-
 /* Send `SHUTDOWN [:reason]` to every ESTABLISHED link. Returns how many carried
  * it.
  *
@@ -957,13 +944,16 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * scratch and forgetting them is the honest description of what happens to
              * a peer's last words during a shutdown.
              *
-             * IT IS BOUNDED, because this runs on the teardown path and must not be
-             * able to spin: the loop stops on EAGAIN, on EOF, on a read error, or on
-             * DRAIN_MAX bytes. A peer that is streaming at us gets its queue emptied up
-             * to that bound and the close is still a FIN rather than an RST in every
-             * realistic case, because a receive queue holds kilobytes rather than
-             * megabytes. The cost is a recv() per pending chunk on the way out, on a
-             * path that runs once per process.
+             * THERE IS NO BYTE CAP ON THIS LOOP, and removing the old 8 KiB one
+             * is the fix: one TLS record is 16 KiB, so a peer with more than 8 KiB
+             * pending stopped the drain early and the close that followed was an
+             * RST that ate the SHUTDOWN. The loop stops on EAGAIN (empty queue),
+             * on EOF, or on a read error -- every one of those means there is
+             * nothing left that a close() could RST over. It cannot spin on an
+             * idle peer (RETRY breaks), and a peer streaming faster than a
+             * nonblocking drain during our own shutdown is not a case that
+             * exists. The cost is a recv() per pending chunk on the way out,
+             * on a path that runs once per process.
              *
              * MSG_DONTWAIT rather than relying on the socket's flags: the drain must
              * not be able to block a teardown even if some other code path made this
@@ -980,9 +970,8 @@ int fed_send_shutdown(server_t *s, const char *reason)
              * answers in its own four-value vocabulary -- bytes, EOF, TRANSPORT_RETRY,
              * TRANSPORT_FATAL -- and TRANSPORT_FATAL is the one case this loop must not
              * spin on: it breaks, which is what the old `break` on a non-EINTR error
-             * did. The loop's own bound is unchanged, so the cost of this path on a
-             * plaintext mesh is one function call per pending chunk on a path that runs
-             * once per process.
+             * did. The cost of this path on a plaintext mesh is one function
+             * call per pending chunk on a path that runs once per process.
              *
              * MT 3.1 (#290): THIS DRAIN RUNS UNDER c->wq_lock, and that is the
              * fix rather than decoration. transport_recv() on a TLS link is
@@ -1005,11 +994,8 @@ int fed_send_shutdown(server_t *s, const char *reason)
                     ssize_t got = transport_recv(c, sink, sizeof sink);
 
                     if (got > 0) {
-                        drained += (size_t)got;
-                        if (drained >= (size_t)FED_SHUTDOWN_DRAIN_MAX) {
-                            break;
-                        }
-                        continue;
+                        drained += (size_t)got; /* counted for the log line only */
+                        continue; /* more may be pending: stop only on RETRY/EOF */
                     }
                     /* BREAK ON TRANSPORT_RETRY, AND THAT IS NOT AN INVERSION OF
                      * THE OLD LOOP -- IT IS THE OLD LOOP.
@@ -1947,6 +1933,22 @@ void fed_on_federate(server_t *s, conn_t *c, const message_t *m)
     if (s == NULL || c == NULL || m == NULL) {
         return;
     }
+    /* A FEDERATE in cleartext for a peer this node requires TLS for
+     * (issue #221): the line carries the shared secret, so honoring it
+     * would both trust a sniffable credential and establish the cleartext
+     * link the operator said must be TLS. Refused BEFORE the secret is
+     * compared, so the exchange answers nothing about it, and before any
+     * link state moves. A plaintext FEDERATE for a peer with no such
+     * requirement is untouched, which is what keeps a plaintext mesh
+     * working exactly as before. */
+    if (transport_is_tls(c) == 0 && m->nparams >= 1 && m->params[0] != NULL) {
+        const server_link_t *claimed = server_find_link(s, m->params[0]);
+
+        if (claimed != NULL && claimed->require_tls != 0) {
+            fed_reject(s, self, c, FED_TLS_REQUIRED, m->params[0]);
+            return;
+        }
+    }
     result = fed_check_federate(s, self, m, s->fed_secret, &peer_epoch);
     if (result != FED_OK) {
         fed_reject(s, self, c, result, m->params[0]);
@@ -2030,14 +2032,20 @@ int fed_open(server_t *s, const char *secret)
                    IRC_FED_MAX_SECRET);
             return -1;
         }
-        if (len != 0u && len < 16u) {
+        if (len != 0u && len < IRC_FED_MIN_SECRET) {
             /* A short shared secret is guessable online: the FEDERATE endpoint is
              * reachable by anyone who can open a socket, and there is no lockout.
-             * Refusing would break nodes that legitimately use short test
-             * secrets, so this is a warning rather than a refusal; production
-             * deployments should use at least 16 bytes of entropy. */
+             * Refused outright; the escape hatch exists only so tests with
+             * legacy short secrets keep running (see tests/federation). */
+            if (getenv("IRC_SERVE_ALLOW_SHORT_SECRET") == NULL) {
+                printf("[observable] link_open_refused: reason=SECRET_SHORT "
+                       "len=%zu min=%d\n",
+                       len, IRC_FED_MIN_SECRET);
+                return -1;
+            }
             printf("[observable] link_open_warning: reason=SECRET_SHORT len=%zu "
-                   "recommended_min=16\n", len);
+                   "recommended_min=%d\n",
+                   len, IRC_FED_MIN_SECRET);
         }
         memcpy(s->fed_secret, secret, len + 1u);
         s->fed_secret_len = len;
@@ -2064,9 +2072,9 @@ void fed_close(server_t *s)
     if (s == NULL || s->fed_opened == 0) {
         return;
     }
-    if (s->fed_inner != NULL) {
-        s->dispatch = s->fed_inner;
-    }
+    /* Unconditional: NULL restores NULL. A guarded restore leaves dispatch
+     * hooked when opened pre-dispatch, and reopen then wraps the hook itself. */
+    s->dispatch = s->fed_inner;
     s->fed_inner = NULL;
     s->fed_opened = 0;
     link_wipe(s->fed_secret, sizeof s->fed_secret);

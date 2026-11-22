@@ -221,6 +221,98 @@ static void case_plaintext_invariant(void)
 }
 
 /* ===========================================================================
+ * CASE 1b: the read path publishes a faithful snapshot without the lock (#280)
+ * ===========================================================================
+ *
+ * conn_fill() no longer takes wq_lock on a plaintext connection -- rbuf is the
+ * loop thread's alone -- so its publish reads the pending tail lock-free. That
+ * is only safe if the snapshot is faithful: a fill that reported want_write = 0
+ * with bytes still queued would lose the loop's next POLLOUT, and one that
+ * reported 1 on a drained queue would spin it. Both halves are asserted here,
+ * on a real socketpair, because the story "fill's publish is exact" is the
+ * premise the unlocked read rests on.
+ *
+ * The TLS half of the same change -- fill still holds the lock around the SSL*
+ * call -- cannot be observed on this build (no TLS here) and is pinned by
+ * shape below instead, which is the honest limit case_structural() already
+ * states for this platform. */
+static void case_fill_publish_snapshot(void)
+{
+    int sv[2];
+    conn_t *c;
+    char line[64];
+    size_t len = 0;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        check(0, "socketpair for the fill snapshot", "socketpair failed");
+        return;
+    }
+    if (set_nonblocking(sv[0]) != 0) {
+        check(0, "make the connection side nonblocking", "fcntl failed");
+        close(sv[0]);
+        close(sv[1]);
+        return;
+    }
+    (void)set_nonblocking(sv[1]);
+    c = conn_new(sv[0], CONN_CLIENT);
+    if (c == NULL) {
+        check(0, "conn_new over a socketpair", "allocation failed");
+        close(sv[0]);
+        close(sv[1]);
+        return;
+    }
+
+    /* Queue a reply first: the fill below must see it and keep the intent up. */
+    check(conn_queue(c, "PING :x\r\n", 9) == 0, "queue a line", "append failed");
+    if (send(sv[1], "PING :hi\r\n", 10, 0) != 10) {
+        check(0, "the peer speaks", "send failed");
+        conn_free(c);
+        close(sv[1]);
+        return;
+    }
+    check(conn_fill(c) == 0, "fill reads the peer line",
+          "conn_fill() must drain to EAGAIN without the write lock");
+    check(conn_has_line(c) == 1, "the peer line is framed",
+          "the unlocked fill lost bytes it just read");
+    check(atomic_load_explicit(&c->want_write, memory_order_acquire) == 1,
+          "fill with queued bytes keeps want_write raised",
+          "the lock-free publish missed the pending tail: the loop's next "
+          "poll set would drop POLLOUT with a reply still queued");
+    /* Drain through the pump; the intent must come down with the queue. */
+    check(conn_pump(c) == 0, "pump drains the reply", "conn_pump() failed");
+    check(conn_write_pending(c) == 0u, "the queue is empty", "pump stalled");
+    check(atomic_load_explicit(&c->want_write, memory_order_acquire) == 0,
+          "fill with an empty queue leaves want_write lowered",
+          "a stale raised intent polls POLLOUT on a drained connection");
+    /* The framed line is still there, in order: the publish never moves bytes. */
+    check(conn_next_line(c, line, sizeof line, &len) == 1 && len == 10,
+          "the framed line survives fill and pump",
+          "reading or publishing disturbed rbuf");
+
+    conn_free(c);
+    close(sv[1]);
+
+    /* The TLS half, by shape: conn_fill() must still take wq_lock around the
+     * transport call when the connection is TLS. An SSL_read racing a
+     * writer's SSL_write on the same SSL* is the MT 3.1 invariant, and the
+     * conditional that preserves it is the thing a future simplification
+     * would delete. */
+    {
+        size_t clen = 0;
+        char *code = tf_read_code("src/core/connection.c", &clen);
+
+        if (code == NULL) {
+            check(0, "read src/core/connection.c", "tf_read_code() failed");
+            return;
+        }
+        check(strstr(code, "if (c->tls_active != 0)") != NULL,
+              "conn_fill() holds wq_lock only around the TLS transport call",
+              "the SSL* serialization hold must stay for TLS while the "
+              "plaintext read runs lock-free");
+        free(code);
+    }
+}
+/* ===========================================================================
  * CASE 2: the peer link's drain goes through the transport too
  * ===========================================================================
  *
@@ -839,6 +931,7 @@ int main(void)
     printf("== test_readiness_intent ==\n");
 
     case_plaintext_invariant();
+    case_fill_publish_snapshot();
     case_intent_is_consulted();
     case_drain_uses_transport();
     case_structural();

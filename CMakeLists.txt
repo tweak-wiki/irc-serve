@@ -99,7 +99,7 @@ if(APPLE)
 endif()
 
 option(BUILD_TESTING "Build tests" ON)
-option(BUILD_BENCHMARK "Build benchmarks" ON)
+option(BUILD_BENCHMARK "Build benchmarks" OFF)
 
 # ---------------------------------------------------------------------------
 # IRC_LSAN_PROBE: build the tests that prove the sanitizers are working at all
@@ -135,63 +135,6 @@ option(BUILD_BENCHMARK "Build benchmarks" ON)
 # thing that actually finds defects in this tree's 100 tests. This option only answers
 # the prior question -- is the thing that finds them switched on.
 option(IRC_LSAN_PROBE "Build the deliberate-leak and ASan-class probes that prove the sanitizers are live" OFF)
-
-# ---------------------------------------------------------------------------
-# IRC_FORTIFY: -D_FORTIFY_SOURCE=2, opt-in, and READ THIS BEFORE TRUSTING IT
-# ---------------------------------------------------------------------------
-# Added because of a Linux-only build break this option cannot catch. glibc
-# declares read() (and write(), fread(), pipe()) with __wur, i.e.
-# __attribute__((warn_unused_result)), and GCC honours that attribute only when
-# the result is really used -- `(void)read(...)` is an error, not a discard. A
-# test discarded one exactly that way; all twelve macOS gate cells and both
-# ci_linux jobs went red with -Werror=unused-result, and every macOS cell had
-# built it clean, because macOS does not declare read() with that attribute at
-# all. Clang additionally exempts an explicit (void) cast, so even a real glibc
-# declaration compiled through clang would have stayed quiet.
-#
-# SO WHAT DOES THIS OPTION ACTUALLY BUY? Measured, on this machine, at -O0 and
-# -O2, with gcc-16 and with Apple clang under the full -Weverything set:
-# NOTHING. The macOS SDK declares zero __*_chk entry points -- no __read_chk, no
-# __memcpy_chk -- so _FORTIFY_SOURCE selects code that does not exist there. The
-# cell below is clean before the flag and clean after it.
-#
-# The reason is the point: this class of defect lives in the PLATFORM'S
-# DECLARATION of a function, not in a fortify header and not in a warning flag.
-# No -D flag on macOS can conjure a glibc declaration, so no macOS cell can ever
-# see this diagnostic. THIS IS NOT A SUBSTITUTE FOR THE LINUX CI JOB. That job
-# already exists and already caught this; it is the gate for this class, and
-# ci_macos is not a slower version of it -- it is blind to it.
-#
-# WHAT THE OPTION ACTUALLY DOES TODAY, corrected because this block used to claim
-# something that was not true of it.
-#
-# IT WAS: "it makes the fortify define part of a configuration the developer
-# actually builds and runs the suite in". Nothing built it. Measured on this tree:
-# `scripts/gate.sh`, `scripts/gate-linux-cell.sh` and every job in
-# `.github/workflows/ci.yml` pass no -DIRC_FORTIFY at all, and no Makefile target
-# does either. The one place the flag was forwarded is `local-ci.sh`, which passes
-# `-DIRC_FORTIFY="${IRC_FORTIFY:-OFF}"` -- so `IRC_FORTIFY=1 ./local-ci.sh` does
-# build and run the whole suite with the define, and nothing else does. The sentence
-# described a command a developer can type and implied a cell that runs on its own.
-#
-# WHY NO CELL WAS ADDED INSTEAD, which is the part that is a decision rather than an
-# observation. A gate cell here would build and run the suite a thirteenth time to
-# assert something the paragraph above already MEASURED to be unobservable on this
-# platform: the SDK declares no __*_chk entry points, so _FORTIFY_SOURCE selects no
-# code. That is a cell with no oracle behind it -- it cannot fail for the reason it
-# exists, and a gate that carries cells which cannot fail teaches the next reader
-# that gate cells are cheap. The gate for this class is `ci_linux_cachyos` and
-# `scripts/gate.sh --linux`, on glibc, where the define does have effect; that job
-# already exists and already caught the defect this option was added for.
-#
-# So the option stays as what it is: a documented way to build the suite with the
-# define on a machine where fortify does something, reached by naming the variable.
-# It is OFF by default so no existing configuration changes -- the same argument as
-# IRC_SANITIZE below.
-option(IRC_FORTIFY "Build with -D_FORTIFY_SOURCE=2 (see the note above: no-op on macOS)" OFF)
-if(IRC_FORTIFY)
-  add_compile_definitions(_FORTIFY_SOURCE=2)
-endif()
 
 # ---------------------------------------------------------------------------
 # IRC_SANITIZE: the opt-in AddressSanitizer + UndefinedBehaviorSanitizer build

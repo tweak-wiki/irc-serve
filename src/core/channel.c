@@ -463,7 +463,7 @@ int chan_set_topic(chan_t *ch, const char *topic, const char *who)
      * still reads the RAW input and still happens first. Checking after the strip
      * would accept a 400-byte topic whose stripped form was 250 bytes, and 3.2's
      * refusal would have become a function of which bytes were in it. */
-    (void)conn_text_strip(ch->topic, sizeof ch->topic, topic);
+    (void)conn_text_strip(ch->topic, sizeof ch->topic, topic, STRIP_STORED);
     if (topic[0] == '\0') {
         /* A cleared topic has no setter and no time: 331 says "no topic is
          * set", and leaving a stale 333 behind would claim a topic that is not
@@ -502,15 +502,21 @@ int chan_server_add(chan_t *ch, const char *name)
         strlen(name) > (size_t)CHAN_MAX_SERVER) {
         return -1;
     }
-    /* Idempotent. Two members behind the same server must not create two
-     * entries: the set is a refcount, and the count lives in the origin's
-     * records, so presence is the whole state. */
-    if (chan_server_has(ch, name)) {
-        return 0;
+    /* Idempotent single pass: check-then-add in one walk so burst installs
+     * pay one linear scan per member instead of two. */
+    for (size_t i = 0; i < ch->nservers; i++) {
+        if (chan_same_name(ch->servers[i].name, name)) {
+            return 0;
+        }
     }
     if (ch->nservers == ch->scap) {
         size_t want = (ch->scap == 0) ? 4u : ch->scap * 2u;
-        struct chan_server *grown =
+        struct chan_server *grown;
+        /* Same guard as chan_remote_add: peer-reported names must not grow the set past CHAN_MAX_MEMBER_SERVERS. */
+        if (ch->nservers >= (size_t)CHAN_MAX_MEMBER_SERVERS) {
+            return -1;
+        }
+        grown =
             (struct chan_server *)realloc(ch->servers, want * sizeof *grown);
 
         if (grown == NULL) {
@@ -627,13 +633,12 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
      * corruption. Refusing an empty one would mean a live SJOIN could not record
      * a member at all.
      *
-     * THE VALIDATION ALSO BOUNDS THE LENGTH, which is why the copy further down
+     * THE VALIDATION ALSO BOUNDS THE LENGTH, which is why the copies further down
      * cannot fail: irc_serve_server_name_valid() refuses a name longer than
      * IRC_MAX_SERVER_NAME, and CHAN_MAX_SERVER is that same bound, so a name
-     * that passed is a name that fits. The copy's result is still checked for the
-     * KEY, which is what the existing code did, and deliberately not for the
-     * holder -- a refusal there would drop a whole member over a field the
-     * member itself is fine without. */
+     * that passed is a name that fits. Every copy's result is checked anyway --
+     * a refusal returns -1 rather than keeping a truncated field the sender
+     * will never be asked about again. */
     if (!irc_serve_server_name_valid(server) || !valid_nick(nick)) {
         return -1;
     }
@@ -653,19 +658,27 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
          * and must not silently clear what a burst established -- a stale holder
          * is a fact this node can still act on, a cleared one is not. */
         seen->flags = flags;
+        /* The copies are checked: a refusal returns -1 rather than keeping a
+         * truncated prefix the peer will never be asked about again.
+         * Unreachable through the validation above, which bounds both values
+         * to their fields. */
         if (member_server != NULL && member_server[0] != '\0') {
-            (void)copy_bounded(seen->member_server, sizeof seen->member_server,
-                               member_server);
+            if (!copy_bounded(seen->member_server, sizeof seen->member_server,
+                              member_server)) {
+                return -1;
+            }
         }
-        /* THE ACCOUNT IS OVERWRITTEN ON A REPEAT WHEN IT IS GIVEN, and NOT
+        /* THE ACCOUNT IS OVERWRITTEN ON A REPEAT WHEN IT IS GIVEN, AND NOT
          * CLEARED when it is not, which is `member_server`'s rule rather than
          * `host`'s. A peer's re-assertion is allowed to correct a stale account --
          * a user who changed accounts is now a fact this node should hold -- while
          * a peer that says nothing must not clear what a burst established, since a
          * cleared account is a member this node can no longer describe. */
         if (account != NULL && account[0] != '\0') {
-            (void)copy_bounded(seen->account, sizeof seen->account,
-                               (account[0] == '*') ? "" : account);
+            if (!copy_bounded(seen->account, sizeof seen->account,
+                              (account[0] == '*') ? "" : account)) {
+                return -1;
+            }
         }
         return 0;
     }
@@ -705,14 +718,21 @@ int chan_remote_add(chan_t *ch, const char *server, const char *member_server,
      * Phase 10.3 and a recycled element inheriting the previous member's account
      * would be that same impersonation with a third field. */
     ch->remotes[ch->nremotes].account[0] = '\0';
+    /* Checked like the key above: a refusal returns -1 rather than keeping a
+     * truncated prefix, which is unreachable through the validation at the
+     * top of this function. */
     if (account != NULL && account[0] != '\0') {
-        (void)copy_bounded(ch->remotes[ch->nremotes].account,
+        if (!copy_bounded(ch->remotes[ch->nremotes].account,
                            sizeof ch->remotes[0].account,
-                           (account[0] == '*') ? "" : account);
+                           (account[0] == '*') ? "" : account)) {
+            return -1;
+        }
     }
     if (member_server != NULL) {
-        (void)copy_bounded(ch->remotes[ch->nremotes].member_server,
-                           sizeof ch->remotes[0].member_server, member_server);
+        if (!copy_bounded(ch->remotes[ch->nremotes].member_server,
+                           sizeof ch->remotes[0].member_server, member_server)) {
+            return -1;
+        }
     }
     ch->remotes[ch->nremotes].flags = flags;
     ch->nremotes++;
@@ -1291,11 +1311,11 @@ int chan_dispose_if_empty(server_t *s, chan_t *ch)
     /* The TOPIC goes out to the cache on the way down, and this is the only
      * place it happens, which is what makes the cache's lifetime equal to the
      * channel's: there is no other teardown path for a chan_t, so there is no
-     * other place a topic could be dropped. A loss here -- a full cache -- leaves
-     * the topic lost exactly as it would have been without the cache, and is
-     * counted on s->n_topic_cache_full; the return value is deliberately not
-     * examined, because refusing to dispose a channel over a cache miss would
-     * trade a lost topic for an unbounded store. */
+     * other place a topic could be dropped. A full cache evicts its oldest
+     * entry to make room -- counted on s->n_topic_cache_full -- so the topic
+     * is always remembered; the return value is deliberately not examined,
+     * because refusing to dispose a channel over a cache miss would trade a
+     * lost topic for an unbounded store. */
     (void)server_topic_remember(s, ch);
     server_chan_detach(s, ch->name);
     chan_free(ch);
@@ -1369,28 +1389,36 @@ int server_topic_remember(server_t *s, const chan_t *ch)
         return 0;
     }
     if (e != NULL) {
-        /* Already known: overwrite in place. The three fields move together, so
-         * an entry is never half old and half new -- the same "every field
-         * changes or none does" rule chan_set_topic() applies to a channel. */
-        (void)copy_bounded(e->topic, sizeof e->topic, ch->topic);
-        (void)copy_bounded(e->who, sizeof e->who, ch->topic_who);
-        e->when = ch->topic_when;
+        /* Already known: rewrite and mark most-recently-used, so a channel
+         * whose topic is re-set keeps its entry. The slot is freed and
+         * re-appended because that is the same two operations the paths below
+         * already use; the append cannot fail here, a slot was just freed. */
+        size_t idx = (size_t)(e - s->topics);
+        chan_topic_t fresh = *e;
+
+        (void)copy_bounded(fresh.topic, sizeof fresh.topic, ch->topic);
+        (void)copy_bounded(fresh.who, sizeof fresh.who, ch->topic_who);
+        fresh.when = ch->topic_when;
+        topic_remove_at(s, idx);
+        s->topics[s->ntopics] = fresh;
+        s->ntopics++;
         printf("[observable] topic_persist: channel=%s state=remembered "
                "topic_len=%zu entries=%zu updated=1\n",
                ch->name, strlen(ch->topic), s->ntopics);
         return 1;
     }
     if (s->ntopics >= (size_t)SERVER_TOPIC_MAX) {
-        /* The bound, and the loss is COUNTED rather than hidden. A node whose
-         * counter climbs is a node that has seen more distinct channel names
-         * than it can remember topics for, and that is the number an operator
-         * needs; the topic is then lost exactly as it would have been without
-         * this cache. */
+        /* The bound, and the oldest entry is EVICTED rather than the new topic
+         * refused: the cache holds the most-recently-used names, and a node
+         * cycling through more distinct channels than it can remember for loses
+         * the stalest topic, not the newest. s->n_topic_cache_full counts the
+         * evictions, which is the number an operator needs, and the freed slot
+         * is what the append below fills, so no allocation happens here. */
+        printf("[observable] topic_persist: channel=%s state=evicted "
+               "reason=CACHE_FULL entries=%zu evicted=%s\n",
+               ch->name, s->ntopics, s->topics[0].name);
+        topic_remove_at(s, 0);
         s->n_topic_cache_full++;
-        printf("[observable] topic_persist: channel=%s state=REFUSED "
-               "reason=CACHE_FULL entries=%zu\n",
-               ch->name, s->ntopics);
-        return -1;
     }
     /* Geometric growth, doubling from the first entry, so a node that remembers
      * 64 topics has done six reallocs rather than 64. The bound above is what

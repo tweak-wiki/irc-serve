@@ -142,6 +142,8 @@ static void conn_readable(server_t *s, conn_t *c)
         message_t m;
         size_t len = 0;
         int got;
+        int limited;
+        int frame_last;
 
         got = conn_next_line(c, line, sizeof line, &len);
         if (got == 0) {
@@ -154,24 +156,44 @@ static void conn_readable(server_t *s, conn_t *c)
             conn_mark_closing(c);
             return;
         }
+        /* #224: every framed line is charged before parsing, rejected lines
+         * included, so invalid input cannot dodge the flood controls. */
+        limited = (c->kind != CONN_SERVER && c->rate_tokens < 1.0);
+        if (c->kind != CONN_SERVER && !limited) {
+            c->rate_tokens -= 1.0;
+        }
+        frame_last = (--budget == 0u);
 
         /* message_parse_n(), not message_parse(): the framing layer holds a
          * length, and only the counted entry point rejects an embedded NUL,
          * which is a stated hard requirement of 3.2. */
         if (message_parse_n(line, len, &m) != 0) {
             s->n_parse_reject++;
-            message_free(&m); /* rejection leaves it zeroed; free is a no-op */
-            continue;
+            if (!limited) {
+                message_free(&m); /* rejection leaves it zeroed; free is a no-op */
+                if (frame_last) {
+                    /* #216: more buffered; the next POLLIN continues. Mark the
+                     * node so the pre-poll scan runs next tick instead of
+                     * every tick. */
+                    if (conn_has_line(c)) {
+                        s->lines_pending = 1;
+                    }
+                    return;
+                }
+                continue;
+            }
+            /* Flooded and unparsable: m is zeroed, so the 417 below
+             * simply carries no command. */
+        } else {
+            s->n_lines++;
         }
-
-        s->n_lines++;
         /* #168: each dispatched client line spends one token. Empty means the
          * sender is flooding: one 417, then CLOSING, and the reaper collects
          * the fd at step 7. The reply precedes the mark because the reply
          * path refuses a CLOSING target. "Once" needs no flag: a CLOSING
          * conn is never read again. */
-        if (c->kind != CONN_SERVER) {
-            if (c->rate_tokens < 1.0) {
+        if (limited) {
+            {
                 int need_flush;
                 printf("[observable] rate_limited: fd=%d\n", c->fd);
                 (void)reply_refused(s, c, m.command, NULL, "417", NULL, 0,
@@ -195,7 +217,6 @@ static void conn_readable(server_t *s, conn_t *c)
                 conn_mark_closing(c);
                 return;
             }
-            c->rate_tokens -= 1.0;
         }
         if (s->trace) {
             /* THE COMMAND WORD IS AN IDENTIFIER, SO IT IS MEASURED, NOT FILTERED.
@@ -233,8 +254,13 @@ static void conn_readable(server_t *s, conn_t *c)
             s->dispatch(s, c, &m);
         }
         message_free(&m);
-        if (--budget == 0u) {
-            return; /* more buffered; the next POLLIN continues */
+        if (frame_last) {
+            /* #216: more buffered; the next POLLIN continues. Mark the node
+             * so the pre-poll scan runs next tick instead of every tick. */
+            if (conn_has_line(c)) {
+                s->lines_pending = 1;
+            }
+            return;
         }
     }
 }
@@ -301,7 +327,13 @@ static void conn_on_readable(server_t *s, int fd)
          * loop should be able to see that it happened here and why.
          * ------------------------------------------------------------------------ */
         if (c->rlen > 0u) {
-            conn_readable(s, c);
+            /* One call frames at most 128 lines, and the CLOSING mark below
+             * stops the loop's conn_has_line() revisit, so drain fully here. */
+            do {
+                conn_readable(s, c);
+            } while (atomic_load_explicit(&c->state, memory_order_acquire) !=
+                         CONN_CLOSING &&
+                     conn_has_line(c));
         }
         printf("[observable] conn_close: fd=%d reason=eof\n", c->fd);
         conn_mark_closing(c);
@@ -346,7 +378,12 @@ static void conn_on_readable(server_t *s, int fd)
          * overwhelming majority of times this arm is reached, and a fragment and
          * dispatch of whatever is in hand when something is. */
         if (c->rlen > 0u) {
-            conn_readable(s, c);
+            /* Same 128-line budget as the EOF arm above: drain fully here. */
+            do {
+                conn_readable(s, c);
+            } while (atomic_load_explicit(&c->state, memory_order_acquire) !=
+                         CONN_CLOSING &&
+                     conn_has_line(c));
         }
         printf("[observable] conn_close: fd=%d reason=read_error errno=%d\n", c->fd,
                errno);
@@ -506,15 +543,21 @@ int poll_loop_step(server_t *s, int timeout_ms)
 
     /* Buffered lines produce no POLLIN. If the per-connection line budget
      * cut one off mid-burst, do not sleep on work already in hand. */
-    if (timeout_ms > 0) {
+    /* #216: gated behind lines_pending -- the scan walks every connection, so
+     * idle ticks skip it. The flag is re-armed only when a scan actually
+     * finds a buffered line. */
+    if (timeout_ms > 0 && s->lines_pending) {
+        int found = 0;
         for (i = 0; i < s->nactive; i++) {
             conn_t *c = s->by_fd[s->active_fds[i]];
 
             if (c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING && conn_has_line(c)) {
                 timeout_ms = 0;
+                found = 1;
                 break;
             }
         }
+        s->lines_pending = found;
     }
 
     /* --- 2. wait --- */
@@ -608,20 +651,11 @@ int poll_loop_step(server_t *s, int timeout_ms)
     (void)server_reap(s);
 
     /* --- 8. tick: the only place time advances --- */
-    {
-        uint64_t now_ms = server_now_ms();
-
-        /* #168: refill every live bucket on the tick, so a flooder's debt is
-         * measured in real time rather than in poll iterations. */
-        for (i = 0; i < s->nactive; i++) {
-            conn_t *c = s->by_fd[s->active_fds[i]];
-
-            if (c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING) {
-                rate_refill(c, now_ms);
-            }
-        }
-        server_tick(s, now_ms);
-    }
+    /* #216: refill is lazy -- conn_readable() refills the reader's bucket on
+     * entry, right before the token check, so an idle connection's bucket is
+     * never touched and a flooder's debt is still measured in real time. The
+     * per-tick walk over every connection is gone. */
+    server_tick(s, server_now_ms());
     return 0;
 }
 

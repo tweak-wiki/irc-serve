@@ -174,6 +174,7 @@
 #define SECRET "irc-serve-federation-secret-a"
 #define NAME_A "irc.a"
 #define NAME_B "irc.b"
+#define NAME_C "irc.c"
 #define CHAN_T "#T"
 #define CHAN_U "#U"
 #define NICK_A "alice" /* on A, and the CREATOR of #T there */
@@ -240,6 +241,11 @@ static int g_trace;
  * hook has to know from the moment it is installed. */
 static int g_is_b;
 
+/* Node C dials node B rather than node A, for the one case that needs a second
+ * peer on the receiver: a foreign record is only foreign on a node that holds
+ * two links. Pre-fork state, like the rest. */
+static int g_is_c;
+
 /* The resyncs node A has already driven, which the tick hook walks. */
 static int g_stage;
 
@@ -263,15 +269,14 @@ static int g_tiny_recv;
  * that would otherwise get there first. Shrinking cannot demonstrate it -- a
  * smaller budget makes the arithmetic bind harder, which is the other case.
  *
- * THE FIGURE IS DERIVED FROM THE TWO BOUNDS rather than picked, so that moving
- * either moves it: 2 KiB is IRC_BURST_MAX_CHANS (1024) times twice the 204-byte
- * minimum charge, which is what leaves a factor of two between this budget and the
- * number of records the ceiling stops at. The charge is a floor, not an estimate --
- * IRC_MAX_TAG_OVERHEAD is frozen at 179 and every record pays it plus its origin,
- * its verb and six parameters -- so a budget of 2 KiB per channel cannot be
- * exhausted by 1024 records on any input, and the case cannot sit on the
- * boundary. The cost of the headroom is memory in the RECEIVER under test: 1024
- * burst_chan_t is about 524 KiB, allocated only by this case. */
+* THE FIGURE IS DERIVED FROM THE TWO BOUNDS rather than picked, so that moving
+* either moves it: 512 bytes per ceiling record -- IRC_BURST_MAX_CHANS times
+* 512 -- which is two-and-a-half times the 204-byte minimum charge. The charge
+* is a floor, not an estimate -- IRC_MAX_TAG_OVERHEAD is frozen at 179 and every
+* record pays it plus its origin, its verb and six parameters -- so 8192 minimal
+* records cannot exhaust this budget on any input the helper sends, and the case
+* cannot sit on the boundary. The cost of the headroom is memory in the RECEIVER
+* under test: 8192 burst_chan_t is about 4 MiB, allocated only by this case. */
 #define BURST_TEST_CEIL_BUDGET (IRC_BURST_MAX_CHANS * 512u)
 static int g_raised_recv;
 
@@ -293,6 +298,18 @@ static int g_open_burst;
  * nothing to keep would pass the same assertion for the wrong reason. */
 static int g_overlong;
 
+/* #307: SEND A HAND-BUILT TRANSACTION WHOSE SBURSTM <account> IS WIDER THAN
+ * CONN_MAX_ACCOUNT, for case_overlong_member_account_discards(). Pre-fork state,
+ * like the rest. One hand-built send, once, down the same straight-to-3 arm
+ * `g_overlong` takes. */
+static int g_overlong_member;
+
+/* The over-long account itself: 70 'A's against a 63-byte bound. 'A' is used so
+ * the only thing wrong with the value is its width -- no byte in it is
+ * unrenderable, untransmittable, or invalid in any other respect. */
+#define OVERLONG_ACCOUNT_LEN 70u
+static char g_overlong_account[OVERLONG_ACCOUNT_LEN + 1];
+
 /* #142: the transaction carrying a value no name can be made of. One hand-built
  * send, once, so it takes the same straight-to-3 arm `g_overlong` does. */
 static int g_hostile;
@@ -304,14 +321,30 @@ static int g_hostile;
  * than IRC_BURST_MAX_CHANS. Pre-fork state, like the rest; 0 sends nothing, which
  * is what every other case wants. */
 static size_t g_flood_count;
+/* Records of the current flood already queued, across ticks. The flood goes
+ * out one tick-batch per tick, so the helper resumes where the last tick
+ * stopped; reset with g_flood_count by every case that floods. */
+static size_t g_flood_done;
+/* DRIVE ONE RESYNC OF A BURST THAT DOES NOT FIT ONE FLUSH (#330), for
+ * case_big_burst_resyncs_in_chunks(). Pre-fork state, like the rest; 0 in
+ * every other case, which is what keeps this arm from firing there. */
+static int g_big_resync;
+/* How many channels the #330 case builds: four clients at CONN_MAX_CHANNELS
+ * (128) each, so the burst carries 512 SBURSTC and 512 SBURSTM records -- about
+ * 110 KiB on the wire, past the 64 KiB chunk that forces the sender onto its
+ * multi-flush path, and under the 256 KiB link queue so one flush at a time
+ * always fits. */
+#define BIG_RESYNC_CHANS ((size_t)512u)
 
 /* Defined below, with the wire format written out. Forward-declared rather than
  * moved so the RESYNC DRIVER -- the thing every case in this file is about -- reads
  * first and the one case that bypasses it reads as the exception it is. */
 static void send_truncated_burst(server_t *s, server_link_t *link);
 static void send_open_burst(server_t *s, server_link_t *link);
+static int send_foreign_burst(server_t *s, server_link_t *link);
 static void send_hostile_burst(server_t *s, server_link_t *link);
 static void send_overlong_topic_burst(server_t *s, server_link_t *link);
+static void send_overlong_member_burst(server_t *s, server_link_t *link);
 static size_t send_channel_flood_burst(server_t *s, server_link_t *link,
                                      size_t count);
 
@@ -326,6 +359,30 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link,
 static void offer_resync(server_t *s)
 {
     chan_t *ch;
+
+    /* NODE C SENDS ONE PARTIAL TRANSACTION AND HOLDS IT OPEN. C is the second
+     * peer on the receiver under test: its SBURST makes it the shadow's owner,
+     * and the missing SBURSTE is what keeps the transaction open while node A
+     * bursts beside it. Above every other arm because C has no channel, and
+     * the arms below would otherwise read that as "not yet". */
+    if (g_is_c != 0) {
+        if (g_stage == 0) {
+            /* After B's establishment burst has been APPLIED here, not merely
+             * after the link exists: queuing ahead of C's own establishment
+             * lines would put them first on the wire (one TCP connection, one
+             * order), and the establishment SBURST would then supersede the
+             * very transaction this case needs open. burst_done is set on the
+             * commit path, so it is the establishment having LANDED, and
+             * everything C queued at link-up is ahead of what is queued here. */
+            server_link_t *bl = server_find_link(s, NAME_B);
+
+            if (bl != NULL && bl->burst_done != 0 &&
+                send_foreign_burst(s, bl) != 0) {
+                g_stage = 3;
+            }
+        }
+        return;
+    }
 
     /* THE FLOOD IS ABOVE EVERY GATE, including the `ch == NULL` return below, and
      * that placement is the case's whole arrangement rather than an ordering
@@ -343,6 +400,20 @@ static void offer_resync(server_t *s)
                                      g_flood_count) > 0u) {
             g_stage = 3;
         }
+        return;
+    }
+    if (g_big_resync != 0 && g_is_b == 0 && g_stage == 0) {
+        /* ONCE, when the parent has built the channels -- and the gate is the
+         * count, so a resync cannot go out with half the roster. Straight to 3
+         * for the flood's reason: one transaction, once, and the stage machine
+         * below is inert at 3 ("node A drives three, and no more"). */
+        if (server_chan_count(s) < BIG_RESYNC_CHANS) {
+            return;
+        }
+        (void)federation_resync(s, server_find_link(s, NAME_B));
+        printf("[fixture] big_resync_sent: chans=%zu\n", server_chan_count(s));
+        fflush(stdout);
+        g_stage = 3;
         return;
     }
     if (g_is_b != 0) {
@@ -412,6 +483,19 @@ static void offer_resync(server_t *s)
             }
             g_stage = 3;
             send_overlong_topic_burst(s, server_find_link(s, NAME_B));
+            return;
+        }
+        if (g_overlong_member != 0) {
+            /* Straight to 3, for `g_overlong`'s reason: one hand-built
+             * transaction, once. The gate is the same pair -- two nicks and a
+             * topic -- so the member record arrives after the relayed STOPIC and
+             * the refusal below is measured against a receiver that already holds
+             * the channel. */
+            if (server_nick_count(s) < 2u || ch->topic[0] == '\0') {
+                return;
+            }
+            g_stage = 3;
+            send_overlong_member_burst(s, server_find_link(s, NAME_B));
             return;
         }
         if (g_hostile != 0) {
@@ -666,6 +750,54 @@ static void send_open_burst(server_t *s, server_link_t *link)
     fflush(stdout);
 }
 
+/* ---------------------------------------------------------------------------
+ * #225: A SECOND PEER'S PARTIAL TRANSACTION
+ * ---------------------------------------------------------------------------
+ * C opens a burst on the receiver and never finishes it: one SBURST and one
+ * SBURSTN, and no SBURSTE. The missing terminator is the whole arrangement --
+ * it is what keeps C's transaction open while node A bursts beside it, which
+ * is the interleaving whose records used to land in the wrong shadow. The one
+ * nick record is enough to own the shadow; any more would only be more lines
+ * for the same assertion.
+ */
+static int send_foreign_burst(server_t *s, server_link_t *link)
+{
+    conn_t *peer;
+    const char *n0[2];
+    const char *n1[6];
+    char signon[24];
+    char epoch[24];
+    int ok = 0;
+
+    if (link == NULL) {
+        return 0;
+    }
+    peer = server_link_conn(s, link);
+    if (peer == NULL) {
+        return 0;
+    }
+    burst_render_u64(epoch, sizeof epoch, s->epoch);
+    burst_render_u64(signon, sizeof signon, 0u);
+
+    n0[0] = epoch;
+    n0[1] = "1"; /* one nick follows */
+    n1[0] = NICK_E;
+    n1[1] = NICK_E;
+    n1[2] = "127.0.0.1";
+    n1[3] = "-";
+    n1[4] = signon;
+    n1[5] = "";
+    if (fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURST", n0, 2,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTN", n1, 6,
+                       NULL) == 0) {
+        ok = 1;
+    }
+    printf("[fixture] foreign_sent: ok=%d\n", ok);
+    fflush(stdout);
+    return ok;
+}
+
 static void child_tick(server_t *s, uint64_t now_ms)
 {
     fed_tick(s, now_ms);
@@ -762,6 +894,80 @@ static void send_overlong_topic_burst(server_t *s, server_link_t *link)
     printf("[fixture] overlong_sent: ok=%d topic_len=%u\n", ok, OVERLONG_TOPIC_LEN);
     fflush(stdout);
 }
+
+/* ---------------------------------------------------------------------------
+ * #307: A MEMBER RECORD CARRYING AN ACCOUNT THE RECEIVER CANNOT STORE
+ * ---------------------------------------------------------------------------
+ * The fourth place in the tree where a test writes the wire format, for the
+ * reason send_overlong_topic_burst() is the third: no correctly behaving sender
+ * produces one. SBURSTC carries a fitting topic here on purpose -- the channel
+ * record is faultless, so the ONLY thing wrong with the transaction is the width
+ * of the member's <account>, and a receiver that kept the member anyway would be
+ * holding a truncated name the sender will never be asked about again.
+ *
+ * Unlike the over-long topic, an over-wide member field is a RECORD refusal, not
+ * a field refusal: the member is the record, there is nothing to keep it on, so
+ * the transaction is discarded whole rather than applied with a withheld field.
+ */
+static void send_overlong_member_burst(server_t *s, server_link_t *link)
+{
+    conn_t *peer = server_link_conn(s, link);
+    const char *n0[2];
+    const char *n1[6];
+    const char *c1[6];
+    const char *m1[5];
+    const char *e1[4];
+    char signon[24];
+    char epoch[24];
+    int ok = 0;
+
+    if (peer == NULL) {
+        return;
+    }
+    burst_render_u64(epoch, sizeof epoch, s->epoch);
+    burst_render_u64(signon, sizeof signon, 0u);
+
+    n0[0] = epoch;
+    n0[1] = "1"; /* one nick follows */
+    n1[0] = NICK_E;
+    n1[1] = NICK_E;
+    n1[2] = "127.0.0.1";
+    n1[3] = "-";
+    n1[4] = signon;
+    n1[5] = "";
+    c1[0] = CHAN_T;
+    c1[1] = NAME_A;
+    c1[2] = NICK_A; /* a topic setter that fits */
+    c1[3] = "1700000000";
+    c1[4] = "nt";
+    c1[5] = "a fitting topic"; /* the channel record is faultless: the member is not */
+    m1[0] = CHAN_T;
+    m1[1] = NAME_A;
+    m1[2] = NICK_E;
+    m1[3] = "-";
+    m1[4] = g_overlong_account; /* 70 bytes against a 63-byte bound: the one fault */
+    e1[0] = epoch;
+    e1[1] = "1"; /* nicks: correct */
+    e1[2] = "1"; /* chans: correct */
+    e1[3] = "1"; /* members: correct */
+
+    if (fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURST", n0, 2,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTN", n1, 6,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTC", c1, 6,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTM", m1, 5,
+                       NULL) == 0 &&
+        fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTE", e1, 4,
+                       NULL) == 0) {
+        ok = 1;
+    }
+    printf("[fixture] overlong_member_sent: ok=%d account_len=%u\n", ok,
+           OVERLONG_ACCOUNT_LEN);
+    fflush(stdout);
+}
+
 
 /* ---------------------------------------------------------------------------
  * #142: A BURST CARRYING VALUES NO NAME CAN BE MADE OF
@@ -871,36 +1077,61 @@ static void send_hostile_burst(server_t *s, server_link_t *link)
  * ---------------------------------------------------------------------------
  * The channel count is bounded twice over. The byte budget bounds it ARITHMETICALLY
  * -- every record is charged before it is stored, and at the shipped budget the
- * cheapest possible SBURSTC costs 204 bytes against 131072, so at most 642 fit --
+ * cheapest possible SBURSTC costs 204 bytes against 1048576, so at most 5140 fit --
  * and IRC_BURST_MAX_CHANS bounds it by a number somebody wrote down. Two
  * senders below, one per bound, and the pair is the point: the first proves the
  * arithmetic is what does the work, and the second proves the stated ceiling is
  * real code rather than a comment.
  *
- * `count` records go out, one per tick-batch, each naming a DIFFERENT channel, so
- * the receiver's shadow really does grow by `count` and nothing dedups them. The
- * topic is one byte and the topic_who is one byte, which is what makes the charge
- * the 204 the arithmetic above is built on.
+ * `count` records go out, one tick-batch per tick, each naming a DIFFERENT
+ * channel, so the receiver's shadow really does grow by `count` and nothing
+ * dedups them. The topic is one byte and the topic_who is one byte, which is
+ * what makes the charge the 204 the arithmetic above is built on.
+ *
+ * ONE TICK-BATCH PER TICK, because the floods this helper now sends do not fit
+ * the sender's queue: 6666 minimal records are ~580 KiB on the wire against a
+ * 256 KiB link queue, and queueing them all at once would saturate the link --
+ * which is exactly the verdict the product code stopped returning for large
+ * bursts in #330, so a fixture that saturated its own link would be measuring
+ * the queue rather than either bound. 512 records are ~45 KiB, the loop drains
+ * the queue between ticks, and the receiver sees one transaction in the end.
+ * Progress lives in g_flood_done, which the case resets with g_flood_count.
+ *
+ * AND A LONGER NEEDLE FOR THE REFUSAL, because the receiver ingests on the
+ * order of sixty lines per tick: 8193 records need ~140 receive-ticks, and at
+ * a slow tick -- an instrumented binary on a loaded runner -- that is past
+ * the 15 s T_IO_MS every other needle uses. 120 s is ~8x the measured need,
+ * and it applies to the refusal waits only: the flood going out is the
+ * sender's steady pace and stays on T_IO_MS.
  */
+#define FLOOD_BATCH ((size_t)512u)
+#define FLOOD_IO_MS 120000
 static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t count)
 {
     conn_t *peer = server_link_conn(s, link);
     char epoch[24];
     char count_s[24];
     char name[CHAN_MAX_NAME + 1];
-    size_t sent = 0u;
+    size_t tranche = 0u;
 
-    /* RETURNS WHAT IT SENT, AND THAT IS THE POINT OF THE RETURN VALUE: the tick
-     * hook that calls this advances its own stage on a non-zero answer, so a tick
-     * that arrives before the link is up -- which is the first tick on this node --
-     * does not consume the one attempt the case has. A fixture that advanced its
-     * stage first and sent second would report "sent 0 of 1024" on the tick before
-     * the handshake and then never try again. */
+    /* RETURNS WHETHER THE WHOLE FLOOD IS OUT, AND THAT IS THE POINT OF THE
+     * RETURN VALUE: the tick hook that calls this advances its own stage on a
+     * non-zero answer, so a tick that arrives before the link is up -- which is
+     * the first tick on this node -- does not consume the one attempt the case
+     * has. A fixture that advanced its stage first and sent second would report
+     * "sent 0 of 6666" on the tick before the handshake and then never try
+     * again. A partial tick returns 0, so the next tick continues where this
+     * one stopped rather than restarting: SBURST goes out once, on the tick
+     * that queues the first records, and SBURSTE goes out once, on the tick
+     * that queues the last ones. */
+    if (g_flood_done >= count) {
+        return 1u;
+    }
     if (peer == NULL) {
         return 0u;
     }
     burst_render_u64(epoch, sizeof epoch, s->epoch);
-    {
+    if (g_flood_done == 0u) {
         const char *n0[2];
 
         n0[0] = epoch;
@@ -910,13 +1141,13 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
             return 0u;
         }
     }
-    for (size_t i = 0; i < count; i++) {
+    while (g_flood_done < count && tranche < FLOOD_BATCH) {
         const char *c1[6];
 
         /* A DISTINCT LEGAL NAME PER RECORD, and the width matters as much as the
          * distinctness: chan_name_valid() has to accept it or the record is
          * refused as malformed and the case would be measuring the wrong refusal. */
-        (void)snprintf(name, sizeof name, "#f%05zu", i);
+        (void)snprintf(name, sizeof name, "#f%05zu", g_flood_done);
         c1[0] = name;
         c1[1] = NAME_A;
         c1[2] = "-"; /* no topic setter: the SHORTEST legal form */
@@ -927,9 +1158,13 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
                            6, NULL) != 0) {
             break;
         }
-        sent++;
+        g_flood_done++;
+        tranche++;
     }
-    burst_render_u64(count_s, sizeof count_s, (uint64_t)sent);
+    if (g_flood_done < count) {
+        return 0u;
+    }
+    burst_render_u64(count_s, sizeof count_s, (uint64_t)g_flood_done);
     {
         const char *e1[4];
 
@@ -937,18 +1172,21 @@ static size_t send_channel_flood_burst(server_t *s, server_link_t *link, size_t 
         e1[1] = "0";
         e1[2] = count_s;
         e1[3] = "0";
-        (void)fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTE", e1,
-                             4, NULL);
+        if (fed_queue_line(s, peer, burst_fixture_stamp(s), s->name, "SBURSTE", e1,
+                           4, NULL) != 0) {
+            return 0u;
+        }
     }
-    printf("[fixture] flood_sent: sent=%zu of %zu\n", sent, count);
+    printf("[fixture] flood_sent: sent=%zu of %zu\n", g_flood_done, count);
     fflush(stdout);
-    return sent;
+    return 1u;
 }
 
 /* Runs in the CHILD, before anything may connect. */
 static void child_setup(server_t *s)
 {
     struct sockaddr_in sa;
+    const char *peer_name;
 
     /* The client command surface, installed BEFORE fed_open(): fed_open() saves
      * whatever dispatch is there and replaces it with its own, so a
@@ -1034,9 +1272,12 @@ static void child_setup(server_t *s)
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = htons((unsigned short)g_peer_port);
-    TF_CHECK_MSG(fed_link_configure(s, NAME_A, (const struct sockaddr *)&sa,
+    /* Node C dials B, so the receiver under test holds two links. Every other
+     * child dials A; C is the one case's second peer. */
+    peer_name = (g_is_c != 0) ? NAME_B : NAME_A;
+    TF_CHECK_MSG(fed_link_configure(s, peer_name, (const struct sockaddr *)&sa,
                                     (socklen_t)sizeof sa) != NULL,
-                 "the child could not configure peer %s on port %d", NAME_A,
+                 "the child could not configure peer %s on port %d", peer_name,
                  g_peer_port);
 }
 
@@ -2348,6 +2589,143 @@ static void case_open_transaction_released_at_shutdown(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * #225: RECORDS FROM A PEER THAT DOES NOT OWN THE TRANSACTION ARE REFUSED
+ * ---------------------------------------------------------------------------
+ * What used to happen: the BUSY refusal guarded only the SBURST start, so a
+ * second peer's follow-up records were appended to the owner's shadow. The
+ * owner's terminator counts then mismatched and its legitimate burst was
+ * discarded -- a routine near-simultaneous resync destroyed the transaction it
+ * raced with. The fix checks the owner on every record and on the commit.
+ *
+ * The arrangement is three nodes because a foreign record is only foreign on a
+ * node that holds two links: C opens a burst on B and holds it open (no
+ * SBURSTE), then A resyncs beside it. B must refuse A's start with BUSY and
+ * every one of A's records and terminator with NOT_OWNER, and abandon nothing.
+ *
+ * THE ORDER IS LOAD-BEARING. C's two lines are queued before the parent starts
+ * any of A's client registrations, and each registration is a full round trip
+ * against A while B's poll loop runs continuously -- so C's SBURST is applied
+ * on B long before A's SBURST arrives, and the BUSY below is a statement about
+ * a receiver that already had an owner rather than a race the case happened
+ * to win.
+ *
+ * AND THE NEGATIVE: without the owner check, A's records land in C's shadow
+ * and A's terminator mismatches C's epoch and counts, so B prints
+ * fed_burst_truncated and fed_burst_abandon and this case fails on the
+ * NOT_OWNER needle, on burst_abandoned=0 and on burst_truncated=0 together.
+ */
+static void case_foreign_records_refused(void)
+{
+    nf_node_t a;
+    nf_node_t b;
+    nf_node_t c;
+    test_client_t alice;
+    test_client_t ann;
+    test_client_t bob;
+    const char *const just_alice[] = { "@" NICK_A };
+
+    g_peer_port = 0;
+    g_trace = 0;
+    g_is_b = 0;
+    g_is_c = 0;
+    g_stage = 0;
+    g_tiny_send = 0;
+    g_tiny_recv = 0;
+    g_raised_recv = 0;
+    g_flood_count = 0u;
+    g_open_burst = 0;
+    g_truncate = 0;
+    g_overlong = 0;
+    g_hostile = 0;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node A");
+    g_peer_port = a.port;
+    g_is_b = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
+                 "could not spawn node B");
+    /* C dials B: g_peer_port is B's port and g_is_c steers the dial at NAME_B. */
+    g_peer_port = b.port;
+    g_is_b = 0;
+    g_is_c = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&c, NAME_C, child_setup) == 0,
+                 "could not spawn node C");
+
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never established its link to node B: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never established its link to node A: %s", b.out);
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_C, T_IO_MS) == 0,
+                 "node B never established its link to node C: %s", b.out);
+    TF_CHECK_MSG(nf_expect(&c, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node C never established its link to node B: %s", c.out);
+
+    /* C's partial transaction first: the fixture line says the lines were
+     * queued, and the registrations below are what make "queued" mean
+     * "applied" -- several round trips against A pass before A has anything
+     * to burst. */
+    TF_CHECK_MSG(nf_expect(&c, "foreign_sent: ok=1", T_IO_MS) == 0,
+                 "node C never sent its partial burst: %s", c.out);
+
+    /* Then A's resync beside it: two nicks fire the tick hook, alice's JOIN
+     * gives the burst a channel and a member. */
+    register_client(&alice, a.port, NICK_A);
+    register_client(&ann, a.port, NICK_E);
+    TF_CHECK_MSG(tc_send(&alice, "JOIN " CHAN_T) == 0, "alice's JOIN send failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
+                 "alice's JOIN never completed on the node that owns the channel");
+
+    /* 1. THE START IS REFUSED WITH BUSY, naming the owner. Unchanged behavior,
+     * and the baseline the new assertions stand on: without an open
+     * transaction owned by C, nothing below would be foreign. */
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_refused: peer=" NAME_A
+                                   " reason=BUSY owner=" NAME_C,
+                           T_IO_MS) == 0,
+                 "node B did not refuse A's SBURST against C's open transaction, "
+                 "so the interleaving under test never happened: %s",
+                 b.out);
+    /* 2. EVERY FOLLOW-UP RECORD IS REFUSED AS FOREIGN, and the shadow is left
+     * alone. One needle per verb would pin the count; one needle pins the
+     * rule, and the counters below pin that nothing was thrown away. */
+    TF_CHECK_MSG(nf_expect(&b, "reason=NOT_OWNER owner=" NAME_C, T_IO_MS) == 0,
+                 "node B accepted a record from a peer that does not own the "
+                 "open transaction, so the owner's shadow is being poisoned: %s",
+                 b.out);
+    /* 3. NOTHING ABANDONED, NOTHING TRUNCATED. Before the fix this is where
+     * the case fails: A's records landed in C's shadow and A's terminator
+     * mismatched, so the receiver threw the whole transaction away. */
+    TF_CHECK_MSG(nf_expect_u64(&b, "burst_abandoned=", 0, 2000) == 0,
+                 "node B abandoned a transaction, so a foreign record reached "
+                 "the owner's shadow: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_u64(&b, "burst_truncated=", 0, 2000) == 0,
+                 "node B truncated a transaction, so a foreign record reached "
+                 "the owner's shadow: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_u64(&b, "fed_malformed=", 0, 2000) == 0,
+                 "node B counted a refusal as malformed: a well-formed record "
+                 "from the wrong peer is refused, not malformed: %s",
+                 b.out);
+    /* 4. THE RECEIVER'S ROSTER IS C'S SILENCE, NOT A'S BURST. B holds #T from
+     * alice's relayed SJOIN, so a B-side NAMES lists her -- and only her. A
+     * receiver that installed A's refused records would show ann here. */
+    register_client(&bob, b.port, NICK_B);
+    expect_names(&bob, "bob after the refused burst", NICK_B, CHAN_T,
+                 just_alice, 1u, NICK_E);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&c) == 0, "node C did not exit cleanly");
+
+    tc_close(&alice);
+    tc_close(&ann);
+    tc_close(&bob);
+    nf_free(&a);
+    nf_free(&b);
+    nf_free(&c);
+    g_is_c = 0;
+}
+
+/* ---------------------------------------------------------------------------
  * #122: A TOPIC WIDER THAN CHAN_MAX_TOPIC IS REFUSED, COUNTED, AND KEPT FROM
  * BECOMING A DIFFERENT TOPIC
  * ---------------------------------------------------------------------------
@@ -2604,6 +2982,130 @@ static void case_over_long_topic_is_refused(void)
     nf_free(&b);
     g_overlong = 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * #307: A MEMBER RECORD CARRYING AN ACCOUNT THE RECEIVER CANNOT STORE
+ * ---------------------------------------------------------------------------
+ * Unlike the over-long topic, an over-wide member field is a RECORD refusal:
+ * the member is the record, so there is nothing to keep it on and the whole
+ * transaction is discarded. The claim is the triple -- reported, counted, and
+ * nothing installed -- because the defect this closes is the silent one: a
+ * receiver that truncated the account would hold a name the sender never sent,
+ * and a receiver that installed the rest would hold a member the sender counts
+ * as refused, and neither would show up anywhere.
+ */
+static void case_overlong_member_account_discards(void)
+{
+    nf_node_t a;
+    nf_node_t b;
+    test_client_t alice;
+    test_client_t ann;
+    test_client_t bob;
+    const char *const just_alice[] = { "@" NICK_A };
+
+    memset(g_overlong_account, 'A', sizeof g_overlong_account - 1u);
+    g_overlong_account[sizeof g_overlong_account - 1u] = '\0';
+
+    g_peer_port = 0;
+    g_trace = 0;
+    g_is_b = 0;
+    g_stage = 0;
+    g_tiny_send = 0;
+    g_tiny_recv = 0;
+    g_raised_recv = 0;
+    g_flood_count = 0u;
+    g_open_burst = 0;
+    g_truncate = 0;
+    g_overlong = 0;
+    g_overlong_member = 1;
+    g_hostile = 0;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node A");
+    g_peer_port = a.port;
+    g_is_b = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
+                 "could not spawn node B");
+
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never applied the empty establishment transaction: %s",
+                 b.out);
+
+    /* alice owns #T on A and sets a topic, exactly as in
+     * case_over_long_topic_is_refused(): the topic is the resync gate, and the
+     * relayed STOPIC is what proves the receiver held the channel before the
+     * transaction under test arrived. */
+    register_client(&alice, a.port, NICK_A);
+    TF_CHECK_MSG(tc_send(&alice, "JOIN " CHAN_T) == 0, "alice's JOIN send failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
+                 "alice's JOIN never completed on the node that owns the channel");
+    TF_CHECK_MSG(tc_send(&alice, "TOPIC " CHAN_T " :the topic that was already here")
+                     == 0,
+                 "alice's TOPIC send failed");
+    TF_CHECK_MSG(nf_expect(&a, "chan_topic: channel=" CHAN_T " nick=" NICK_A " len=31",
+                           T_IO_MS) == 0,
+                 "node A never applied alice's topic: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "fed_topic: channel=" CHAN_T " member=" NICK_A
+                                   " len=31",
+                           T_IO_MS) == 0,
+                 "node B never applied the relayed topic: %s", b.out);
+
+    /* ann LAST: registering her is what fires the hand-built transaction. */
+    register_client(&ann, a.port, NICK_E);
+
+    /* bob observes from B: ann exists only on A, so a B-side NAMES is what says
+     * the refused member was not installed. */
+    register_client(&bob, b.port, NICK_B);
+
+    TF_CHECK_MSG(nf_expect(&a, "overlong_member_sent: ok=1 account_len=70",
+                           T_IO_MS) == 0,
+                 "node A never sent the over-long-account transaction: %s", a.out);
+
+    /* 1. THE REFUSAL IS REPORTED, naming the member record it refused. */
+    TF_CHECK_MSG(nf_expect(&b, "command=SBURSTM member=" NICK_E " member_len=3",
+                           T_IO_MS) == 0,
+                 "node B did not report the member record it could not store, so "
+                 "the loss is silent: %s",
+                 b.out);
+    /* 2. THE TRANSACTION IS DISCARDED WHOLE, for the record's reason. A member
+     * is the record -- there is no channel to keep it on -- so kept counts here
+     * would mean a partial burst, which 4.3 forbids. */
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_abandon: origin=" NAME_A
+                                   " reason=BAD_MEMBER_RECORD",
+                           T_IO_MS) == 0,
+                 "node B did not abandon the transaction carrying the over-wide "
+                 "account: %s",
+                 b.out);
+    /* 3. COUNTED ON BOTH COUNTERS, so the refusal is visible to an operator. The
+     * malformed count is TWO, not one: the member record, and then the
+     * transaction's own terminator arriving with no open transaction behind
+     * it -- the receiver discarded the shadow the terminator belongs to. */
+    TF_CHECK_MSG(nf_expect_u64(&b, "fed_malformed=", 2, 2000) == 0,
+                 "node B's malformed counter is not 2 (the refused member plus "
+                 "its orphaned terminator): %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_u64(&b, "burst_abandoned=", 1, 2000) == 0,
+                 "node B's abandoned counter is not 1: %s", b.out);
+    /* 4. NOTHING INSTALLED. B holds #T from alice's relayed SJOIN, so a NAMES
+     * there lists her -- and only her. A receiver that installed the staged
+     * nick, or the member with a truncated account, would show ann here. */
+    expect_names(&bob, "bob after the over-long-account burst", NICK_B, CHAN_T,
+                 just_alice, 1u, NICK_E);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    TF_CHECK_MSG(nf_expect_u64(&a, "burst_abandoned=", 0, 1000) == 0,
+                 "node A abandoned a transaction of its own: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_close: shadow=NONE", 1000) == 0,
+                 "node B reported an open shadow at shutdown: %s", b.out);
+
+    tc_close(&alice);
+    tc_close(&ann);
+    tc_close(&bob);
+    nf_free(&a);
+    nf_free(&b);
+    g_overlong_member = 0;
+}
+
 
 /* ---------------------------------------------------------------------------
  * #142: IDENTIFIERS ARE REFUSED, RECORDS ARE KEPT, AND THE MODES FIELD IS PROVED
@@ -2878,19 +3380,19 @@ static void case_identifiers_are_refused_and_the_record_kept(void)
  * case_channel_ceiling_refuses_what_the_budget_would_allow(), and the two are one
  * claim split so that neither can be satisfied by the other.
  *
- * HOW MANY RECORDS IT SENDS, and the arithmetic. The cheapest legal SBURSTC charges
- * IRC_MAX_TAG_OVERHEAD (179, frozen) + a one-byte origin + the seven-byte verb +
- * six one-byte parameters with their six separators + the four wire_size() adds =
- * 204. The shipped budget is IRC_BURST_MAX_BYTES = CONN_WQ_MAX/2 = 131072, so the
- * byte arithmetic stops the count at 131072/204 = 642. The case sends
- * IRC_BURST_MAX_CHANS (1024) records -- comfortably more than the budget can take,
- * and comfortably more than the ceiling -- and asserts the refusal came from the
- * budget with chans= under the ceiling.
- *
- * 1024 records is about 87 KiB on the wire against a 256 KiB link queue, so the
- * transaction fits the sender's queue as well as being over the receiver's budget:
- * a case that saturated the link instead would be refused at the queue and would
- * learn nothing about either bound.
+* HOW MANY RECORDS IT SENDS, and the arithmetic. The cheapest legal SBURSTC charges
+* IRC_MAX_TAG_OVERHEAD (179, frozen) + a one-byte origin + the seven-byte verb +
+* six one-byte parameters with their six separators + the four wire_size() adds =
+* 204. The shipped budget is IRC_BURST_MAX_BYTES = CONN_WQ_MAX*4 = 1048576, so the
+* byte arithmetic stops the count at 1048576/204 = 5140. The case sends the
+* midpoint between that and the ceiling -- (5140 + 8192) / 2 = 6666 records --
+* comfortably more than the budget can take, and comfortably under the ceiling --
+* and asserts the refusal came from the budget with chans= under the ceiling.
+*
+* 6666 records is about 580 KiB on the wire against a 256 KiB link queue, so the
+* flood goes out one tick-batch per tick rather than all at once: a case that
+* saturated the link instead would be refused at the queue and would learn
+* nothing about either bound.
  */
 static void case_channel_count_bound(void)
 {
@@ -2908,7 +3410,8 @@ static void case_channel_count_bound(void)
     g_raised_recv = 0;
     g_open_burst = 0;
     g_overlong = 0;
-    g_flood_count = IRC_BURST_MAX_CHANS;
+    g_flood_count = (IRC_BURST_MAX_BYTES / 204u + IRC_BURST_MAX_CHANS) / 2u;
+    g_flood_done = 0u;
     TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
                  "could not spawn node A");
     g_peer_port = a.port;
@@ -2919,7 +3422,7 @@ static void case_channel_count_bound(void)
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
                  "node B never applied the empty establishment transaction: %s",
                  b.out);
-    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=1024 of 1024", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=6666 of 6666", T_IO_MS) == 0,
                  "node A did not queue the whole flood, so the receiver was not given "
                  "the chance to run out of budget and the assertion below is not "
                  "about a transaction that stopped early: %s",
@@ -2930,7 +3433,7 @@ static void case_channel_count_bound(void)
      * ceiling got there first, which is the whole thing being ruled out. */
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_abandon: origin=" NAME_A
                                    " reason=TOO_LARGE",
-                           T_IO_MS) == 0,
+                           FLOOD_IO_MS) == 0,
                  "node B did not refuse the flood on its byte budget, so the bound on "
                  "the channel count is not the byte arithmetic the header claims it "
                  "is: %s",
@@ -2944,9 +3447,9 @@ static void case_channel_count_bound(void)
                  b.out);
 
     /* AND THE COUNT STOPPED SHORT OF THE CEILING, with the two figures adjacent so
-     * the relationship is legible in the log rather than computed by the reader. The
-     * budget allows 642 and the ceiling is 1024, so a count at or above the ceiling
-     * would mean the two bounds had traded places. */
+    * the relationship is legible in the log rather than computed by the reader. The
+    * budget allows 5140 and the ceiling is 8192, so a count at or above the ceiling
+    * would mean the two bounds had traded places. */
     TF_CHECK_MSG(nf_find_u64(&b, "chans=", &chans) == 0,
                  "node B never reported how many channel records it had staged, so "
                  "the count cannot be placed against the ceiling: %s",
@@ -2959,9 +3462,9 @@ static void case_channel_count_bound(void)
                  (unsigned long long)chans,
                  (unsigned long long)IRC_BURST_MAX_CHANS, b.out);
     /* AND THE BUDGET IS THE ONE THAT BOUNDED IT, restated as arithmetic so the case
-     * says what it measured rather than only that it refused: the budget is what the
-     * records were charged against, so the count cannot exceed it by more than one
-     * record's charge. 131072/204 is 642, and the margin is two whole records. */
+    * says what it measured rather than only that it refused: the budget is what the
+    * records were charged against, so the count cannot exceed it by more than one
+    * record's charge. 1048576/204 is 5140, and the margin is two whole records. */
     TF_CHECK_MSG(chans <= (uint64_t)(IRC_BURST_MAX_BYTES / 204u) + 2u,
                  "node B staged %llu channel records, which is more than the %llu the "
                  "shipped byte budget can pay for at the 204-byte minimum charge -- so "
@@ -2999,6 +3502,7 @@ static void case_channel_count_bound(void)
     nf_free(&a);
     nf_free(&b);
     g_flood_count = 0u;
+    g_flood_done = 0u;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3007,16 +3511,16 @@ static void case_channel_count_bound(void)
  * The other half of the pair, and the one with the negative in it. IRC_BURST_MAX_CHANS
  * is unreachable at the shipped budget -- case_channel_count_bound() is what proves
  * that -- and a bound nobody has ever seen refuse anything is a comment with a cost.
- * So this case removes the budget that would otherwise get there first: the
- * receiver's byte budget is raised to twice what 1024 records charge, the ceiling
- * is the only bound left, and the transaction is refused by it.
- *
- * DELETE `IRC_BURST_MAX_CHANS` FROM burst.c AND THIS CASE GOES RED: with no ceiling
- * the 1024 records all fit the raised budget, the transaction commits, and
- * `reason=TOO_MANY_CHANS` is never printed. Nothing else in the suite notices,
- * because nothing else ever sends a thousand channel records -- which is precisely
- * the class of defect that survives to a release, and why this case exists as a
- * separate one rather than as an assertion inside the previous case.
+* So this case removes the budget that would otherwise get there first: the
+* receiver's byte budget is raised to twice what 8192 records charge, the ceiling
+* is the only bound left, and the transaction is refused by it.
+*
+* DELETE `IRC_BURST_MAX_CHANS` FROM burst.c AND THIS CASE GOES RED: with no ceiling
+* the 8192 records all fit the raised budget, the transaction commits, and
+* `reason=TOO_MANY_CHANS` is never printed. Nothing else in the suite notices,
+* because nothing else ever sends eight thousand channel records -- which is precisely
+* the class of defect that survives to a release, and why this case exists as a
+* separate one rather than as an assertion inside the previous case.
  */
 static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
 {
@@ -3033,6 +3537,7 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     g_open_burst = 0;
     g_overlong = 0;
     g_flood_count = IRC_BURST_MAX_CHANS + 1u;
+    g_flood_done = 0u;
     TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
                  "could not spawn node A");
     g_peer_port = a.port;
@@ -3043,17 +3548,17 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
                  "node B never applied the empty establishment transaction: %s",
                  b.out);
-    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=1025 of 1025", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&a, "flood_sent: sent=8193 of 8193", T_IO_MS) == 0,
                  "node A did not queue one record more than the ceiling allows, so "
                  "the ceiling was never approached: %s",
                  a.out);
 
-    /* THE CEILING REFUSED IT. The budget could not have: 1025 records at the
-     * 204-byte minimum charge is 209100 bytes, and BURST_TEST_CEIL_BUDGET is
-     * IRC_BURST_MAX_CHANS * 512 = 524288 -- a factor of 2.5 of headroom, so this
-     * case cannot sit on the boundary between the two bounds. */
-    TF_CHECK_MSG(nf_expect(&b, "reason=TOO_MANY_CHANS", T_IO_MS) == 0,
-                 "node B did not refuse a thousand and twenty-five channel records on "
+    /* THE CEILING REFUSED IT. The budget could not have: 8193 records at the
+    * 204-byte minimum charge is 1671372 bytes, and BURST_TEST_CEIL_BUDGET is
+    * IRC_BURST_MAX_CHANS * 512 = 4194304 -- a factor of 2.5 of headroom, so this
+    * case cannot sit on the boundary between the two bounds. */
+    TF_CHECK_MSG(nf_expect(&b, "reason=TOO_MANY_CHANS", FLOOD_IO_MS) == 0,
+                 "node B did not refuse eight thousand one hundred ninety-three channel records on "
                  "IRC_BURST_MAX_CHANS with its byte budget raised out of the way, so "
                  "the ceiling is a comment rather than a bound: %s",
                  b.out);
@@ -3067,7 +3572,7 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     /* AND IT STOPPED AT THE CEILING, not before it. A ceiling that fired early
      * would pass every assertion above and still be wrong, because its job is to be
      * the LAST line rather than the only one. */
-    TF_CHECK_MSG(nf_expect(&b, "chans=1024", T_IO_MS) == 0,
+    TF_CHECK_MSG(nf_expect(&b, "chans=8192", T_IO_MS) == 0,
                  "node B did not stage exactly IRC_BURST_MAX_CHANS channel records "
                  "before refusing, so it stopped for some other reason than the "
                  "ceiling's count: %s",
@@ -3093,7 +3598,146 @@ static void case_channel_ceiling_refuses_what_the_budget_would_allow(void)
     nf_free(&a);
     nf_free(&b);
     g_flood_count = 0u;
+    g_flood_done = 0u;
     g_raised_recv = 0;
+}
+/* ---------------------------------------------------------------------------
+ * #330: A BURST PAST ONE FLUSH STILL RESYNCS
+ * ---------------------------------------------------------------------------
+ * The resync budget used to cap the whole burst below half a peer queue
+ * (128 KiB): every federation_resync() past ~280 nicks was refused TOO_LARGE,
+ * nothing queued, and the mesh never converged after a flap. The budget is now
+ * four queues, and the sender flushes in quarter-queue chunks with a pump
+ * between them -- so this case builds a burst that does not fit one flush and
+ * asserts the far side applies it whole.
+ *
+ * 512 channels from four clients at CONN_MAX_CHANNELS (128) each: no client can
+ * hold more, and one client's 128 would sit under the chunk. The burst carries
+ * 4 nicks, 512 channels and 512 members -- about 110 KiB on the wire -- past
+ * the 64 KiB chunk and under the 256 KiB queue, so the old code refused it at
+ * staging (TOO_LARGE) and a chunking bug shows up as a saturation (the link
+ * drops) or a partial transaction (the receiver abandons it).
+ *
+ * THE BYTES NEEDLE is what says the burst went out in pieces rather than all
+ * at once: nothing this size fits a single 64 KiB flush, so a fed_burst_sent
+ * over 65536 bytes is a burst the chunk path carried. The counts needle says
+ * it arrived whole: one transaction, nicks=4 chans=512 members=512, applied
+ * once -- a second transaction would be a second fed_burst_applied, and a
+ * partial one would be a fed_burst_abandon instead.
+ */
+static void case_big_burst_resyncs_in_chunks(void)
+{
+    nf_node_t a;
+    nf_node_t b;
+    test_client_t c0;
+    test_client_t c1;
+    test_client_t c2;
+    test_client_t c3;
+    test_client_t *members[4] = { &c0, &c1, &c2, &c3 };
+    /* Four DISTINCT nicknames on A; the channels are split across them at 128
+     * each so no client trips CONN_MAX_CHANNELS. */
+    static const char *const nicks[4] = { "biga", "bigb", "bigc", "bigd" };
+    char cmd[64];
+
+    g_peer_port = 0;
+    g_trace = 0;
+    g_is_b = 0;
+    g_stage = 0;
+    g_tiny_send = 0;
+    g_tiny_recv = 0;
+    g_raised_recv = 0;
+    g_open_burst = 0;
+    g_overlong = 0;
+    g_truncate = 0;
+    g_hostile = 0;
+    g_flood_count = 0u;
+    g_flood_done = 0u;
+    g_big_resync = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
+                 "could not spawn node A");
+    TF_CHECK_MSG(a.port > 0, "node A reported no port");
+    g_peer_port = a.port;
+    g_is_b = 1;
+    TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
+                 "could not spawn node B");
+
+    TF_CHECK_MSG(nf_expect(&b, "link_dial: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never dialled its configured peer");
+    TF_CHECK_MSG(nf_expect(&a, "link_established: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never established its link to node B");
+    TF_CHECK_MSG(nf_expect(&b, "link_established: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never established its link to node A");
+
+    /* THE CONTROL: the empty establishment bursts go out and are applied, so a
+     * missing resync below is about its size and not about a peer path that
+     * never worked. */
+    TF_CHECK_MSG(nf_expect(&a, "fed_burst_sent: peer=" NAME_B, T_IO_MS) == 0,
+                 "node A never burst on establishment: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_applied: peer=" NAME_A, T_IO_MS) == 0,
+                 "node B never applied the establishment burst: %s", b.out);
+
+    /* Four clients, 128 channels each, each client creating its own: the first
+     * JOIN creates and the creator is its operator, so every channel has
+     * exactly one member and the burst carries 512 of each record. No per-JOIN
+     * wait -- the PING afterwards is ordered behind all of them, so its PONG
+     * proves every JOIN was processed. */
+    for (size_t c = 0; c < 4u; c++) {
+        register_client(members[c], a.port, nicks[c]);
+    }
+    for (size_t i = 0; i < (size_t)BIG_RESYNC_CHANS; i++) {
+        (void)snprintf(cmd, sizeof cmd, "JOIN #b%04zu", i);
+        TF_CHECK_MSG(tc_send(members[i / 128u], cmd) == 0,
+                     "JOIN %s send failed", cmd);
+    }
+    TF_CHECK_MSG(tc_send(&c0, "PING :joined") == 0, "drain PING send failed");
+    TF_CHECK_MSG(tc_expect(&c0, "PONG", T_IO_MS) == 0,
+                 "no PONG after 512 JOINs, so the resync below may not see all "
+                 "512 channels: %s",
+                 a.out);
+
+    /* THE RESYNC: the tick hook fires it once A holds all 512 channels, and it
+     * is one transaction of 4 nicks, 512 channels and 512 members. */
+    TF_CHECK_MSG(nf_expect(&a, "big_resync_sent: chans=512", T_IO_MS) == 0,
+                 "node A never drove the post-JOIN resync: %s", a.out);
+    TF_CHECK_MSG(nf_expect(&a, "nicks=4 chans=512 members=512", T_IO_MS) == 0,
+                 "node A never sent the whole 512-channel transaction: %s",
+                 a.out);
+    /* AND IT WENT OUT IN PIECES: 65536 is the chunk, so a transaction this
+    * size fits no single flush -- the old code refused it at staging, and a
+    * chunking that queued it all at once would have saturated the link. The
+    * leading space keeps "bytes=" from matching the "bad_bytes=" tail of
+    * unrelated observables, whose trailing zero would otherwise be read as
+    * the latest value. */
+    TF_CHECK_MSG(nf_expect_u64_ge(&a, " bytes=", (uint64_t)65536u, T_IO_MS) == 0,
+                 "node A's resync was not bigger than one flush, so the case "
+                 "did not exercise the chunk path: %s",
+                 a.out);
+    /* AND IT ARRIVED WHOLE: one more fed_burst_applied on B than the
+     * establishment one, carrying every nick, channel and member. */
+    TF_CHECK_MSG(nf_expect(&b, "nicks=4 chans=512 members=512", T_IO_MS) == 0,
+                 "node B never applied the whole 512-channel transaction: %s",
+                 b.out);
+    TF_CHECK_MSG(nf_expect_nth(&b, "fed_burst_applied:", 2u, T_IO_MS) == 0,
+                 "node B did not apply exactly the establishment burst plus the "
+                 "resync: %s",
+                 b.out);
+    TF_CHECK_MSG(strstr(b.out, "fed_burst_abandon") == NULL,
+                 "node B abandoned a transaction, so the resync arrived partial "
+                 "and the receiver threw it away: %s",
+                 b.out);
+
+    TF_CHECK_MSG(nf_stop(&a) == 0, "node A did not exit cleanly");
+    TF_CHECK_MSG(nf_stop(&b) == 0, "node B did not exit cleanly");
+    TF_CHECK_MSG(nf_expect(&b, "fed_burst_close: shadow=NONE", 1000) == 0,
+                 "node B reported an open shadow at shutdown: %s", b.out);
+
+    tc_close(&c0);
+    tc_close(&c1);
+    tc_close(&c2);
+    tc_close(&c3);
+    nf_free(&a);
+    nf_free(&b);
+    g_big_resync = 0;
 }
 
 int main(void)
@@ -3103,10 +3747,13 @@ int main(void)
     case_over_budget_changes_nothing();
     case_truncated_burst_changes_nothing();
     case_open_transaction_released_at_shutdown();
+    case_foreign_records_refused();
     case_over_long_topic_is_refused();
+    case_overlong_member_account_discards();
     case_identifiers_are_refused_and_the_record_kept();
     case_channel_count_bound();
     case_channel_ceiling_refuses_what_the_budget_would_allow();
+    case_big_burst_resyncs_in_chunks();
     tf_done("fed_burst");
     return 0;
 }

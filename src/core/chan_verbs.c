@@ -393,7 +393,7 @@ static const char *names_entry(const conn_t *dst, const char *nick,
                                const char *ident, const char *host, char *out,
                                size_t cap)
 {
-    const int long_form = cap_userhost_in_names_enabled(dst);
+    const int long_form = cap_enabled(dst, CAP_USERHOST_IN_NAMES);
 
     if (out == NULL || cap == 0u || nick == NULL) {
         return "";
@@ -527,7 +527,7 @@ static void send_names_list(server_t *s, conn_t *dst, const chan_t *ch)
      * `PREFIX=(ov)@+` is what says which sigils exist and what they mean, and it
      * is true either way -- multi-prefix changes how MANY are drawn, not which
      * sigils exist. See cap.h. */
-    const int multiprefix = cap_multiprefix_enabled(dst);
+    const int multiprefix = cap_enabled(dst, CAP_MULTIPREFIX);
     int produced = 0;
 
     for (int group = 0; group < 3; group++) {
@@ -1262,7 +1262,7 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
                    c->nick, raw_reason_len, CHAN_MAX_PART_REASON);
             return;
         }
-        kept_reason = conn_text_strip(clean, sizeof clean, reason);
+        kept_reason = conn_text_strip(clean, sizeof clean, reason, STRIP_STORED);
         reason = clean;
     }
     n = chan_split_list(store, sizeof store, m->params[0], names,
@@ -1431,7 +1431,7 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
                    "kept_len=0 forwarded=0 reason=TOO_LONG\n",
                    ch->name, c->nick, in_len);
         } else {
-            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1]);
+            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1], STRIP_STORED);
 
             params[0] = clean;
             deliver_state_change(s, c, ch, "TOPIC", prefix, params, 1);
@@ -1551,17 +1551,31 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
         send_end_of_names(s, c, NAMES_NO_CHANNEL);
         return;
     }
-    for (size_t i = 0; i < server_chan_count(s); i++) {
-        chan_t *ch = server_chan_at(s, i);
+    {
+        size_t sent = 0u;
+        size_t truncated = 0u;
 
-        if (ch == NULL) {
-            continue;
+        for (size_t i = 0; i < server_chan_count(s); i++) {
+            chan_t *ch = server_chan_at(s, i);
+
+            if (ch == NULL) {
+                continue;
+            }
+            if (sent >= (size_t)CHAN_ENUM_MAX) {
+                truncated++;
+                continue;
+            }
+            (void)authority_ok(s, c, ch, "NAMES", 0);
+            printf("[observable] chan_names: channel=%s local=%zu servers=%zu\n",
+                   ch->name, ch->nmembers, ch->nservers);
+            send_names_list(s, c, ch);
+            send_end_of_names(s, c, ch->name);
+            sent++;
         }
-        (void)authority_ok(s, c, ch, "NAMES", 0);
-        printf("[observable] chan_names: channel=%s local=%zu servers=%zu\n",
-               ch->name, ch->nmembers, ch->nservers);
-        send_names_list(s, c, ch);
-        send_end_of_names(s, c, ch->name);
+        if (truncated != 0u) {
+            printf("[observable] names_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
+                   c->nick, sent, truncated, CHAN_ENUM_MAX);
+        }
     }
 }
 
@@ -1612,17 +1626,31 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
     }
 
     (void)reply(s, c, "321", (const char *const[]){ "Channel" }, 1, "Users  Name");
-    for (size_t i = 0; i < server_chan_count(s); i++) {
-        chan_t *ch = server_chan_at(s, i);
+    {
+        size_t sent = 0u;
+        size_t truncated = 0u;
 
-        if (ch == NULL) {
-            continue;
+        for (size_t i = 0; i < server_chan_count(s); i++) {
+            chan_t *ch = server_chan_at(s, i);
+
+            if (ch == NULL) {
+                continue;
+            }
+            if (sent >= (size_t)CHAN_ENUM_MAX) {
+                truncated++;
+                continue;
+            }
+            (void)snprintf(count, sizeof count, "%zu", ch->nmembers);
+            (void)reply(s, c, "322", (const char *const[]){ ch->name, count }, 2, "%s",
+                        ch->topic);
+            printf("[observable] chan_list: channel=%s local=%zu servers=%zu\n",
+                   ch->name, ch->nmembers, ch->nservers);
+            sent++;
         }
-        (void)snprintf(count, sizeof count, "%zu", ch->nmembers);
-        (void)reply(s, c, "322", (const char *const[]){ ch->name, count }, 2, "%s",
-                    ch->topic);
-        printf("[observable] chan_list: channel=%s local=%zu servers=%zu\n",
-               ch->name, ch->nmembers, ch->nservers);
+        if (truncated != 0u) {
+            printf("[observable] list_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
+                   c->nick, sent, truncated, CHAN_ENUM_MAX);
+        }
     }
     (void)reply(s, c, "323", NULL, 0, "End of LIST");
 }
@@ -1769,7 +1797,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * IT COSTS, and the cost is the same one the away message and the topic
      * accepted: the members see a shorter sentence than the kicker wrote, and the
      * log line below is the only record of the difference. */
-    kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason);
+    kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason, STRIP_STORED);
     reason = clean_reason;
 
     ch = resolve_joined(s, c, m->params[0]);
@@ -2284,6 +2312,20 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     if (verdict == CHAN_VERDICT_REFUSED) {
         return; /* 437 already sent */
     }
+    if (m->params[1][0] == '\0' ||
+        ((m->params[1][0] == '+' || m->params[1][0] == '-') &&
+         m->params[1][1] == '\0')) {
+        /* A MODE STRING WITH NO LETTERS -- "" or a lone "+" or "-": the client
+         * sent the mode argument and none of the argument that goes with it, so
+         * this is a too-FEW case rather than a malformed one, and NEED_MORE_PARAMS
+         * says exactly that. The empty string is checked FIRST, because an empty
+         * first byte is not '+' or '-' and the sign test below would otherwise
+         * answer 472 for a missing argument. A bare letter with no sign (`k`)
+         * still falls through to 472: it names a character, just not a signed one. */
+        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
     if (m->params[1][0] != '+' && m->params[1][0] != '-') {
         /* 472 ERR_UNKNOWNMODE, and RFC 2812 5.2's field list for it is
          *
@@ -2323,14 +2365,6 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=%s "
                "reason_len=%zu reason_byte=0x%02x reason_bad_bytes=%zu\n",
                ch->name, c->nick, shown, len, (unsigned char)m->params[1][0], bad);
-        return;
-    }
-    if (m->params[1][1] == '\0') {
-        /* A MODE STRING WITH NO LETTERS: the client sent the mode argument and
-         * none of the argument that goes with it, so this is a too-FEW case rather
-         * than a malformed one, and NEED_MORE_PARAMS says exactly that. */
-        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
-                            "Not enough parameters");
         return;
     }
     if (!chan_has_flag(ch, c, CHAN_MEMBER_OP)) {
@@ -2429,7 +2463,7 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                        ch->name, c->nick, m->params[1], strlen(arg));
                 return;
             }
-            kept += conn_text_strip(clean[idx], sizeof clean[idx], arg);
+            kept += conn_text_strip(clean[idx], sizeof clean[idx], arg, STRIP_STORED);
             in_len += strlen(arg);
             fwd[nfwd] = clean[idx];
             nfwd++;
@@ -2633,7 +2667,7 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                 effective = mask;
                 kept_mask = strlen(mask);
             } else {
-                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask, mask);
+                kept_mask = conn_text_strip(clean_mask, sizeof clean_mask, mask, STRIP_STORED);
                 effective = clean_mask;
             }
             if (plus) {

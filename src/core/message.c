@@ -39,14 +39,6 @@ static char up(char c)
     return c;
 }
 
-static int digit_value(char c)
-{
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    return -1;
-}
-
 /* --------------------------------------------------------------------------
  * Tag block grammar and escaping: owned by ircv3_tags.c, called through here
  * ------------------------------------------------------------------------ */
@@ -55,7 +47,7 @@ static int digit_value(char c)
  * (Closes #183). The block is already split at the first SP/HTAB by the
  * caller, so what arrives here is exactly what ircv3_tags_parse() accepts
  * without a marker. A raw ';' always separates pairs -- even one written
- * `\;`, which is an invalid escape whose backslash is dropped on decode, not
+ * `\;`, which leaves a dangling backslash that refuses on decode (#278), not
  * a way to smuggle a separator inside a value (that spelling is `\:`).
  * Duplicates keep the first occurrence, so a block can never rewrite a tag
  * another node set. */
@@ -90,7 +82,7 @@ size_t message_tag_escape(const char *value, char *out, size_t cap)
 
 /* Thin wrapper over the single unescape in ircv3_tags.c (Closes #183):
  * a '\' before a character outside the escape set has its BACKSLASH DROPPED,
- * and a lone trailing '\' produces nothing. */
+ * and a lone trailing '\' refuses with -1 (#278). */
 int message_tag_unescape(const char *value, char *out, size_t cap)
 {
     if (value == NULL || out == NULL || cap == 0) {
@@ -351,7 +343,11 @@ int message_parse_n(const char *line, size_t len, message_t *out)
         }
         tags = field_put(&f, block, blocklen);
         if (p < end) {
-            p++;
+            /* Tags end at a separator; skip all of them so extra SP/HTAB
+             * before a ':' prefix doesn't drop the origin. */
+            do {
+                p++;
+            } while (p < end && is_sep(*p));
         }
     }
 
@@ -499,7 +495,10 @@ int message_build(message_t *out,
      * renderer would refuse. *out stays zeroed on every refusal above and
      * below. Empty tags/prefix mean "absent", as in the copy below. */
     if (tags != NULL && tags[0] != '\0') {
-        if (tags[0] == '@' || strpbrk(tags, " \t\r\n") != NULL) {
+        /* A block the parser rejects (trailing ';', empty pair, ...) must
+         * never be held, let alone emitted (#276). */
+        if (tags[0] == '@' || strpbrk(tags, " \t\r\n") != NULL ||
+            tag_block_valid(tags) == 0) {
             return -1;
         }
     }
@@ -656,8 +655,11 @@ size_t message_format_ex(const message_t *m, char *out, size_t cap,
 
     /* Validate before emitting anything, so a failure never leaves a partial
      * line in `out`. */
-    if (m->tags != NULL) {
-        if (m->tags[0] == '@' || strpbrk(m->tags, " \t\r\n") != NULL) {
+    if (m->tags != NULL && m->tags[0] != '\0') {
+        /* Refuse what the parser rejects so format never emits a line the
+         * receiver drops, poisoning a whole burst for one bad field (#276). */
+        if (m->tags[0] == '@' || strpbrk(m->tags, " \t\r\n") != NULL ||
+            tag_block_valid(m->tags) == 0) {
             return 0;
         }
     }
@@ -773,7 +775,7 @@ int parse_decimal(const char *s, size_t len, uint64_t limit,
     const uint64_t r = limit % 10u;
     uint64_t v = 0;
     for (size_t i = 0; i < len; i++) {
-        const int d = digit_value(s[i]);
+        const int d = (s[i] >= '0' && s[i] <= '9') ? s[i] - '0' : -1;
         if (d < 0) {
             return -1;
         }

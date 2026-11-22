@@ -723,6 +723,8 @@ int server_init(server_t *s, const char *name)
      * once the count is set (node_main / tests call the seam before serving). */
     s->writer_threads = 0;
     s->writers = NULL;
+    s->slots = NULL;
+    s->writer_bytes = NULL;
     s->wq_stop = 0;
     s->writers_started = 0;
     /* MT 2.2: reg_mu guards the registry against writer scans. Initialized
@@ -747,94 +749,267 @@ void server_set_writer_threads(server_t *s, int n)
     }
     s->writer_threads = (n < 0) ? 0 : n;
 }
-/* MT 2.2 (#241): the writer pool. One place, next to the seam: spawn, stop,
- * and the worker live here so server.c owns the whole lifecycle.
- *
- * Each writer loops: wait for work, then scan the active list for a live conn
- * with want_write set, and drain one bounded slice of it under that conn's
- * wq_lock (#369: CONN_WQ_SLICE bytes via conn_pump_slice_locked(), then on
- * to the next owned conn -- round-robin, not priority, so a fat conn with an
- * unbounded backlog cannot hold a writer past one slice while a thin conn's
- * reply waits). The loop thread never pumps when N > 0 (see poll_loop.c),
- * so every send on a conn happens under exactly one holder of wq_lock at a
- * time -- and the slice pump takes that lock, so two writers can never drain
- * the same FIFO concurrently. Order follows: bytes leave in queue order per
- * conn.
- *
- * Counters: writers bump n_write_error / n_partial_writes with fetch_add;
- * everyone else reads them with atomic loads. */
+/* MT #366: sticky scheduling + demand steal. Pass `wid`'s slice is the conns
+ * with fd % N == wid, so each queue stays hot on one core. A pass that
+ * drained nothing (idle) checks the other owners' aggregate unsent bytes and,
+ * when the fattest sits above WRITER_STEAL_BYTES, drains that owner's conns
+ * for this pass only. Each pump takes that conn's wq_lock and drains one
+ * bounded slice (#369), so a conn is still drained by exactly one writer at
+ * a time and FIFO holds through the move. Ownership stays a pure function
+ * of (fd, N): no migration state, no reg_mu -> wq_lock order change. */
+static size_t writer_drain_slot(server_t *s, int wid);
+
 static void *writer_main(void *arg);
 
-static void writer_drain_one(server_t *s)
+/* Drain one bounded slice of a conn's queued FIFO (#369: CONN_WQ_SLICE bytes
+ * via conn_pump_slice_locked(), so a fat conn cannot hold a writer past one
+ * slice while a thin conn's reply waits). The caller already holds the
+ * conn's wq_lock (taken as a trylock under reg_mu, see writer_drain_owner),
+ * so FIFO + single-drainer hold across steal moves. The pending reads use
+ * the plain accessor: wq_lock is already held, and the _locked form takes
+ * the lock itself (self-deadlock inside a pump critical section, by its own
+ * contract). Adds the bytes drained to `*drained`. */
+static void writer_pump_conn(server_t *s, conn_t *c, size_t *drained)
+{
+    size_t before;
+    size_t left;
+    int rc;
+
+    before = conn_write_pending(c);
+    rc = conn_pump_slice_locked(c);
+    if (rc < 0) {
+        atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
+        printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
+        conn_mark_closing(c);
+        return;
+    }
+    left = conn_write_pending(c);
+    if (left < before) {
+        *drained += before - left;
+    }
+    if (before > 0 && left > 0) {
+        atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
+    }
+}
+
+/* True when the conn has anything to drain: CLOSING conns with queued bytes
+ * included (the 417-flush path leaves them for us). Only the reaper closes. */
+static int writer_conn_live(conn_t *c)
+{
+    if (c == NULL) {
+        return 0;
+    }
+    if (atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING &&
+        !atomic_load_explicit(&c->want_write, memory_order_acquire)) {
+        return 0;
+    }
+    return 1;
+}
+
+static int writer_owner(int fd, int n)
+{
+    return ((fd % n) + n) % n;
+}
+
+static conn_t *writer_resolve(server_t *s, int fd)
+{
+    if (s->by_fd == NULL || fd < 0 || fd >= SERVER_FD_TABLE) {
+        return NULL;
+    }
+    return s->by_fd[fd];
+}
+
+/* Aggregate unsent bytes over one owner's live conns. The scan holds reg_mu
+ * (active_fds/by_fd stability); each pending read stays wq_lock-guarded
+ * (#445) but takes the lock as a trylock, so the scan never blocks under
+ * reg_mu (#279). A conn whose lock is held is being pumped -- or read by the
+ * reaper -- and contributes nothing this pass; the next pass picks up what
+ * is left. Lock order reg_mu -> wq_lock holds: nothing takes them in
+ * reverse. */
+static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
 {
     size_t i;
+    unsigned long long total = 0ull;
 
-    /* MT 2.2: the whole scan holds reg_mu, so the loop's add/detach cannot
-     * move active_fds/by_fd under us (TSan) and a resolved conn cannot be
-     * detached/freed mid-pump. Lock order reg_mu -> wq_lock is fixed: the
-     * pump takes wq_lock inside, never the reverse. The loop never blocks on
-     * reg_mu while holding wq_lock (fill/queue take wq_lock alone). */
-    if (s->reg_started) {
-        pthread_mutex_lock(&s->reg_mu);
-    }
     for (i = 0; i < s->nactive; i++) {
         int fd;
         conn_t *c;
-        size_t before;
-        int rc;
 
         if (i >= s->nactive) {
             break;
         }
         fd = s->active_fds[i];
-        c = (s->by_fd != NULL && fd >= 0 && fd < SERVER_FD_TABLE) ? s->by_fd[fd] : NULL;
+        if (writer_owner(fd, n) != owner) {
+            continue;
+        }
+        c = writer_resolve(s, fd);
+        if (!writer_conn_live(c)) {
+            continue;
+        }
+        if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+            continue;
+        }
+        total += (unsigned long long)conn_write_pending(c);
+        pthread_mutex_unlock(&c->wq_lock);
+    }
+    return total;
+}
+
+/* True when `owner`'s slice holds a CLOSING conn with queued bytes (the
+ * 417-flush shape): the reply sits behind that backlog, so an idle pass
+ * steals it now instead of waiting for the stickiness floor. Same reg_mu +
+ * trylock discipline as writer_owner_backlog: a locked CLOSING conn is being
+ * drained already, so it does not trip the steal. */
+static int writer_owner_closing(server_t *s, int owner, int n)
+{
+    size_t i;
+
+    for (i = 0; i < s->nactive; i++) {
+        int fd;
+        conn_t *c;
+        int has_bytes;
+
+        if (i >= s->nactive) {
+            break;
+        }
+        fd = s->active_fds[i];
+        if (writer_owner(fd, n) != owner) {
+            continue;
+        }
+        c = writer_resolve(s, fd);
+        if (c != NULL &&
+            atomic_load_explicit(&c->state, memory_order_acquire) ==
+                CONN_CLOSING) {
+            if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+                continue;
+            }
+            has_bytes = (conn_write_pending(c) > 0u);
+            pthread_mutex_unlock(&c->wq_lock);
+            if (has_bytes) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Drain one bounded slice of every live conn owned by `owner`. The caller
+ * holds reg_mu; each conn's wq_lock is taken as a trylock while still
+ * holding reg_mu (order reg_mu -> wq_lock, never the reverse, never
+ * blocking), then reg_mu is released across the pump and retaken after.
+ * Holding reg_mu over every conn_pump_slice_locked serialized all writers
+ * on one mutex (N=4 ~= N=1) and stalled the loop's add/detach behind write
+ * syscalls (#279). The held wq_lock is what keeps the reaper from
+ * detaching/freeing mid-pump -- its trylock fails and it defers the close
+ * (#242) -- so resolve-to-pump has no gap. A detach between pumps only
+ * moves active_fds, which is re-read every iteration, so a conn is at worst
+ * visited twice or next pass. */
+static void writer_drain_owner(server_t *s, int owner, int n, size_t *drained)
+{
+    size_t i;
+
+    for (i = 0; i < s->nactive; i++) {
+        int fd;
+        conn_t *c;
+
+        if (i >= s->nactive) {
+            break;
+        }
+        fd = s->active_fds[i];
+        if (writer_owner(fd, n) != owner) {
+            continue;
+        }
+        c = writer_resolve(s, fd);
         /* No CLOSING skip: writers drain CLOSING conns with queued bytes too
          * (the 417-flush path leaves them for us). Only the reaper closes; a
          * failed pump still only marks. */
-        if (c == NULL) {
+        if (!writer_conn_live(c)) {
             continue;
         }
-        if (atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING &&
-            !atomic_load_explicit(&c->want_write, memory_order_acquire)) {
+        if (pthread_mutex_trylock(&c->wq_lock) != 0) {
+            /* Another writer is pumping this conn, or the reaper is reading
+             * its pending: either way it is being handled, and the next pass
+             * picks up what is left. */
             continue;
         }
-        /* wlen/woff are wq_lock-guarded (loop's conn_queue vs our pump);
-         * reg_mu covers structure only, so these stay locked reads. Order
-         * reg_mu -> wq_lock holds: nothing takes them in reverse.
-         * #369: one bounded slice per conn per visit, not the whole
-         * backlog -- the scan is round-robin, so a thin conn queued behind
-         * a fat one drains within one slice of being queued. */
-        before = conn_write_pending_locked(c);
-        pthread_mutex_lock(&c->wq_lock);
-        rc = conn_pump_slice_locked(c);
+        if (s->reg_started) {
+            pthread_mutex_unlock(&s->reg_mu);
+        }
+        writer_pump_conn(s, c, drained);
         pthread_mutex_unlock(&c->wq_lock);
-        if (rc < 0) {
-            atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
-            printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
-            conn_mark_closing(c);
-            continue;
+        if (s->reg_started) {
+            pthread_mutex_lock(&s->reg_mu);
         }
-        if (before > 0 && conn_write_pending_locked(c) > 0) {
-            atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
+    }
+}
+
+static size_t writer_drain_slot(server_t *s, int wid)
+{
+    int n;
+    size_t drained = 0u;
+
+    /* The pass holds reg_mu across the registry scans but never across a
+     * pump: each pump drops it per-conn (see writer_drain_owner), so writers
+     * never serialize on one mutex and the loop's add/detach never waits on
+     * a write syscall. Lock order reg_mu -> wq_lock is fixed throughout:
+     * wq_lock is only ever taken (as a trylock) while reg_mu is held, and
+     * reg_mu is retaken only after wq_lock is released. */
+    if (s->reg_started) {
+        pthread_mutex_lock(&s->reg_mu);
+    }
+    n = s->writer_threads;
+    if (n > 0 && wid >= 0 && wid < n) {
+        /* Owned slice first: one bounded slice per owned conn (#369), so a
+         * fat conn cannot hold this writer past one slice while a thin
+         * conn's reply waits. */
+        writer_drain_owner(s, wid, n, &drained);
+        if (drained == 0u && n > 1) {
+            int w;
+            int fat = -1;
+            unsigned long long best = 0ull;
+
+            /* Idle this pass: steal by demand against live backlog, not the
+             * last-pass accounting (stale the moment bytes drain). The
+             * fattest other owner's aggregate backlog above
+             * WRITER_STEAL_BYTES gets drained below; a single full
+             * conn can never trip it (bound is 2x the per-conn cap), so
+             * owned queues stay sticky until imbalance. */
+            for (w = 0; w < n; w++) {
+                unsigned long long b;
+
+                if (w == wid) {
+                    continue;
+                }
+                b = writer_owner_backlog(s, w, n);
+                if (b > best) {
+                    best = b;
+                    fat = w;
+                }
+            }
+            if (fat >= 0 && (best >= (unsigned long long)WRITER_STEAL_BYTES ||
+                               writer_owner_closing(s, fat, n))) {
+                writer_drain_owner(s, fat, n, &drained);
+            }
+        }
+        if (s->writer_bytes != NULL && drained > 0u) {
+            atomic_fetch_add_explicit(&s->writer_bytes[(size_t)wid],
+                                      (unsigned long long)drained,
+                                      memory_order_relaxed);
         }
     }
     if (s->reg_started) {
         pthread_mutex_unlock(&s->reg_mu);
     }
+    return drained;
 }
 
-/* Issue #367: per-writer thread argument. Carries both ends the thread
- * needs; the thread frees it on entry, so stop has nothing to release. */
-struct writer_arg {
-    server_t *s;
-    int idx;
-};
-
+/* MT #366: per-writer thread argument. Carries both ends the thread
+ * needs; owned by the pool (slots[]), so stop has nothing to release. */
 static void *writer_main(void *arg)
 {
-    struct writer_arg *wa = (struct writer_arg *)arg;
-    server_t *s = wa->s;
-    int idx = wa->idx;
+    writer_slot_t *slot = (writer_slot_t *)arg;
+    server_t *s = slot->s;
+    int wid = slot->wid;
     /* MT 2.4 (#243): wakeup-generation predicate. Each writer remembers the
      * last generation it consumed on its OWN slot; a targeted kick between
      * drain-finish and the lock bumps that slot's gen, so the waiter below
@@ -845,35 +1020,40 @@ static void *writer_main(void *arg)
      * kick per queued conn shows up as exactly one wake on its owner. */
     unsigned long seen = 0ul;
 
-    free(wa);
     for (;;) {
-        /* Drain first: queued work is handled without waiting for a wakeup. */
-        writer_drain_one(s);
+        /* Drain first: queued work is handled without waiting for a wakeup.
+         * One bounded slice per conn per pass (#369); a kick that landed
+         * mid-drain is consumed by the next pass's generation check. */
+        (void)writer_drain_slot(s, wid);
         pthread_mutex_lock(&s->wq_mu);
         for (;;) {
             if (s->wq_stop) {
                 pthread_mutex_unlock(&s->wq_mu);
                 return NULL;
             }
-            if (s->wq_slot_gen[idx] != seen) {
-                seen = s->wq_slot_gen[idx];
-                (void)atomic_fetch_add_explicit(&s->wq_wakes[idx], 1u,
+            if (s->wq_slot_gen[wid] != seen) {
+                seen = s->wq_slot_gen[wid];
+                (void)atomic_fetch_add_explicit(&s->wq_wakes[wid], 1u,
                                                   memory_order_relaxed);
                 break;
             }
-            pthread_cond_wait(&s->wq_slot_avail[idx], &s->wq_mu);
+            pthread_cond_wait(&s->wq_slot_avail[wid], &s->wq_mu);
         }
         pthread_mutex_unlock(&s->wq_mu);
     }
 }
 
-int server_writers_start(server_t *s)
+
+/* Pool allocation without threads: handles, slot condvars/gens, wake
+ * counters, sticky slots + drained-byte totals, wq_mu + per-slot condvars --
+ * but no spawn and no started flag. server_writers_start() calls this then
+ * spawns; the #366 seam test calls server_writers_start_pool() and drives
+ * passes itself, so no worker thread can drain the backlog before the
+ * asserted pass runs. */
+static int server_writers_init_pool(server_t *s)
 {
     int i;
 
-    if (s == NULL || s->writer_threads <= 0 || s->writers_started) {
-        return 0;
-    }
     s->writers = (pthread_t *)calloc((size_t)s->writer_threads, sizeof *s->writers);
     s->wq_slot_avail =
         (pthread_cond_t *)calloc((size_t)s->writer_threads, sizeof *s->wq_slot_avail);
@@ -893,7 +1073,29 @@ int server_writers_start(server_t *s)
         s->wq_wakes = NULL;
         return -1;
     }
+    /* MT #366: sticky slots + per-writer drained-byte totals. Zeroed, so the
+     * first demand check sees an idle pool and owns its slice. */
+    s->slots = (writer_slot_t *)calloc((size_t)s->writer_threads, sizeof *s->slots);
+    s->writer_bytes = (atomic_ullong *)calloc(
+        (size_t)s->writer_threads, sizeof *s->writer_bytes);
+    if (s->slots == NULL || s->writer_bytes == NULL) {
+        free(s->writer_bytes);
+        s->writer_bytes = NULL;
+        free(s->slots);
+        s->slots = NULL;
+        free(s->writers);
+        s->writers = NULL;
+        return -1;
+    }
+    for (i = 0; i < s->writer_threads; i++) {
+        s->slots[i].s = s;
+        s->slots[i].wid = i;
+    }
     if (pthread_mutex_init(&s->wq_mu, NULL) != 0) {
+        free(s->writer_bytes);
+        s->writer_bytes = NULL;
+        free(s->slots);
+        s->slots = NULL;
         free(s->writers);
         free(s->wq_slot_avail);
         free(s->wq_slot_gen);
@@ -912,6 +1114,10 @@ int server_writers_start(server_t *s)
                 (void)pthread_cond_destroy(&s->wq_slot_avail[k]);
             }
             pthread_mutex_destroy(&s->wq_mu);
+            free(s->writer_bytes);
+            s->writer_bytes = NULL;
+            free(s->slots);
+            s->slots = NULL;
             free(s->writers);
             free(s->wq_slot_avail);
             free(s->wq_slot_gen);
@@ -923,6 +1129,19 @@ int server_writers_start(server_t *s)
             return -1;
         }
     }
+    return 0;
+}
+
+int server_writers_start(server_t *s)
+{
+    int i;
+
+    if (s == NULL || s->writer_threads <= 0 || s->writers_started) {
+        return 0;
+    }
+    if (server_writers_init_pool(s) != 0) {
+        return -1;
+    }
     s->wq_stop = 0;
     for (i = 0; i < s->writer_threads; i++) {
         /* nonzero: writers start with seen = 0, so the first predicate
@@ -931,17 +1150,9 @@ int server_writers_start(server_t *s)
     }
     s->writers_started = 1;
     for (i = 0; i < s->writer_threads; i++) {
-        struct writer_arg *wa = (struct writer_arg *)malloc(sizeof *wa);
-
-        if (wa == NULL) {
-            break;
-        }
-        wa->s = s;
-        wa->idx = i;
-        if (pthread_create(&s->writers[i], NULL, writer_main, wa) == 0) {
+        if (pthread_create(&s->writers[i], NULL, writer_main, &s->slots[i]) == 0) {
             continue;
         }
-        free(wa);
         break;
     }
     if (i < s->writer_threads) {
@@ -984,17 +1195,39 @@ int server_writers_start(server_t *s)
     return 0;
 }
 
-/* Issue #367: owner slot for a conn. fd % N spreads conns across writers;
- * a stale or missing fd still lands on slot 0, never nowhere. */
+void server_writer_pass(server_t *s, int wid)
+{
+    if (s == NULL || !s->writers_started) {
+        return;
+    }
+    (void)writer_drain_slot(s, wid);
+}
+
+int server_writers_start_pool(server_t *s)
+{
+    if (s == NULL || s->writer_threads <= 0 || s->writers_started) {
+        return 0;
+    }
+    /* Thread-less accounting live, started set; writers[] freed + NULLed so
+     * stop() joins nothing (unspawned handles must never be joined). */
+    if (server_writers_init_pool(s) != 0) {
+        return -1;
+    }
+    free(s->writers);
+    s->writers = NULL;
+    s->writers_started = 1;
+    return 0;
+}
+
+/* Owner slot for a conn. fd % N spreads conns across writers; a stale or
+ * missing fd still lands on slot 0, never nowhere. Shared with the sticky
+ * drain path so kick target and drain owner always agree. */
 static int writer_owner_slot(const server_t *s, int fd)
 {
-    if (s->writer_threads <= 0) {
+    if (s == NULL || s->writer_threads <= 0) {
         return 0;
     }
-    if (fd < 0) {
-        return 0;
-    }
-    return fd % s->writer_threads;
+    return writer_owner(fd, s->writer_threads);
 }
 
 void server_writers_kick(server_t *s)
@@ -1012,17 +1245,35 @@ void server_writers_kick(server_t *s)
     pthread_mutex_unlock(&s->wq_mu);
 }
 
+/* The 417-flush path queues the reply then marks CLOSING and kicks; its
+ * owner may be mid-backlog draining another conn on its slice. Waking every
+ * slot (not just the owner) lets the first free writer steal the closing
+ * backlog via the closing-bypass instead of pacing the reply behind the
+ * owner's whole queue. Wake accounting stays exact: one kick, one consumed
+ * gen per writer. Targeting is preserved for the open-conn case, which keeps
+ * the single-owner wake the #367 test pins. */
 void server_writers_kick_conn(server_t *s, const conn_t *c)
 {
     int slot;
+    int closing;
+    int i;
 
-    if (s == NULL || !s->writers_started) {
+    if (s == NULL || !s->writers_started || c == NULL) {
         return;
     }
-    slot = writer_owner_slot(s, (c != NULL) ? c->fd : -1);
+    closing =
+        (atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING);
     pthread_mutex_lock(&s->wq_mu);
-    s->wq_slot_gen[slot]++;
-    pthread_cond_signal(&s->wq_slot_avail[slot]);
+    if (closing && s->writer_threads > 1) {
+        for (i = 0; i < s->writer_threads; i++) {
+            s->wq_slot_gen[i]++;
+            pthread_cond_signal(&s->wq_slot_avail[i]);
+        }
+    } else {
+        slot = writer_owner_slot(s, c->fd);
+        s->wq_slot_gen[slot]++;
+        pthread_cond_signal(&s->wq_slot_avail[slot]);
+    }
     pthread_mutex_unlock(&s->wq_mu);
 }
 
@@ -1039,13 +1290,21 @@ void server_writers_stop(server_t *s)
         pthread_cond_signal(&s->wq_slot_avail[i]);
     }
     pthread_mutex_unlock(&s->wq_mu);
-    for (i = 0; i < s->writer_threads; i++) {
-        (void)pthread_join(s->writers[i], NULL);
+    /* Thread-less pool (start_pool seam): no handles were spawned, so there
+     * is nothing to join -- joining unspawned handles is UB. */
+    if (s->writers != NULL) {
+        for (i = 0; i < s->writer_threads; i++) {
+            (void)pthread_join(s->writers[i], NULL);
+        }
     }
     for (i = 0; i < s->writer_threads; i++) {
         (void)pthread_cond_destroy(&s->wq_slot_avail[i]);
     }
     pthread_mutex_destroy(&s->wq_mu);
+    free(s->writer_bytes);
+    s->writer_bytes = NULL;
+    free(s->slots);
+    s->slots = NULL;
     free(s->writers);
     free(s->wq_slot_avail);
     free(s->wq_slot_gen);
@@ -1057,10 +1316,8 @@ void server_writers_stop(server_t *s)
     s->writers_started = 0;
 }
 
-void server_shutdown(server_t *s)
+void server_shutdown_phase1_say_goodbye(server_t *s)
 {
-    size_t i;
-
     if (s == NULL) {
         return;
     }
@@ -1077,6 +1334,15 @@ void server_shutdown(server_t *s)
      * implementation would have to guess at is a compatibility break bought for
      * nothing, and the receiver's log already names who left. */
     (void)fed_send_shutdown(s, NULL);
+}
+
+void server_shutdown_phase2_close(server_t *s)
+{
+    size_t i;
+
+    if (s == NULL) {
+        return;
+    }
     /* MT 2.2 (#241): stop writers BEFORE the goodbye is drained below AND the
      * by_fd walk frees conns. Writers pump under wq_lock and may mark CLOSING,
      * but only the reaper closes; joining first means no writer can touch a
@@ -1334,6 +1600,15 @@ void server_shutdown(server_t *s)
         pthread_mutex_destroy(&s->reg_mu);
         s->reg_started = 0;
     }
+}
+
+void server_shutdown(server_t *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    server_shutdown_phase1_say_goodbye(s);
+    server_shutdown_phase2_close(s);
 }
 
 int server_listen(server_t *s, int port)
@@ -1699,6 +1974,10 @@ int server_add_conn(server_t *s, conn_t *c)
      * and the backend treats that as "not configured" rather than dereferencing. */
     c->owner = s;
     s->by_fd[c->fd] = c;
+    /* #281(b): a recycled descriptor inherits no deadline. The slot is keyed
+     * by fd NUMBER, so without this a new conn on an old fd would close early
+     * on the previous holder's bound -- or hang 2 s extra on it. */
+    s->wq_close_at[c->fd] = 0;
     s->active_fds[s->nactive++] = c->fd;
     s->nconns++;
     s->n_accepted++;
@@ -1873,6 +2152,12 @@ void server_close_conn(server_t *s, int fd)
         pthread_mutex_lock(&s->reg_mu);
     }
     s->by_fd[fd] = NULL;
+    /* #281(b): the bound dies with the holder. Every closer runs through here,
+     * so the reaper and the dial/shutdown paths cannot leave a deadline behind
+     * for the next conn the OS numbers this way. */
+    if (fd >= 0 && fd < SERVER_FD_TABLE) {
+        s->wq_close_at[fd] = 0;
+    }
     s->nconns--;
     for (i = 0; i < s->nactive; i++) {
         if (s->active_fds[i] == fd) {
@@ -1956,8 +2241,11 @@ int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
      * buffered. Marking CLOSING is all the send path is allowed to do; the
      * reaper closes the fd at the next fixed point. */
     s->n_writeq_overflow++;
+    /* The depth is sampled LOCKED (#293): this runs on the loop thread while a
+     * writer may be advancing woff under wq_lock, and a torn size_t here is a
+     * C11 race even though it is only a log line. */
     printf("[observable] writeq_overflow: fd=%d pending=%zu cap=%zu\n",
-           c->fd, conn_write_pending(c), CONN_WQ_MAX);
+           c->fd, conn_write_pending_locked(c), CONN_WQ_MAX);
     conn_mark_closing(c);
     return -1;
 }
@@ -2003,11 +2291,24 @@ int server_reap(server_t *s)
                         s->wq_close_at[fd] == 0) {
                         s->wq_close_at[fd] = server_now_ms() + 2000u;
                     }
+                    /* #281(a): the bound fires even when the lock never frees.
+                     * Past the deadline the holder is not draining but wedged,
+                     * and waiting on it would pin the fd and its queue toward
+                     * FD_SETSIZE. shutdown() neither detaches nor frees --
+                     * #242 still holds -- it just fails the in-flight pump, so
+                     * the writer drops the lock and the fall-through below
+                     * closes on the next tick. */
+                    if (fd >= 0 && fd < SERVER_FD_TABLE &&
+                        s->wq_close_at[fd] != 0 &&
+                        server_now_ms() >= s->wq_close_at[fd]) {
+                        (void)shutdown(fd, SHUT_RDWR);
+                    }
                     server_writers_kick_conn(s, c);
                     i++;
                     continue;
                 }
-                pending = c->wlen - c->woff;
+                pending = atomic_load_explicit(&c->wlen, memory_order_acquire) -
+                    atomic_load_explicit(&c->woff, memory_order_acquire);
                 pthread_mutex_unlock(&c->wq_lock);
                 if (pending > 0) {
                     uint64_t now = server_now_ms();
@@ -2021,12 +2322,18 @@ int server_reap(server_t *s)
                             i++;
                             continue;
                         }
+                        /* #292: deadline expired with bytes still queued (the
+                         * 417 at N > 0). One last synchronous pump before the
+                         * close below -- conn_pump takes wq_lock itself, so it
+                         * cannot race a writer's slice, and it runs at most
+                         * once per conn. The close still happens; the point is
+                         * the reason goes out first. */
+                        (void)conn_pump(c);
                     }
                 }
             }
-            if (fd >= 0 && fd < SERVER_FD_TABLE) {
-                s->wq_close_at[fd] = 0;
-            }
+            /* The slot zeroing lives in server_close_conn() now (#281(b)), so a
+             * non-reaper closer cannot leave a deadline behind either. */
             server_close_conn(s, fd);
             closed++;
         } else {
@@ -2336,6 +2643,14 @@ int server_chan_attach(server_t *s, chan_t *ch)
     }
     if (server_chan_get(s, ch->name) != NULL) {
         return -1; /* the name is taken */
+    }
+    /* THE NODE-WIDE CAP (issues #169 and #223), enforced on the SHARED path so
+     * peer-driven creation (SJOIN, burst) cannot pass what the local JOIN path
+     * refuses. Only creation is refused: attaching what the node holds does not
+     * take this branch. Callers free the unattached channel, so a refusal here
+     * leaves no ghost. */
+    if (s->nchan_objs >= SERVER_MAX_CHANNELS) {
+        return -1;
     }
     if (s->nchan_objs == s->chan_objs_cap) {
         size_t want = (s->chan_objs_cap == 0) ? 8u : s->chan_objs_cap * 2u;

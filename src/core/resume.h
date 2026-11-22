@@ -162,7 +162,8 @@
  *      a window's total life is window + window/divisor rather than window, and
  *      every entry still ends in one of the four paths below. The memory is
  *      bounded by the same IRC_RESUME_MAX at the same size.
- *   3. ON EVICTION. Reaching IRC_RESUME_MAX drops the oldest, and the drop is
+ *   3. ON EVICTION. Reaching IRC_RESUME_MAX drops a retired window first --
+ *      it can never resume again -- and otherwise the oldest, and the drop is
  *      counted.
  *   4. ON SHUTDOWN. resume_close() frees the table, and it is an ARM in
  *      server_shutdown() next to fed_burst_close() and fed_nickreg_close(). It

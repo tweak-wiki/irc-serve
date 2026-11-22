@@ -114,6 +114,14 @@
  * one. That state is the honest one, and it is the same state as "the operator
  * configured nothing" -- which is precisely why core/account.c's predicate does
  * not need to ask about it.
+ *
+ * ATOMIC REPLACE. The file is read line by line with no lock, and only once,
+ * at startup -- there is no reload that could keep a previous store, so a
+ * refused load lasts until the next restart. A non-atomic rewrite racing that
+ * read lands mid-file and reads as malformed, which refuses the WHOLE store.
+ * Replace it atomically instead: write a temporary file in the same directory,
+ * fsync() it, rename() it over the old path. A restart then sees the old file
+ * or the new one, never half of one.
  */
 #ifndef IRC_ACCOUNT_STORE_H
 #define IRC_ACCOUNT_STORE_H
@@ -223,13 +231,16 @@ typedef struct account_store account_store_t;
 account_store_t *account_store_load(const char *path);
 
 /* An empty registry, for a caller that wants to build one in memory. Returns
- * NULL only on allocation failure. */
+ * NULL on allocation failure or when no kernel RNG is available -- fail closed
+ * (#305): a registry without fresh salt would hash every boot alike, so there
+ * is no registry at all and the load path refuses. */
 account_store_t *account_store_new(void);
 
 /* Add or replace the record for `name`. Returns 0, or -1 on a NULL/empty
  * `name`, an over-long name or password, a name or password containing a TAB,
- * or a full store. The name is COPIED; `password` is HASHED (iterated salted SHA-256
- * under the record's own salt) and never stored. The timestamp is a
+ * a full store, or when no kernel RNG is available (the record is refused and
+ * left untouched). The name is COPIED; `password` is HASHED (iterated salted
+ * SHA-256 under the record's own salt) and never stored. The timestamp is a
  * C long rather than a string because it is a NUMBER, and a number kept as
  * a string is a number two comparisons from being compared wrongly.
  *
