@@ -69,7 +69,7 @@ int main(void)
     char nick[16];
 
     assert(server_init(&s, "irc.a") == 0);
-    assert(fed_open(&s, "secret-value-1") == 0);
+    assert(fed_open(&s, "secret-value-100") == 0);
     lx = configure_loopback(&s, "irc.x");
     assert(lx != NULL);
 
