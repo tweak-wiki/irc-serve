@@ -1273,7 +1273,7 @@ static void case_peer_tls_sends_no_federate_in_clear(const char *cert,
     snprintf(peer, sizeof peer, "irc.b,127.0.0.1,%d", raw_port);
     argv[0] = a0; argv[1] = a1;
     argv[2] = "--name"; argv[3] = "irc.a";
-    argv[4] = "--secret"; argv[5] = "shared";
+    argv[4] = "--secret"; argv[5] = "shared-tls-federation-secret";
     argv[6] = "--peer"; argv[7] = peer;
     argv[8] = "--peer-tls"; argv[9] = "irc.b";
     argv[10] = "--tls-cert"; argv[11] = (char *)(uintptr_t)(const void *)cert;

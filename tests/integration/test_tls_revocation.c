@@ -172,7 +172,7 @@ static void run_case(const char *label, const char *a_crt,
 {
     static const char *const prog = "irc-serve";
     static const char *const zero = "0";
-    static const char *const shared = "shared";
+    static const char *const shared = "shared-tls-federation-secret";
     char buf[256];
     char why[256];
     char line[512];
@@ -777,7 +777,7 @@ int main(void)
     {
         static const char *const prog = "irc-serve";
         static const char *const zero = "0";
-        static const char *const shared = "shared";
+        static const char *const shared = "shared-tls-federation-secret";
         nf_node_t na;
         argv_build_t b;
 
