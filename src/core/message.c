@@ -789,9 +789,13 @@ int parse_decimal(const char *s, size_t len, uint64_t limit,
     return 0;
 }
 
-static size_t format_decimal(uint64_t v, char *out, size_t cap)
+/* The one decimal renderer (issue #212): any uint64_t renders to its canonical
+ * decimal, 0 on refusal (NULL/zero cap, or a value needing more than `cap`
+ * bytes with the NUL). Refuse, never truncate: a shortened number is a
+ * different number. */
+size_t irc_format_u64(char *out, size_t cap, uint64_t v)
 {
-    if (cap == 0) {
+    if (out == NULL || cap == 0) {
         return 0;
     }
     char digits[NUM_DIGITS_U64 + 1];
@@ -806,6 +810,7 @@ static size_t format_decimal(uint64_t v, char *out, size_t cap)
         n++;
     }
     if (n + 1 > cap) {
+        out[0] = '\0';
         return 0;
     }
     for (size_t i = 0; i < n; i++) {
@@ -839,9 +844,9 @@ size_t irc_serve_tags_format(const irc_serve_tags_t *t, char *out, size_t cap)
     char epoch[NUM_DIGITS_U64 + 1];
     char id[NUM_DIGITS_U64 + 1];
     char hops[NUM_DIGITS_U32 + 1];
-    if (format_decimal(t->epoch, epoch, sizeof epoch) == 0 ||
-        format_decimal(t->id, id, sizeof id) == 0 ||
-        format_decimal(t->hops, hops, sizeof hops) == 0) {
+    if (irc_format_u64(epoch, sizeof epoch, t->epoch) == 0 ||
+        irc_format_u64(id, sizeof id, t->id) == 0 ||
+        irc_format_u64(hops, sizeof hops, t->hops) == 0) {
         return 0;
     }
     const message_tag_t tags[4] = {
@@ -925,8 +930,8 @@ size_t irc_serve_msgid_value(const irc_serve_tags_t *t, char *out, size_t cap)
     }
     char epoch[NUM_DIGITS_U64 + 1];
     char id[NUM_DIGITS_U64 + 1];
-    if (format_decimal(t->epoch, epoch, sizeof epoch) == 0 ||
-        format_decimal(t->id, id, sizeof id) == 0) {
+    if (irc_format_u64(epoch, sizeof epoch, t->epoch) == 0 ||
+        irc_format_u64(id, sizeof id, t->id) == 0) {
         return 0;
     }
     /* snprintf rather than concatenation, because the bound is three variable
