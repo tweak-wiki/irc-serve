@@ -24,9 +24,9 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 
 #include "core/connection.h"
 #include "core/message.h"
@@ -78,14 +78,14 @@ void poll_loop_clear_stop(void)
 void poll_loop_request_stop_for(server_t *s)
 {
     if (s != NULL) {
-        /* Plain store, still single-threaded; signal handlers never touch it. */
-        s->stop = 1;
+        /* Release: pairs with the acquire load in poll_loop_stopped_for. */
+        atomic_store_explicit(&s->stop, 1, memory_order_release);
     }
 }
 
 int poll_loop_stopped_for(const server_t *s)
 {
-    if (s != NULL && s->stop) {
+    if (s != NULL && atomic_load_explicit(&s->stop, memory_order_acquire) != 0) {
         return 1;
     }
     return (int)g_stop;
@@ -94,7 +94,7 @@ int poll_loop_stopped_for(const server_t *s)
 void poll_loop_clear_stop_for(server_t *s)
 {
     if (s != NULL) {
-        s->stop = 0;
+        atomic_store_explicit(&s->stop, 0, memory_order_release);
     }
 }
 

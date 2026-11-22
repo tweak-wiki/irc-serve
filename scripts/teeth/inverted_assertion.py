@@ -9,9 +9,9 @@ Only the condition is touched. Flipping the message instead would test the word 
 which is a weaker claim; flipping the condition is the claim that matters, because an
 inverted assertion is one whose logic is backwards, not one whose prose is.
 """
+from util import apply_fault
+
 p = "tests/integration/test_peer_terminal_sweep.c"
-s = open(p).read()
 old = """        TF_CHECK_MSG(k_shapes[i].needle[0] != '\\0',"""
 new = """        TF_CHECK_MSG(k_shapes[i].needle[0] == '\\0',"""
-assert old in s, "the needle-emptiness assertion not found"
-open(p, "w").write(s.replace(old, new, 1))
+apply_fault(p, old, new, "the needle-emptiness assertion")

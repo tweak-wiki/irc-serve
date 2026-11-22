@@ -4,8 +4,9 @@ Removing only the `ED` arm leaves `ED A0 80` a well-shaped three-byte sequence, 
 is exactly what it looks like to a validator that checks shape rather than
 canonicity. `ED A0 80` is how UTF-8 says "this is not a character".
 """
+from util import apply_fault
+
 p = "src/core/connection.c"
-s = open(p).read()
 old = """    if (u == 0xedu) {
         if (verdict != NULL && (unsigned char)at[1] > 0x9fu) {
             *verdict = CONN_DISPLAY_UTF8;
@@ -18,5 +19,4 @@ new = """    if (u == 0xedu) {
         *need = 2u;
         return TEXT_EMIT;
     }"""
-assert old in s, "the 0xED arm not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the 0xED arm")
