@@ -922,7 +922,10 @@ int main(void)
         static const char *const zero = "0";
         static const char *const name_opt = "--name";
         static const char *const secret_opt = "--secret";
-        static const char *const shared_secret = "shared";
+        /* 16-byte floor (#205): the same shared secret the other cases
+         * use would also pass, but a distinct long value keeps this
+         * case's wire bytes distinguishable in logs. */
+        static const char *const shared_secret = "shared-tls-case6-secret";
         static const char *const peer_opt = "--peer";
         static const char *const peer_tls_opt = "--peer-tls";
         static const char *const cert_opt = "--tls-cert";
@@ -936,7 +939,7 @@ int main(void)
         test_client_t fc;
 
         (void)snprintf(fed_line, sizeof fed_line,
-                       ":irc.a FEDERATE irc.a 1700000000 shared %s",
+                       ":irc.a FEDERATE irc.a 1700000000 shared-tls-case6-secret %s",
                        IRC_SERVE_VERSION);
 
         /* The refusing node: irc.b requires TLS for irc.a, and the FEDERATE
