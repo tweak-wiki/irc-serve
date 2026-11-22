@@ -10,11 +10,11 @@ It replaces the call rather than branching around it because `-Werror` turns a
 provably-unreachable branch into a build error, and a fault that does not compile
 proves nothing at all.
 """
+from util import apply_fault
+
 p = "src/core/reply.c"
-s = open(p).read()
 old = "        kept = conn_text_strip_wire(arena + used, room, v);"
 new = """        /* FAULT: the filter removed, the field bookkeeping kept. */
         kept = strlen(v);
         memcpy(arena + used, v, kept + 1u);"""
-assert old in s, "the wire strip call not found"
-open(p, "w").write(s.replace(old, new))
+apply_fault(p, old, new, "the wire strip call")
