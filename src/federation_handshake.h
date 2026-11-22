@@ -23,6 +23,9 @@
  * Note for callers: a context reaching HANDSHAKE_SENT means the local side
  * has emitted its handshake; it does NOT mean the peer acknowledged. Only
  * ESTABLISHED reflects a completed (federated) link.
+ * The transition rules below are implemented once, in src/federation/link.c
+ * (issue #284), which is also their only production caller; the link holds a
+ * single `state` and has no mirror to keep in sync.
  */
 
 typedef enum {
