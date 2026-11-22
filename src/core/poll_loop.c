@@ -415,6 +415,8 @@ static void conn_on_writable(server_t *s, int fd)
 {
     conn_t *c = server_conn(s, fd);
     size_t before;
+    size_t after;
+    int rc;
 
     if (c == NULL || atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING) {
         return;
@@ -428,14 +430,20 @@ static void conn_on_writable(server_t *s, int fd)
         server_writers_kick_conn(s, c);
         return;
     }
-    before = conn_write_pending_locked(c);
-    if (conn_pump(c) < 0) {
+    /* #316: ONE lock/unlock: the drain holds wq_lock across the before read,
+     * the pump and the after read, instead of three pairs. */
+    pthread_mutex_lock(&c->wq_lock);
+    before = conn_write_pending_held(c);
+    rc = conn_pump_locked(c);
+    after = conn_write_pending_held(c);
+    pthread_mutex_unlock(&c->wq_lock);
+    if (rc < 0) {
         atomic_fetch_add_explicit(&s->n_write_error, 1u, memory_order_relaxed);
         printf("[observable] conn_close: fd=%d reason=write_error\n", c->fd);
         conn_mark_closing(c);
         return;
     }
-    if (before > 0 && conn_write_pending_locked(c) > 0) {
+    if (before > 0 && after > 0) {
         atomic_fetch_add_explicit(&s->n_partial_writes, 1u, memory_order_relaxed);
     }
 }
@@ -450,6 +458,9 @@ int poll_loop_step(server_t *s, int timeout_ms)
     nfds_t tls_listen_pfd = 0;
     size_t i;
     int n;
+    /* #316: set while building the set below; replaces the second nactive
+     * scan that used to follow it. */
+    int have_line = 0;
 
     if (s == NULL || s->by_fd == NULL) {
         return -1;
@@ -493,6 +504,13 @@ int poll_loop_step(server_t *s, int timeout_ms)
 
         if (c == NULL || atomic_load_explicit(&c->state, memory_order_acquire) == CONN_CLOSING) {
             continue; /* a CLOSING conn is already out of the set */
+        }
+        /* #316: a buffered line is noted here, in the same scan, so the
+         * timeout collapse below costs no second pass over nactive. A conn
+         * with no intent still counts: the old scan asked every live conn,
+         * including ones left out of the set with events == 0. */
+        if (!have_line && conn_has_line(c)) {
+            have_line = 1;
         }
         /* PHASE 12: THE POLL SET IS NOW THE CONNECTION'S OWN INTENT, and this is
          * the single line the whole phase's structural change amounts to.
@@ -544,20 +562,14 @@ int poll_loop_step(server_t *s, int timeout_ms)
     /* Buffered lines produce no POLLIN. If the per-connection line budget
      * cut one off mid-burst, do not sleep on work already in hand. */
     /* #216: gated behind lines_pending -- the scan walks every connection, so
-     * idle ticks skip it. The flag is re-armed only when a scan actually
-     * finds a buffered line. */
+     * idle ticks skip it. have_line was noted during the build scan above
+     * (#316): one pass, not two. The flag is re-armed only when that scan
+     * actually finds a buffered line. */
     if (timeout_ms > 0 && s->lines_pending) {
-        int found = 0;
-        for (i = 0; i < s->nactive; i++) {
-            conn_t *c = s->by_fd[s->active_fds[i]];
-
-            if (c != NULL && atomic_load_explicit(&c->state, memory_order_acquire) != CONN_CLOSING && conn_has_line(c)) {
-                timeout_ms = 0;
-                found = 1;
-                break;
-            }
+        s->lines_pending = have_line;
+        if (have_line) {
+            timeout_ms = 0;
         }
-        s->lines_pending = found;
     }
 
     /* --- 2. wait --- */
