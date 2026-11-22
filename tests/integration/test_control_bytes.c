@@ -1000,6 +1000,39 @@ static void case_relayed_parameters_are_stripped(void)
     TF_CHECK_MSG(nf_expect(&node, want, T_IO_MS) == 0,
                  "the operator log did not record the PART reason strip; expected "
                  "\"%s\".\n  node said: %s", want, node.out);
+    /* --- 4. A PART REASON THAT STRIPS TO NOTHING: KICK's rule, not silence.
+     * A reason of only control bytes keeps the cleaned (empty) buffer and is
+     * still announced, so the moderation log records the PART a KICK with the
+     * same bytes would record. The wire line carries no reason: an empty one
+     * is not a reason, and member_leave() already omits it. A fresh channel:
+     * part 1 banned 127.0.0.1 on #T, so nobody new can join it. --- */
+    {
+        test_client_t leaver;
+        size_t mark_b;
+        char stripped[64];
+
+        tc_init(&leaver);
+        register_as(&leaver, node.port, "carol", "*spoofed", NULL);
+        join(&leaver, "#U");
+        join(&witness, "#U");
+        drain(&leaver);
+        drain(&witness);
+        mark_b = tc_received(&witness);
+        (void)snprintf(stripped, sizeof stripped, "PART #U :" ESC BEL);
+        TF_CHECK_MSG(tc_send(&leaver, stripped) == 0,
+                     "the fully-stripped PART send failed");
+        (void)snprintf(want, sizeof want,
+                       ":carol!carol@" OBSERVED_HOST " PART #U\r\n");
+        TF_CHECK_MSG(tc_expect(&witness, want, T_IO_MS) == 0,
+                     "the remaining member did not see the reasonless PART \"%s\".\n"
+                     "  witness saw: %s", want, tc_buffer(&witness) + mark_b);
+        (void)snprintf(want, sizeof want, "chan_part_stripped: channel=#U"
+                       " nick=carol in_len=2 kept_len=0");
+        TF_CHECK_MSG(nf_expect(&node, want, T_IO_MS) == 0,
+                     "the operator log did not record the fully-stripped PART; "
+                     "expected \"%s\".\n  node said: %s", want, node.out);
+        tc_close(&leaver);
+    }
 
     tc_close(&op);
     tc_close(&witness);
