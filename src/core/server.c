@@ -819,27 +819,50 @@ static conn_t *writer_resolve(server_t *s, int fd)
     return s->by_fd[fd];
 }
 
-/* Aggregate unsent bytes over one owner's live conns. The scan holds reg_mu
- * (active_fds/by_fd stability); each pending read stays wq_lock-guarded
- * (#445) but takes the lock as a trylock, so the scan never blocks under
- * reg_mu (#279). A conn whose lock is held is being pumped -- or read by the
- * reaper -- and contributes nothing this pass; the next pass picks up what
- * is left. Lock order reg_mu -> wq_lock holds: nothing takes them in
- * reverse. */
-static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
+/* #497: single-scan steal target. One walk over active_fds attributes each
+ * live conn's backlog to its owner and notes CLOSING-with-bytes, so an idle
+ * tick costs one pass (one trylock per conn) instead of one pass per writer
+ * plus a second pass for the closing check. The caller holds reg_mu
+ * (active_fds/by_fd stability); each pending read takes wq_lock as a trylock,
+ * so the scan never blocks under reg_mu (#279). Lock order reg_mu -> wq_lock
+ * holds: nothing takes them in reverse. Returns the fattest other owner when
+ * it trips the stickiness floor (WRITER_STEAL_BYTES, 2x the per-conn cap, so
+ * a single full conn never migrates) or holds a CLOSING conn with queued
+ * bytes (the 417-flush shape), else -1. */
+static int writer_steal_target(server_t *s, int self, int n)
 {
     size_t i;
-    unsigned long long total = 0ull;
+    int w;
+    int fat = -1;
+    unsigned long long best = 0ull;
+    unsigned long long *totals;
+    unsigned char *closing;
 
+    if (n <= 0 || self < 0 || self >= n) {
+        return -1;
+    }
+    /* Per-owner totals without repeated walks: n is the live writer count,
+     * and the caller only steals when n > 1. Heap scratch, freed before
+     * return; NULL (OOM) skips the steal this tick. */
+    totals = (unsigned long long *)calloc((size_t)n, sizeof *totals);
+    closing = (unsigned char *)calloc((size_t)n, sizeof *closing);
+    if (totals == NULL || closing == NULL) {
+        free(totals);
+        free(closing);
+        return -1;
+    }
     for (i = 0; i < s->nactive; i++) {
         int fd;
+        int owner;
         conn_t *c;
+        size_t pending;
 
         if (i >= s->nactive) {
             break;
         }
         fd = s->active_fds[i];
-        if (writer_owner(fd, n) != owner) {
+        owner = writer_owner(fd, n);
+        if (owner == self) {
             continue;
         }
         c = writer_resolve(s, fd);
@@ -849,48 +872,31 @@ static unsigned long long writer_owner_backlog(server_t *s, int owner, int n)
         if (pthread_mutex_trylock(&c->wq_lock) != 0) {
             continue;
         }
-        total += (unsigned long long)conn_write_pending(c);
+        pending = conn_write_pending(c);
+        if (pending > 0 &&
+            atomic_load_explicit(&c->state,
+                                 memory_order_acquire) == CONN_CLOSING) {
+            closing[owner] = 1;
+        }
+        totals[owner] += (unsigned long long)pending;
         pthread_mutex_unlock(&c->wq_lock);
     }
-    return total;
-}
-
-/* True when `owner`'s slice holds a CLOSING conn with queued bytes (the
- * 417-flush shape): the reply sits behind that backlog, so an idle pass
- * steals it now instead of waiting for the stickiness floor. Same reg_mu +
- * trylock discipline as writer_owner_backlog: a locked CLOSING conn is being
- * drained already, so it does not trip the steal. */
-static int writer_owner_closing(server_t *s, int owner, int n)
-{
-    size_t i;
-
-    for (i = 0; i < s->nactive; i++) {
-        int fd;
-        conn_t *c;
-        int has_bytes;
-
-        if (i >= s->nactive) {
-            break;
-        }
-        fd = s->active_fds[i];
-        if (writer_owner(fd, n) != owner) {
+    for (w = 0; w < n; w++) {
+        if (w == self) {
             continue;
         }
-        c = writer_resolve(s, fd);
-        if (c != NULL &&
-            atomic_load_explicit(&c->state, memory_order_acquire) ==
-                CONN_CLOSING) {
-            if (pthread_mutex_trylock(&c->wq_lock) != 0) {
-                continue;
-            }
-            has_bytes = (conn_write_pending(c) > 0u);
-            pthread_mutex_unlock(&c->wq_lock);
-            if (has_bytes) {
-                return 1;
-            }
+        if (totals[w] > best) {
+            best = totals[w];
+            fat = w;
         }
     }
-    return 0;
+    if (fat < 0 ||
+        (best < (unsigned long long)WRITER_STEAL_BYTES && !closing[fat])) {
+        fat = -1;
+    }
+    free(totals);
+    free(closing);
+    return fat;
 }
 
 /* Drain one bounded slice of every live conn owned by `owner`. The caller
@@ -964,30 +970,15 @@ static size_t writer_drain_slot(server_t *s, int wid)
          * conn's reply waits. */
         writer_drain_owner(s, wid, n, &drained);
         if (drained == 0u && n > 1) {
-            int w;
-            int fat = -1;
-            unsigned long long best = 0ull;
-
             /* Idle this pass: steal by demand against live backlog, not the
-             * last-pass accounting (stale the moment bytes drain). The
-             * fattest other owner's aggregate backlog above
-             * WRITER_STEAL_BYTES gets drained below; a single full
-             * conn can never trip it (bound is 2x the per-conn cap), so
-             * owned queues stay sticky until imbalance. */
-            for (w = 0; w < n; w++) {
-                unsigned long long b;
+             * last-pass accounting (stale the moment bytes drain). One walk
+             * picks the fattest other owner (#497); a single full conn can
+             * never trip it (bound is 2x the per-conn cap), so owned queues
+             * stay sticky until imbalance. Draining below is for this pass
+             * only. */
+            int fat = writer_steal_target(s, wid, n);
 
-                if (w == wid) {
-                    continue;
-                }
-                b = writer_owner_backlog(s, w, n);
-                if (b > best) {
-                    best = b;
-                    fat = w;
-                }
-            }
-            if (fat >= 0 && (best >= (unsigned long long)WRITER_STEAL_BYTES ||
-                               writer_owner_closing(s, fat, n))) {
+            if (fat >= 0) {
                 writer_drain_owner(s, fat, n, &drained);
             }
         }
@@ -2309,6 +2300,15 @@ int server_queue(server_t *s, conn_t *c, const char *data, size_t len)
     }
     return rc;
 }
+/* #499: grace between the 2 s close deadline and the wedged-queue fence.
+ * A slow-but-progressing drain (e.g. the 417 flush behind a shrunk send
+ * buffer) still closes through the success branch below -- final pump, then
+ * close -- so the fence must only fire on a conn no tick can close: a writer
+ * pinning wq_lock at every reaper visit with bytes still queued. Five extra
+ * seconds bounds that wedge while no legitimate drain ever reaches it.
+ * shortcut: drop-on-deadline only, upgrade to progress-tracking if a live
+ * drain ever trips this. */
+#define WQ_WEDGED_FENCE_EXTRA_MS (5000u)
 
 int server_reap(server_t *s)
 {
@@ -2361,7 +2361,30 @@ int server_reap(server_t *s)
                     if (fd >= 0 && fd < SERVER_FD_TABLE &&
                         s->wq_close_at[fd] != 0 &&
                         server_now_ms() >= s->wq_close_at[fd]) {
+                        uint64_t now = server_now_ms();
+
                         (void)shutdown(fd, SHUT_RDWR);
+                        /* #499: fence the queue so a wedged writer's slice
+                         * loop terminates: with pending still > 0 the writer
+                         * keeps slicing 32 KiB against EAGAIN without ever
+                         * seeing a fatal error, stalling thin conns behind
+                         * it. The drop waits until well past the 2 s close
+                         * deadline above (which already closes every conn a
+                         * tick can reach, final pump first), so it fires only
+                         * on a writer-pinned wedge, never on a slow drain.
+                         * Trylock only: a draining writer already holds the
+                         * lock and will observe the shutdown failure
+                         * itself. */
+                        if (now >= s->wq_close_at[fd] +
+                                     (uint64_t)WQ_WEDGED_FENCE_EXTRA_MS &&
+                            pthread_mutex_trylock(&c->wq_lock) == 0) {
+                            atomic_store_explicit(
+                                &c->woff,
+                                atomic_load_explicit(&c->wlen,
+                                                     memory_order_acquire),
+                                memory_order_release);
+                            pthread_mutex_unlock(&c->wq_lock);
+                        }
                     }
                     server_writers_kick_conn(s, c);
                     i++;
