@@ -196,8 +196,8 @@ int commands_registered(const conn_t *c)
  * ---------------------------------------------------------------------------
  * THE `CASEMAPPING=ascii` LIE THAT IS NOT A LIE, AND WHAT rfc1459 WOULD COST
  * ---------------------------------------------------------------------------
- * message.c's up() folds A-Z and nothing else, and fanout.c's ascii_lower() is
- * the same six lines written twice for the reason its own comment gives. So this
+ * Every case comparison in this tree goes through message.h's irc_ascii_fold()
+ * (a-z -> A-Z, ASCII-only, locale-free), so this
  * node does NOT treat `[]\~` as equivalent to `{}|^`, which is exactly what
  * rfc1459 says it should, and advertising ascii is the truth rather than the
  * shorter answer.
@@ -207,9 +207,9 @@ int commands_registered(const conn_t *c)
  * means it becomes UNSAFE to use any of those bytes in a nickname, a channel name
  * or a hostmask component -- a channel named `#a[b` and one named `#a{b` become
  * one channel. Then every comparison that folds has to fold the same way or two
- * of them disagree: server_nick_lookup(), chan_same_name(), fanout.c's
- * ascii_lower(), channel.c's up_ascii(), and the WHO mask matcher. That is five
- * call sites plus the SET of bytes the validators refuse, and the validators are
+ * of them disagree: server_nick_lookup(), chan_same_name(), the fanout mask
+ * matcher, and the WHO mask matcher -- all through the one fold -- plus the
+ * SET of bytes the validators refuse, and the validators are
  * the expensive half -- message.h's valid_nick() and chan_name_valid() would both
  * have to grow a deny-list. It is a change to what a nickname MAY BE, which is
  * why it is not something a 005 token decides. */
