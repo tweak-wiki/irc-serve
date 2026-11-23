@@ -450,6 +450,13 @@ int account_name_wire_safe(const char *name)
              * places this name appears have to put it. */
             return 0;
         }
+        if (ch == ';' || ch == '=' || ch == '\\') {
+            /* #488: tag separators. A name carrying one is formatted raw into a
+             * message-tag block by a peer that stored it unescaped, and the far
+             * side parses a different tag list (tag smuggling). SP is already
+             * refused above. */
+            return 0;
+        }
     }
     return 1;
 }
@@ -529,6 +536,9 @@ int account_store_verify(const account_store_t *store, const char *name,
     unsigned char dummy[ACCOUNT_HASH_LEN];
     unsigned saw_match = 0u;
     unsigned dummy_used = 0u;
+    /* #487: a miss never writes `want`, but the dummy compare below reads it
+     * unconditionally -- zero it so the read is defined either way. */
+    memset(want, 0, sizeof want);
 
     if (name == NULL || name[0] == '\0' || password == NULL) {
         return 0;
