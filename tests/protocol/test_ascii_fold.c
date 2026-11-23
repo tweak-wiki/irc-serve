@@ -4,8 +4,10 @@
  * irc_ascii_fold()/irc_ascii_same() (core/message.h, defined once in
  * core/server.c). This pins the three properties the fold exists for:
  *
- *   1. A-Z folds to a-z, so `BOB` and `bob` -- and `IRC.A` and `irc.a` -- are
- *      one name (2.1, 2.4).
+ *   1. a-z folds to A-Z, so `BOB` and `bob` -- and `IRC.A` and `irc.a` -- are
+ *      one name (2.1, 2.4). The direction is UP because channel storage (2.2)
+ *      canonicalizes through this same function (issue #503): one fold, one
+ *      spelling, storage and comparison never disagree.
  *   2. The fold is LOCALE-INDEPENDENT. In a Turkish locale tolower('I') is
  *      U+0131 (dotless i), not 'i'; a fold built on tolower() would make two
  *      nodes on differently-configured hosts disagree about whether a
@@ -30,7 +32,7 @@ int main(void)
      * the machine running this; the assertions hold either way, because the
      * fold never consults the locale. */
     (void)setlocale(LC_ALL, "tr_TR.UTF-8");
-    assert(irc_ascii_fold('I') == 'i');
+    assert(irc_ascii_fold('i') == 'I');
     assert(irc_ascii_same("I", "i") != 0);
     assert(irc_ascii_same("IRC.A", "irc.a") != 0);
 
@@ -39,8 +41,8 @@ int main(void)
         char up = (char)('A' + i);
         char lo = (char)('a' + i);
 
-        assert(irc_ascii_fold(up) == lo);
-        assert(irc_ascii_fold(lo) == lo);
+        assert(irc_ascii_fold(lo) == up);
+        assert(irc_ascii_fold(up) == up);
     }
 
     /* Everything else passes through: digits, punctuation, NUL-adjacent. */

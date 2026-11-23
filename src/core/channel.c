@@ -55,16 +55,12 @@ static int copy_bounded(char *dst, size_t cap, const char *src)
     return 1;
 }
 
-/* ASCII upper-case, for chan_name_upper() ONLY (2.2's storage canonicalizer:
- * a channel name is stored uppercase-normalised and displayed uppercase).
- * Comparison folding is message.h's irc_ascii_fold() (issue #181), not this. */
-static char up_ascii(char c)
-{
-    if (c >= 'a' && c <= 'z') {
-        return (char)(c - ('a' - 'A'));
-    }
-    return c;
-}
+/* Storage canonicalizer: THE ONE FOLD (issues #181, #503). Channel names are
+ * stored folded with message.h's irc_ascii_fold(), the same function
+ * chan_same_name() compares with -- so a future CASEMAPPING change lands in
+ * one place instead of splitting storage equivalence from lookup equivalence.
+ * The fold is uppercase, so the stored form stays uppercase-normalised as 2.2
+ * and channel.h require; chan_name_upper keeps its name. */
 
 /* ---------------------------------------------------------------------------
  * Names
@@ -131,7 +127,7 @@ void chan_name_upper(char *out, size_t cap, const char *name)
         return;
     }
     for (i = 0; name[i] != '\0' && i + 1u < cap; i++) {
-        out[i] = up_ascii(name[i]);
+        out[i] = irc_ascii_fold(name[i]);
     }
     out[i] = '\0';
 }
