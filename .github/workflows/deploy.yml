@@ -23,10 +23,11 @@ on:
 env:
   STABLE_PORT: ${{ inputs.stable_port }}
   STAGING_PORT: ${{ inputs.staging_port }}
+  INSTALL_DIR: /opt/irc-serve
 
 jobs:
   build:
-    runs-on: [self-hosted, tweak-ci]
+    runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -50,35 +51,48 @@ jobs:
   deploy-staging:
     needs: build
     if: inputs.target == 'staging'
-    runs-on: [self-hosted, tweak-ci]
+    runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: irc-serve-release
           path: /tmp/irc-deploy
-      - name: Run staging server
+      - name: Install staging service
         run: |
           set -euo pipefail
           chmod +x /tmp/irc-deploy/irc-serve
-          pkill -f "irc-serve --name .* ${{ env.STAGING_PORT }}$" || true
-          sleep 1
-          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STAGING_PORT }}" > /tmp/irc-serve-staging.log 2>&1 &
-          echo $! > /tmp/irc-serve-staging.pid
+          sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
+          sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-staging"
+          sudo tee /etc/systemd/system/irc-serve-staging.service > /dev/null <<EOF
+          [Unit]
+          Description=irc-serve staging (:${{ env.STAGING_PORT }})
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          ExecStart=$INSTALL_DIR/irc-serve-staging --name ${{ inputs.server_name }} ${{ env.STAGING_PORT }}
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now irc-serve-staging
           sleep 3
           if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STAGING_PORT }}) 2>/dev/null; then
-            echo "STAGING listening on port ${{ env.STAGING_PORT }} (pid $(cat /tmp/irc-serve-staging.pid))"
-            head -20 /tmp/irc-serve-staging.log
+            echo "STAGING listening on port ${{ env.STAGING_PORT }}"
+            sudo journalctl -u irc-serve-staging --no-pager -n 20
           else
             echo "staging server did not come up:"
-            cat /tmp/irc-serve-staging.log
+            sudo journalctl -u irc-serve-staging --no-pager -n 40
             exit 1
           fi
 
   deploy-stable:
     needs: build
     if: inputs.target == 'stable'
-    runs-on: [self-hosted, tweak-ci]
+    runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 5
     environment:
       name: stable
@@ -87,28 +101,41 @@ jobs:
         with:
           name: irc-serve-release
           path: /tmp/irc-deploy
-      - name: Run stable server
+      - name: Install stable service
         run: |
           set -euo pipefail
           chmod +x /tmp/irc-deploy/irc-serve
-          pkill -f "irc-serve --name .* ${{ env.STABLE_PORT }}$" || true
-          sleep 1
-          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STABLE_PORT }}" > /tmp/irc-serve-stable.log 2>&1 &
-          echo $! > /tmp/irc-serve-stable.pid
+          sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
+          sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
+          sudo tee /etc/systemd/system/irc-serve-stable.service > /dev/null <<EOF
+          [Unit]
+          Description=irc-serve stable (:${{ env.STABLE_PORT }})
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          ExecStart=$INSTALL_DIR/irc-serve-stable --name ${{ inputs.server_name }} ${{ env.STABLE_PORT }}
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now irc-serve-stable
           sleep 3
           if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
-            echo "STABLE listening on port ${{ env.STABLE_PORT }} (pid $(cat /tmp/irc-serve-stable.pid))"
-            head -20 /tmp/irc-serve-stable.log
+            echo "STABLE listening on port ${{ env.STABLE_PORT }}"
+            sudo journalctl -u irc-serve-stable --no-pager -n 20
           else
             echo "stable server did not come up:"
-            cat /tmp/irc-serve-stable.log
+            sudo journalctl -u irc-serve-stable --no-pager -n 40
             exit 1
           fi
 
   promote:
     needs: build
     if: inputs.target == 'promote'
-    runs-on: [self-hosted, tweak-ci]
+    runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 5
     environment:
       name: stable
@@ -117,7 +144,7 @@ jobs:
         with:
           name: irc-serve-release
           path: /tmp/irc-deploy
-      - name: Swap staging into stable
+      - name: Swap staging-verified binary into stable
         run: |
           set -euo pipefail
           chmod +x /tmp/irc-deploy/irc-serve
@@ -125,16 +152,15 @@ jobs:
             echo "staging is not up on ${{ env.STAGING_PORT }} -- deploy it first"
             exit 1
           fi
-          pkill -f "irc-serve --name .* ${{ env.STABLE_PORT }}$" || true
-          sleep 1
-          nohup /tmp/irc-deploy/irc-serve --name "${{ inputs.server_name }}" "${{ env.STABLE_PORT }}" > /tmp/irc-serve-stable.log 2>&1 &
-          echo $! > /tmp/irc-serve-stable.pid
+          sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
+          sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
+          sudo systemctl restart irc-serve-stable
           sleep 3
           if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
-            echo "PROMOTED to stable on port ${{ env.STABLE_PORT }} (pid $(cat /tmp/irc-serve-stable.pid))"
-            head -20 /tmp/irc-serve-stable.log
+            echo "PROMOTED to stable on port ${{ env.STABLE_PORT }}"
+            sudo journalctl -u irc-serve-stable --no-pager -n 20
           else
             echo "promoted server did not come up:"
-            cat /tmp/irc-serve-stable.log
+            sudo journalctl -u irc-serve-stable --no-pager -n 40
             exit 1
           fi
