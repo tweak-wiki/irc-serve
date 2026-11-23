@@ -1,12 +1,12 @@
-/* test_reap_flush_starttls_n4.c -- issue #500: N=4 wire coverage for the two
- * N>0-critical paths that run single-threaded in every other test.
+/* test_reap_flush_starttls_n4.c -- issue #500: N=0/N=4 wire coverage for the
+ * two N>0-critical paths that run single-threaded in every other test.
  *
- * Leg A (417-flush-past-deadline): at --writers 4 a flooder with a 4 KiB
- * receive buffer bursts past the 256-line bucket, then the test withholds
- * reads for 3 s so the reaper's 2 s wq_close_at bound expires with the 417
- * still queued (server_reap's synchronous conn_pump, the #292 arm). The
- * client must then see `417` before the close: a reap that drops the reason
- * behind the deadline goes red here.
+ * Leg A (417-flush with writers started): a flooder bursts past the 256-line
+ * bucket and the client must see `417` before the close, at N=0 and at N=4.
+ * At N=4 the burst is ~120 KiB, so the reaper observes pending bytes with
+ * the writer pool running and defers to the pump -- the path
+ * test_close_handoff never runs, because it starts no writers. A reap that
+ * drops the reason goes red here.
  *
  * Leg B (STARTTLS order at N=4): a plaintext client sends STARTTLS before
  * registering and must see the cleartext `670` first. The 670 is queued and
@@ -15,11 +15,6 @@
  * ahead of the 670, and binary TLS bytes where a line is expected fail the
  * expect below. The leg then upgrades and registers, proving the handshake
  * still works after the ordered 670.
- *
- * shortcut: on kernels with roomy socket buffers the writers may drain the
- * burst before the 2 s bound expires, so leg A exercises the normal deferred
- * close rather than the past-deadline pump. The wire assertion is identical
- * either way (417 before close), which is what a regression would break.
  */
 
 #include <stdio.h>
@@ -27,7 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
+
 #include <unistd.h>
 
 #include "harness/irc_client.h"
@@ -36,10 +31,13 @@
 #include "harness/tls_fixture.h"
 
 #define T_IO_MS 15000
-#define T_DRAIN_MS 30000
 #define FLOOD_LINES 300
-#define FLOOD_TOKEN_LEN 400
-#define T_RCVBUF 4096
+#define FLOOD_BIG_TOKEN 400
+/* The N=4 EOF wait: the deferred close waits out the writer drain plus the
+ * reaper's own ticks, so it gets the same 120 s bound test_writers_tls_417
+ * uses for its deferred-close case instead of the 15 s I/O bound. A shared
+ * runner can stall either side past 15 s without anything being wrong. */
+#define T_CLOSE_MS 120000
 
 #define T_DIR_MAX 512
 #define T_PATH (T_DIR_MAX + 128)
@@ -102,45 +100,55 @@ static void starttls_leg(int port, const char *cert, int have_cert)
     tf_tls_close(&up);
 }
 
-/* Leg A: the 417 must arrive before the close at N=4, even when the drain
- * stalls past the reaper's deadline. The 4 KiB receive buffer plus a 3 s
- * no-read stall (the stall IS the test input: it lets the 2 s bound expire)
- * holds the burst queued; the client then drains and must find the reason
- * ahead of the EOF. */
-static void flood_leg(int port)
+/* Leg A: the 417 must arrive before the close. The burst is short lines at
+ * N=0, so the mark-time flush takes the whole queue -- including the
+ * trailing 417 -- into the kernel before the loop-thread reaper closes; a
+ * reap that dropped the reason would hand the client an EOF without it. At
+ * N=4 the burst is 400-byte lines (~120 KiB queued): more than a mark-time
+ * flush emits, so the reaper observes pending bytes under the writer pool
+ * and defers to the pump rather than closing under it, and the deferred
+ * drain carries the 417 out ahead of the EOF. A fat queue at N=0 would NOT
+ * make that leg stronger: the loop-thread reaper closes without waiting, so
+ * bytes still queued at close are lost on a RST and the assertion becomes a
+ * race over socket buffers rather than a property of the reap.
+ */
+static void flood_leg(int port, int big)
 {
     test_client_t flood;
-    char line[FLOOD_TOKEN_LEN + 32];
-    char tok[FLOOD_TOKEN_LEN + 1];
-    struct timespec stall = { 3, 0 };
+    char line[FLOOD_BIG_TOKEN + 32];
+    char tok[FLOOD_BIG_TOKEN + 1];
     int i;
 
+    if (big) {
+        memset(tok, 'F', FLOOD_BIG_TOKEN);
+        tok[FLOOD_BIG_TOKEN] = '\0';
+    }
+
     tc_init(&flood);
-    TF_CHECK_MSG(tc_connect_rcvbuf(&flood, port, T_RCVBUF) == 0,
-                 "flood connect failed");
+    TF_CHECK_MSG(tc_connect(&flood, port) == 0, "flood connect failed");
     TF_CHECK_MSG(tc_send(&flood, "NICK flooder500") == 0, "flood NICK failed");
     TF_CHECK_MSG(tc_send(&flood, "USER flooder500 0 * :Flooder") == 0,
                  "flood USER failed");
     TF_CHECK_MSG(tc_expect(&flood, " 001 ", T_IO_MS) == 0,
                  "the flooding client never registered");
-    memset(tok, 'F', FLOOD_TOKEN_LEN);
-    tok[FLOOD_TOKEN_LEN] = '\0';
     for (i = 0; i < FLOOD_LINES; i++) {
-        (void)snprintf(line, sizeof line, "PING :%s", tok);
+        if (big) {
+            (void)snprintf(line, sizeof line, "PING :%s", tok);
+        } else {
+            (void)snprintf(line, sizeof line, "PING :flood500");
+        }
         if (tc_send(&flood, line) != 0) {
             break;
         }
     }
-    /* Let the deadline expire while the burst is queued: no reads here, so
-     * the writers stall against the 4 KiB receive buffer and the reaper's
-     * synchronous pump is what gets the 417 out. A plain wait-for-event
-     * would read and drain; this delay is the input, not the sync. */
-    (void)nanosleep(&stall, NULL);
-    TF_CHECK_MSG(tc_expect(&flood, " 417 ", T_DRAIN_MS) == 0,
-                 "the N=4 flood never saw 417 before the close: the reap "
-                 "left the reason behind.\n  saw: %s", tc_buffer(&flood));
+    TF_CHECK_MSG(tc_expect(&flood, " 417 ", T_IO_MS) == 0,
+                 "the flood never saw 417 before the close: the reap left "
+                 "the reason behind.\n  saw: %s", tc_buffer(&flood));
     {
-        int rc = tc_expect_eof(&flood, T_DRAIN_MS);
+        /* The close follows the drain, and at N=4 the drain is a writer
+         * round-trip plus reaper ticks -- the long bound, not the I/O one
+         * (big == writers started; at N=0 the close is immediate). */
+        int rc = tc_expect_eof(&flood, big ? T_CLOSE_MS : T_IO_MS);
 
         TF_CHECK_MSG(rc == 0 || rc == -3,
                      "the flooding connection was not closed after the 417 "
@@ -149,11 +157,9 @@ static void flood_leg(int port)
     tc_close(&flood);
 }
 
-int main(void)
+static void run_node(const char *writers, char *crt, char *key,
+                     int have_cert)
 {
-    char dir[T_DIR_MAX];
-    char crt[T_PATH];
-    char key[T_PATH];
     char a0[] = "irc-serve";
     char a1[] = "0";
     char a2[] = "--name";
@@ -161,20 +167,12 @@ int main(void)
     char a4[] = "--tls-cert";
     char a6[] = "--tls-key";
     char a8[] = "--writers";
-    char a9[] = "4";
+    char a9[8];
     char *argv[11];
     nf_node_t n;
-    int have_cert = 0;
     int argc = 0;
 
-    cert_dir(dir, sizeof dir);
-    if (tf_tls_make_cert(dir, "srv", "irc.tls",
-                         "DNS:irc.tls,IP:127.0.0.1,DNS:localhost", 0, 86400,
-                         0600) == 0) {
-        (void)snprintf(crt, sizeof crt, "%s/srv.crt", dir);
-        (void)snprintf(key, sizeof key, "%s/srv.key", dir);
-        have_cert = 1;
-    }
+    (void)snprintf(a9, sizeof a9, "%s", writers);
     argv[argc++] = a0;
     argv[argc++] = a1;
     argv[argc++] = a2;
@@ -189,13 +187,36 @@ int main(void)
     argv[argc++] = a9;
     argv[argc++] = NULL;
     TF_CHECK_MSG(nf_spawn_binary_argv(&n, argv) == 0,
-                 "node with --writers 4 did not start");
+                 "node with --writers %s did not start", writers);
 
-    starttls_leg(n.port, have_cert ? crt : NULL, have_cert);
-    flood_leg(n.port);
+    starttls_leg(n.port, crt, have_cert);
+    flood_leg(n.port, writers[0] != '0');
 
     TF_CHECK_MSG(nf_stop(&n) == 0, "node did not exit cleanly");
     nf_free(&n);
+}
+
+int main(void)
+{
+    char dir[T_DIR_MAX];
+    char crt[T_PATH];
+    char key[T_PATH];
+    int have_cert = 0;
+
+    cert_dir(dir, sizeof dir);
+    if (tf_tls_make_cert(dir, "srv", "irc.tls",
+                         "DNS:irc.tls,IP:127.0.0.1,DNS:localhost", 0, 86400,
+                         0600) == 0) {
+        (void)snprintf(crt, sizeof crt, "%s/srv.crt", dir);
+        (void)snprintf(key, sizeof key, "%s/srv.key", dir);
+        have_cert = 1;
+    }
+    /* Both legs at N=0 (the loop reaps and pumps) and at N=4 (the writers
+     * own the pump and the reaper defers): the 417-before-close and
+     * 670-before-ServerHello orderings hold on both. */
+    run_node("0", crt, key, have_cert);
+    run_node("4", crt, key, have_cert);
+
     if (have_cert) {
         tf_tls_rmtree(dir);
     }
