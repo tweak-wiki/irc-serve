@@ -450,6 +450,13 @@ int account_name_wire_safe(const char *name)
              * places this name appears have to put it. */
             return 0;
         }
+        if (ch == ';' || ch == '=' || ch == '\\') {
+            /* #488: tag separators. A name carrying one is formatted raw into a
+             * message-tag block by a peer that stored it unescaped, and the far
+             * side parses a different tag list (tag smuggling). SP is already
+             * refused above. */
+            return 0;
+        }
     }
     return 1;
 }

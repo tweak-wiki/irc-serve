@@ -2207,6 +2207,17 @@ static void expect_account_set_refuses(void)
                  "account_set() accepted the protocol's \"no account\" token as "
                  "an account name; 2.1.1's invariant is about not being able to "
                  "represent one, and `*` is the name that would break it");
+    /* #488: tag separators -- a name carrying one is formatted raw into a tag
+     * block by a peer that stored it unescaped (tag smuggling). */
+    TF_CHECK_MSG(account_set(&s, c, "a;b", "correct horse") == -1,
+                 "account_set() accepted an account name holding `;`, which "
+                 "terminates a tag in a tag block");
+    TF_CHECK_MSG(account_set(&s, c, "a=b", "correct horse") == -1,
+                 "account_set() accepted an account name holding `=`, which "
+                 "separates a tag key from its value");
+    TF_CHECK_MSG(account_set(&s, c, "a\\b", "correct horse") == -1,
+                 "account_set() accepted an account name holding a backslash, "
+                 "which is the tag escape introducer");
     TF_CHECK_MSG(account_logged_in(c) == 0,
                  "a refused account name left the connection logged in");
     /* ...and `*` IS ACCEPTED BY THE PREDICATE, because it is what a client reads
@@ -2221,6 +2232,10 @@ static void expect_account_set_refuses(void)
                  "account_store_add() accepted an account name holding a space; a "
                  "registry must not be able to hold a name this node cannot show a "
                  "user");
+    TF_CHECK_MSG(account_store_add(reg, "a;b", "correct horse", 0) == -1,
+                 "account_store_add() accepted an account name holding `;`; a "
+                 "registry must not hold a name a peer would format raw into a "
+                 "tag block (#488)");
 
     /* AND THE GOOD CASE, because a function that refuses everything passes every
      * refusal above. */
