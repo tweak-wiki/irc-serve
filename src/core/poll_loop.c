@@ -38,6 +38,8 @@
  * larger. The +2 is headroom for the listener and the dial entries, which are
  * not connections. */
 #define POLL_MAX_FDS (FD_SETSIZE + 2)
+/* #501: dial fds share this same set, so conns stop short to leave one slot per peer. */
+#define POLL_DIAL_RESERVE IRC_FED_MAX_PEERS
 
 /* #168: per-connection flood token bucket. Burst 256 covers the existing
  * per-iteration line budget (128) plus pipelined registration churn, so an
@@ -498,7 +500,7 @@ int poll_loop_step(server_t *s, int timeout_ms)
     /* The poll set is the ACTIVE list (#176), not a scan of the fd table: the
      * listeners, every live connection, in-flight dials. A CLOSING conn is
      * already out of the set. */
-    for (i = 0; i < s->nactive && nfds < POLL_MAX_FDS; i++) {
+    for (i = 0; i < s->nactive && nfds + POLL_DIAL_RESERVE < POLL_MAX_FDS; i++) {
         conn_t *c = s->by_fd[s->active_fds[i]];
         short events = 0;
 
