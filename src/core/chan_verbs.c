@@ -74,13 +74,7 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
         size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
 
         if (len == 0) {
-            /* An empty element names no channel, so it is skipped rather than
-            * refusing the whole list: "JOIN #a," joins #a. */
-            if (comma == NULL) {
-                break;
-            }
-            p = comma + 1;
-            continue;
+            return -1; /* empty element names no channel: JOIN #a,,#b refused */
         }
         if (n >= max || len >= stride) {
             /* An over-long element or more names than `max` still refuses the
@@ -811,13 +805,11 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
     const char *names[CHAN_MAX_LIST_ARGS];
     int n;
 
-    if (m->nparams < 1) {
-        (void)reply_refused(s, c, "JOIN", NULL, "461", NULL, 0,
-                            "Not enough parameters");
-        return;
-    }
-    if (m->nparams > 2) {
-        (void)reply_refused(s, c, "JOIN", "TOO_MANY_PARAMS", "461", NULL, 0,
+    if (m->nparams != 1) {
+        /* Keys (+k) are not implemented, so a second JOIN parameter cannot be
+         * honoured: refusing rather than silently joining without checking it. */
+        const char *flag = (m->nparams < 1) ? NULL : "TOO_MANY_PARAMS";
+        (void)reply_refused(s, c, "JOIN", flag, "461", NULL, 0,
                             "Not enough parameters");
         return;
     }
@@ -2276,33 +2268,6 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                     "Channel modes");
         send_creation_time(s, c, ch);
         return;
-    }
-    /* TOO MANY is counted against the letters, not against a fixed shape. Each
-     * o/v/b letter consumes one argument in order, so `+oo` needs two nicks
-     * while `+k secret` needs none -- and the surplus past what the string can
-     * consume is what the 461 is about. A single spare argument still reaches
-     * the loop, because the 472 there is the answer for a letter this node does
-     * not evaluate (`MODE #c +k secret` names `k`, not an arity fault), and the
-     * sweep pins `+k a b` as the too-MANY shape. It stays ahead of the loop so
-     * it still wins over the 472 the loop would otherwise answer. */
-    {
-        size_t need = 0;
-        size_t have;
-        size_t cap;
-
-        for (size_t k = 1; m->params[1][k] != '\0'; k++) {
-            if (m->params[1][k] == 'o' || m->params[1][k] == 'v' ||
-                m->params[1][k] == 'b') {
-                need++;
-            }
-        }
-        have = (m->nparams > 2) ? (size_t)(m->nparams - 2) : 0u;
-        cap = (need > 1) ? need : 1u;
-        if (have > cap) {
-            (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
-                                "Not enough parameters");
-            return;
-        }
     }
     /* A mode change is a state change, so the single-writer rule applies before
      * anything else is examined. The verdict is ASKED HERE AND HELD, because the
