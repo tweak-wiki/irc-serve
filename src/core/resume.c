@@ -222,11 +222,12 @@ static void resume_drop_at(server_t *s, size_t idx)
  * caller, and answering it in one place is what keeps resume_take() and
  * resume_window_for() from disagreeing about the same entry.
  *
- * AN EXPIRED MATCH IS NOT CONSUMED HERE, and the caller is expected to sweep.
- * The alternative -- dropping it inside the lookup -- would make a predicate
- * free the thing it was asked about, and a caller that asked "is there a window?"
- * would find out by destroying it. resume_apply() calls resume_sweep() right
- * after its lookup for exactly this reason. */
+ * AN EXPIRED MATCH IS NEITHER RETURNED NOR CONSUMED HERE. The alternative --
+ * dropping it inside the lookup -- would make a finder free the thing it was
+ * asked about. The sweep retires aged-out windows into tombstones on its own
+ * tick, and resume_apply() refuses those out loud; a window the sweep has not
+ * reached yet is simply not returned.
+ */
 /* The const half of resume_find(), and the reason it is a function rather than a
  * parameter: resume_window_for() is a predicate, and a predicate that could write
  * is not a predicate. Everything it does is the same comparison, and the only
@@ -264,7 +265,6 @@ static const struct resume_window *resume_find_const(const server_t *s,
 static struct resume_window *resume_find(server_t *s, const conn_t *c,
                                          uint64_t now_ms)
 {
-    (void)now_ms; /* the key is the whole of it; the state is the caller's */
     size_t i;
 
     if (s == NULL || s->resume_windows == NULL || c == NULL) {
@@ -278,15 +278,16 @@ static struct resume_window *resume_find(server_t *s, const conn_t *c,
             !chan_same_name(w->account, c->account)) {
             continue;
         }
-        /* THE KEY AND NOTHING ELSE, and that is the difference from
-         * resume_find_const() below, which applies the state rules on top of the
-         * same comparison. A caller that is going to TELL the client something
-         * needs the entry whatever state it is in, and a caller that is only
-         * asking "is there something to resume" needs the state applied. Two
-         * predicates over one comparison rather than one predicate with a flag,
-         * because a flag would be a boolean that says which question is being
-         * asked and the two callers ask them at very different moments: one
-         * during registration, the other from a log reader. */
+        /* EXPIRY IS DECIDED HERE, with the same subtraction resume_find_const()
+         * uses: a live window past its bound is not returned, so
+         * resume_apply() never sees one. A RETIRED tombstone IS returned --
+         * the sweep left it precisely so the caller can refuse it out loud
+         * instead of missing it silently -- and a FUTURE-stamped window is
+         * live (#323): only now >= dropped can be aged out. */
+        if (w->retired_ms == 0u && now_ms >= w->dropped_ms &&
+            (now_ms - w->dropped_ms) >= s->resume_window_ms) {
+            continue;
+        }
         return w;
     }
     return NULL;
@@ -594,28 +595,15 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
         return 0; /* no window: the ordinary case, and not an error */
     }
     idx = (size_t)(w - s->resume_windows);
-    /* THREE OUTCOMES FOR ONE MATCH, and the third is the one this whole
-     * two-stage expiry exists to reach:
+    /* TWO OUTCOMES FOR ONE MATCH: an aged-out window never reaches this point
+     * -- resume_find() enforces the bound, so only the sweep retires now --
+     * and what arrives is either a tombstone or live:
      *
      *   RETIRED        the window aged out and the tombstone is still here. The
      *                  client is told, in a NOTICE it can render, and nothing is
      *                  restored.
-     *   AGED OUT BUT NOT YET SWEPT
-     *                  the window is past its bound and the sweep has not got
-     *                  to it. This is the SAME answer as RETIRED, and treating it
-     *                  differently is the bug: a client would be told "your
-     *                  session could not be resumed" on one tick and told nothing
-     *                  on the next, depending on whether the sweep had run. The
-     *                  window is marked retired here so that the sweep's own
-     *                  decision and this one cannot disagree about when it
-     *                  expired.
      *   LIVE           the restore below. */
-    if (s->resume_windows[idx].retired_ms != 0u ||
-        (now_ms >= s->resume_windows[idx].dropped_ms &&
-         (now_ms - s->resume_windows[idx].dropped_ms) >= s->resume_window_ms)) {
-        if (s->resume_windows[idx].retired_ms == 0u) {
-            s->resume_windows[idx].retired_ms = now_ms;
-        }
+    if (s->resume_windows[idx].retired_ms != 0u) {
         s->n_resume_expired++;
         printf("[observable] session_resume_miss: nick=%s ident=%s reason=EXPIRED\n",
                c->nick, c->user);
@@ -624,25 +612,6 @@ int resume_apply(server_t *s, conn_t *c, uint64_t now_ms)
          * deliberate: the first arrival is a client that lost a session and
          * deserves an answer, and the second is a client that has just been told
          * the answer. */
-        resume_drop_at(s, idx);
-        (void)send_line(s, c, s->name, "NOTICE",
-                        (const char *const[]){ c->nick,
-                                               "Session resume unavailable: the "
-                                               "window closed. Re-join to "
-                                               "restore your channels." },
-                        2);
-        return 0;
-    }
-    if (now_ms >= s->resume_windows[idx].dropped_ms &&
-        (now_ms - s->resume_windows[idx].dropped_ms) >= s->resume_window_ms) {
-        /* Unreachable given the arm above, and kept as the belt to it: the first
-         * arm reads the age and this one reads the bound, and a change to one
-         * that missed the other would be a window that is neither restored nor
-         * reported. */
-        s->resume_windows[idx].retired_ms = now_ms;
-        s->n_resume_expired++;
-        printf("[observable] session_resume_miss: nick=%s ident=%s reason=EXPIRED\n",
-               c->nick, c->user);
         resume_drop_at(s, idx);
         (void)send_line(s, c, s->name, "NOTICE",
                         (const char *const[]){ c->nick,
