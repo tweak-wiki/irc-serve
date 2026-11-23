@@ -71,6 +71,7 @@ jobs:
           Wants=network-online.target
           [Service]
           Type=simple
+          User=nobody
           ExecStart=$INSTALL_DIR/irc-serve-staging --name ${{ inputs.server_name }} ${{ env.STAGING_PORT }}
           Restart=on-failure
           RestartSec=5
@@ -114,6 +115,7 @@ jobs:
           Wants=network-online.target
           [Service]
           Type=simple
+          User=nobody
           ExecStart=$INSTALL_DIR/irc-serve-stable --name ${{ inputs.server_name }} ${{ env.STABLE_PORT }}
           Restart=on-failure
           RestartSec=5
