@@ -580,11 +580,13 @@ size_t irc_serve_msgid_value(const irc_serve_tags_t *t, char *out, size_t cap);
  * (fold_char, same_name) and ircv3_tags.c (ascii_lower) are gone; each now
  * calls this.
  *
- * A-Z -> a-z ONLY: no tolower()/toupper() (locale-sensitive -- in a Turkish
- * locale 'I' folds to U+0131 rather than 'i', and two nodes on
+ * a-z -> A-Z ONLY: no tolower()/toupper() (locale-sensitive -- in a Turkish
+ * locale tolower('i') is U+0130 rather than 'I', and two nodes on
  * differently-configured hosts would then disagree about whether a nickname
  * is taken), and no []\~ -> {}|^ (005 advertises CASEMAPPING=ascii, so this
- * node has already promised those are NOT equivalent). Bytes outside 'A'..'Z'
+ * node has already promised those are NOT equivalent). The direction is UP so
+ * channel storage (2.2, uppercase-normalised) canonicalizes through this same
+ * function (issue #503). Bytes outside 'a'..'z'
  * pass through unchanged, whatever the sign of char is. */
 char irc_ascii_fold(char c);
 

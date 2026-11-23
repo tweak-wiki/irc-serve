@@ -146,12 +146,12 @@ static uint64_t strtab_hash(const char *s, uint64_t seed)
 }
 
 /* THE ONE ASCII FOLD (issue #181): the single definition behind
- * message.h's irc_ascii_fold()/irc_ascii_same(). A-Z -> a-z only, no
+ * message.h's irc_ascii_fold()/irc_ascii_same(). a-z -> A-Z only, no
  * locale/tolower, for the reasons the header gives. */
 char irc_ascii_fold(char c)
 {
-    if (c >= 'A' && c <= 'Z') {
-        return (char)(c + ('a' - 'A'));
+    if (c >= 'a' && c <= 'z') {
+        return (char)(c - ('a' - 'A'));
     }
     return c;
 }
@@ -177,7 +177,7 @@ int irc_ascii_same(const char *a, const char *b)
  * The `char` parameter is passed and returned without an (unsigned char) cast
  * deliberately, and the reason is the same one channel.c:48 gives for not calling
  * toupper() at all: no libc function sees the value, and the range tests are
- * against ASCII literals, so a byte outside 'A'..'Z' is returned unchanged
+ * against ASCII literals, so a byte outside 'a'..'z' is returned unchanged
  * whatever the sign of char is. Casting would be noise here and a cast is
  * exactly what a future caller would have to remember not to drop. */
 static int strtab_fold(char *out, size_t cap, const char *key)
