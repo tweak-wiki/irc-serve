@@ -247,6 +247,13 @@ irc_add_integration_test(test_flood_rate test_flood_rate.c)
 set(irc_timeout_test_writers_tls_417 210)
 irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
 
+# Issue #500: N=4 wire coverage for the two N>0-critical paths -- the
+# 417-flush-past-deadline synchronous pump in server_reap (writers started,
+# which test_close_handoff lacks) and the 670-before-handshake ordering in
+# conn_pump_locked at N=4. One flood leg (417 before close) plus one
+# plaintext-STARTTLS leg (670 before ServerHello), each one tc_expect.
+irc_add_integration_test(test_reap_flush_starttls_n4 test_reap_flush_starttls_n4.c)
+
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
 # #368: loop/writer handoff fields share their own cache lines; a field
 # migrating across the boundary fails the build of this assertion.
