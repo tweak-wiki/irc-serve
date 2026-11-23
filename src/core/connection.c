@@ -462,25 +462,34 @@ size_t conn_write_pending(const conn_t *c)
  * conn_pump critical section. */
 size_t conn_write_pending_locked(conn_t *c)
 {
+    size_t wlen;
+    size_t woff;
     size_t n;
 
     if (c == NULL) {
         return 0;
     }
     pthread_mutex_lock(&c->wq_lock);
-    n = atomic_load_explicit(&c->wlen, memory_order_acquire) -
-        atomic_load_explicit(&c->woff, memory_order_acquire);
+    wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+    n = (wlen >= woff) ? wlen - woff : 0u;
     pthread_mutex_unlock(&c->wq_lock);
     return n;
 }
 /* #316: lock-free pending read for drains that already hold wq_lock. */
 size_t conn_write_pending_held(const conn_t *c)
 {
+    size_t wlen;
+    size_t woff;
+
     if (c == NULL) {
         return 0;
     }
-    return atomic_load_explicit(&c->wlen, memory_order_acquire) -
-        atomic_load_explicit(&c->woff, memory_order_acquire);
+    wlen = atomic_load_explicit(&c->wlen, memory_order_acquire);
+    woff = atomic_load_explicit(&c->woff, memory_order_acquire);
+    /* Saturate: the two loads are not one atomic snapshot, so a concurrent
+    drain's woff advance landing between them must read as empty, not wrap. */
+    return (wlen >= woff) ? wlen - woff : 0u;
 }
 
 void conn_mark_closing(conn_t *c)

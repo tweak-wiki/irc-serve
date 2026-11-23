@@ -2397,8 +2397,9 @@ int server_reap(server_t *s)
                     i++;
                     continue;
                 }
-                pending = atomic_load_explicit(&c->wlen, memory_order_acquire) -
-                    atomic_load_explicit(&c->woff, memory_order_acquire);
+                /* Lock is held: _held is the file's convention here, and the
+                saturating form below makes even a torn snapshot yield 0. */
+                pending = conn_write_pending_held(c);
                 pthread_mutex_unlock(&c->wq_lock);
                 if (pending > 0) {
                     uint64_t now = server_now_ms();
