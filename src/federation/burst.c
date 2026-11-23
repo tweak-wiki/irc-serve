@@ -1222,8 +1222,14 @@ static int apply_nick(server_t *s, server_link_t *link, const message_t *m)
                     "nick_len=%zu nick_bad_bytes=%zu\n",
                     link->fd, raw, strlen(raw), conn_text_bad_count(raw));
         }
-        shadow_discard(s, "BAD_NICK_RECORD", sh->origin, sh->nnicks,
-                       sh->nchans, sh->nmembers);
+        /* ISOLATED, NOT DISCARDED (#496): the record is refused -- malformed is
+         * already counted and the line above is already printed -- but the
+         * transaction stays open and what it promised shrinks by one, so the
+         * commit's accepted-count check still balances. A peer whose roster
+         * holds one illegal nick would otherwise fail every resync forever. */
+        if (sh->expect_nnicks > 0u) {
+            sh->expect_nnicks--;
+        }
         return -1;
     }
     if (shadow_charge(s, "TOO_LARGE", wire_size(link->name, "SBURSTN", m->params,
@@ -2077,13 +2083,18 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
         return -1;
     }
     /* THE COUNT ASSERTION, and it is the whole of "there is no partial burst".
-     * Four equalities and nothing is visible: a lost SBURSTN, a SBURSTC refused
-     * for an illegal channel name, a member line dropped as a duplicate at the
-     * dedup guard, a link that saturated mid-flush -- every one of them is a
-     * count that does not match, and every one of them leaves this node holding
-     * exactly what it held before. A roster missing a member is worse than a
-     * roster that is stale, because nothing downstream can tell them apart. */
-    if (epoch != sh->epoch || nn != sh->expect_nnicks ||
+     * The nick side counts what this node ACCEPTED, not what the peer sent: a
+     * refused SBURSTN shrinks expect_nnicks at the record (#496), so accepted
+     * against promised still balances when every sent line is accounted for --
+     * accepted or refused with cause -- and still fails on a line that never
+     * arrived. `nn < nnicks` is the one direction the restatement can still
+     * catch: a COMMIT claiming fewer nicks than were accepted is a peer
+     * confused about its own roster, and committing it would bless a count
+     * nobody sent. The chan/member sides still compare straight totals: they
+     * carry no BEGIN promise to shrink, so a refused SBURSTC/SBURSTM there
+     * still discards, as before. */
+    if (epoch != sh->epoch || nn < (uint64_t)sh->nnicks ||
+        (uint64_t)sh->nnicks != sh->expect_nnicks ||
         nch != (uint64_t)sh->nchans || nmb != (uint64_t)sh->nmembers) {
         /* NOT COUNTED AS n_fed_malformed, and the distinction is the point of
          * having more than one counter. That counter is documented as "arity or
