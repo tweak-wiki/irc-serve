@@ -1049,9 +1049,7 @@ static void *writer_main(void *arg)
 /* Pool allocation without threads: handles, slot condvars/gens, wake
  * counters, sticky slots + drained-byte totals, wq_mu + per-slot condvars --
  * but no spawn and no started flag. server_writers_start() calls this then
- * spawns; the #366 seam test calls server_writers_start_pool() and drives
- * passes itself, so no worker thread can drain the backlog before the
- * asserted pass runs. */
+ * spawns. */
 static int server_writers_init_pool(server_t *s)
 {
     int i;
@@ -1208,30 +1206,6 @@ int server_writers_start(server_t *s)
     return 0;
 }
 
-void server_writer_pass(server_t *s, int wid)
-{
-    if (s == NULL || !s->writers_started) {
-        return;
-    }
-    (void)writer_drain_slot(s, wid);
-}
-
-int server_writers_start_pool(server_t *s)
-{
-    if (s == NULL || s->writer_threads <= 0 || s->writers_started) {
-        return 0;
-    }
-    /* Thread-less accounting live, started set; writers[] freed + NULLed so
-     * stop() joins nothing (unspawned handles must never be joined). */
-    if (server_writers_init_pool(s) != 0) {
-        return -1;
-    }
-    free(s->writers);
-    s->writers = NULL;
-    s->writers_started = 1;
-    return 0;
-}
-
 /* Owner slot for a conn. fd % N spreads conns across writers; a stale or
  * missing fd still lands on slot 0, never nowhere. Shared with the sticky
  * drain path so kick target and drain owner always agree. */
@@ -1366,12 +1340,8 @@ void server_writers_stop(server_t *s)
         pthread_cond_signal(&s->wq_slot_avail[i]);
     }
     pthread_mutex_unlock(&s->wq_mu);
-    /* Thread-less pool (start_pool seam): no handles were spawned, so there
-     * is nothing to join -- joining unspawned handles is UB. */
-    if (s->writers != NULL) {
-        for (i = 0; i < s->writer_threads; i++) {
-            (void)pthread_join(s->writers[i], NULL);
-        }
+    for (i = 0; i < s->writer_threads; i++) {
+        (void)pthread_join(s->writers[i], NULL);
     }
     for (i = 0; i < s->writer_threads; i++) {
         (void)pthread_cond_destroy(&s->wq_slot_avail[i]);
