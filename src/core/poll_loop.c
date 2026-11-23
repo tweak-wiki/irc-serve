@@ -495,6 +495,13 @@ int poll_loop_step(server_t *s, int timeout_ms)
         tls_listen_pfd = nfds;
         nfds++;
     }
+    /* #489: the scan below reads nactive/active_fds/by_fd while a writer's
+     * server_add_conn can realloc active_fds under reg_mu -- hold reg_mu
+     * across the scan (never across poll()). The body takes no wq_lock, so
+     * the reg_mu -> wq_lock order is undisturbed. */
+    if (s->reg_started) {
+        pthread_mutex_lock(&s->reg_mu);
+    }
     /* The poll set is the ACTIVE list (#176), not a scan of the fd table: the
      * listeners, every live connection, in-flight dials. A CLOSING conn is
      * already out of the set. */
@@ -552,6 +559,9 @@ int poll_loop_step(server_t *s, int timeout_ms)
         pfds[nfds].revents = 0;
         conn_pfd[nconn_pfd++] = nfds;
         nfds++;
+    }
+    if (s->reg_started) {
+        pthread_mutex_unlock(&s->reg_mu);
     }
     if (server_dial_collect(s, pfds + nfds, (size_t)(POLL_MAX_FDS - nfds),
                             &dial_nfds) != 0) {
