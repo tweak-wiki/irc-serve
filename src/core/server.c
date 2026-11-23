@@ -1049,9 +1049,7 @@ static void *writer_main(void *arg)
 /* Pool allocation without threads: handles, slot condvars/gens, wake
  * counters, sticky slots + drained-byte totals, wq_mu + per-slot condvars --
  * but no spawn and no started flag. server_writers_start() calls this then
- * spawns; the #366 seam test calls server_writers_start_pool() and drives
- * passes itself, so no worker thread can drain the backlog before the
- * asserted pass runs. */
+ * spawns. */
 static int server_writers_init_pool(server_t *s)
 {
     int i;
@@ -1205,30 +1203,6 @@ int server_writers_start(server_t *s)
         pthread_cond_signal(&s->wq_slot_avail[i]);
     }
     pthread_mutex_unlock(&s->wq_mu);
-    return 0;
-}
-
-void server_writer_pass(server_t *s, int wid)
-{
-    if (s == NULL || !s->writers_started) {
-        return;
-    }
-    (void)writer_drain_slot(s, wid);
-}
-
-int server_writers_start_pool(server_t *s)
-{
-    if (s == NULL || s->writer_threads <= 0 || s->writers_started) {
-        return 0;
-    }
-    /* Thread-less accounting live, started set; writers[] freed + NULLed so
-     * stop() joins nothing (unspawned handles must never be joined). */
-    if (server_writers_init_pool(s) != 0) {
-        return -1;
-    }
-    free(s->writers);
-    s->writers = NULL;
-    s->writers_started = 1;
     return 0;
 }
 

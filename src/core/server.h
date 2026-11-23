@@ -1774,12 +1774,6 @@ int server_writer_slot(const server_t *s, int fd);
  * server, never-started pool and out-of-range slots are no-ops. */
 void server_writers_kick_slots(server_t *s, const int *slots, size_t nslots);
 void server_writers_stop(server_t *s);
-/* MT #366: deterministic single-pass seam for tests. Runs one owned-slice
- * pass for writer `wid` (plus steal when idle) without threads; the test
- * pins thread-less accounting via server_writers_start_pool(), so no worker
- * can drain the fixture backlog before the asserted pass runs. */
-void server_writer_pass(server_t *s, int wid);
-int server_writers_start_pool(server_t *s);
 
 /* The tick hook and the clock, called by the loop. server_tick() stamps the
  * clock, counts the invocation and forwards to s->on_tick when set. */
