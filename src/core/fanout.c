@@ -1216,10 +1216,14 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
      * emissions with two separate destinations. */
     const char *all[IRC_MAX_PARAMS + 1];
     int n = 0;
-    /* ST-2: the emission rendered once -- the plain body always, the extended
-     * body lazily on first use, the tag values once. Any hoist step that
-     * fails (or inputs it cannot render) leaves its flag clear and every
-     * member takes the slow path below, which is the old code verbatim. */
+    /* ST-2: the emission rendered once -- the plain body on first fast-path
+     * use, the extended body lazily on first use, the tag values once. The
+     * hoist below runs lazily on the first member that can take the fast
+     * path, so an emission whose members all need per-destination state (or
+     * are all gated/dead) never pays for a render nobody reads. Any hoist
+     * step that fails (or inputs it cannot render) leaves its flag clear
+     * and every member takes the slow path below, which is the old code
+     * verbatim. */
     const char *base[IRC_MAX_PARAMS + 1];
     char body[IRC_MAX_LINE + 2u];
     size_t bodylen = 0;
@@ -1234,6 +1238,7 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
     size_t tag_acct_len = 0;
     size_t tag_both_len = 0;
     int tags_ok = 0;
+    int hoist_tried = 0;
     struct fanout_kicks kicks;
 
     if (t->chan == NULL || nparams < 0 || nparams >= IRC_MAX_PARAMS) {
@@ -1242,24 +1247,8 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
     /* The hoist renders only inputs it can: a NULL parameter list with a
      * non-zero count is today's per-member refusal (counted on
      * n_reply_refused), not a body, so it is left to the slow path -- as is
-     * a NULL stamp, which the per-member renderer reports per member. */
-    if ((params != NULL || nparams == 0) && ident != NULL) {
-        base[0] = t->name;
-        for (int k = 0; k < nparams; k++) {
-            base[k + 1] = params[k];
-        }
-        bodylen = fanout_render_body(s, prefix, verb, base, nparams + 1,
-                                     body, sizeof body);
-        body_ok = (bodylen > 0) ? 1 : 0;
-        tags_ok = fanout_precompute_tags(ident, account,
-                                         tag_msgid, sizeof tag_msgid,
-                                         tag_acct, sizeof tag_acct,
-                                         tag_both, sizeof tag_both);
-        /* #216: measured once per emission, selected per member below. */
-        tag_msgid_len = strlen(tag_msgid);
-        tag_acct_len = strlen(tag_acct);
-        tag_both_len = strlen(tag_both);
-    }
+     * a NULL stamp, which the per-member renderer reports per member. The
+     * render itself runs inside the walk, on first fast-path use. */
     kicks.s = s;
     kicks.n = 0;
     for (size_t i = 0; i < t->chan->nmembers; i++) {
@@ -1321,11 +1310,34 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
         }
         /* ST-2 FAST PATH: the member's line is bytes already -- the shared
          * body in the member's shape, the selected block in front, CRLF
-         * behind -- queued with no build and no render. Members carrying
-         * per-destination label/batch state, and every member when the hoist
-         * above produced no bytes, take the slow path: the old per-member
-         * render, kept verbatim so its refusals and counts are unchanged. */
-        if (body_ok != 0 && tags_ok != 0 && member_needs_slow_path(m) == 0) {
+         * behind -- queued with no build and no render. The shared body and
+         * tag blocks render here, once, on the first member that can use
+         * them; members carrying per-destination label/batch state skip the
+         * render entirely, and every member takes the slow path when the
+         * hoist produces no bytes: the old per-member render, kept
+         * verbatim so its refusals and counts are unchanged. */
+        if (member_needs_slow_path(m) == 0) {
+            if (hoist_tried == 0) {
+                hoist_tried = 1;
+                if ((params != NULL || nparams == 0) && ident != NULL) {
+                    base[0] = t->name;
+                    for (int k = 0; k < nparams; k++) {
+                        base[k + 1] = params[k];
+                    }
+                    bodylen = fanout_render_body(s, prefix, verb, base, nparams + 1,
+                                                 body, sizeof body);
+                    body_ok = (bodylen > 0) ? 1 : 0;
+                    tags_ok = fanout_precompute_tags(ident, account,
+                                                     tag_msgid, sizeof tag_msgid,
+                                                     tag_acct, sizeof tag_acct,
+                                                     tag_both, sizeof tag_both);
+                    /* #216: measured once per emission, selected per member below. */
+                    tag_msgid_len = strlen(tag_msgid);
+                    tag_acct_len = strlen(tag_acct);
+                    tag_both_len = strlen(tag_both);
+                }
+            }
+            if (body_ok != 0 && tags_ok != 0) {
             const char *shape = body;
             size_t shapelen = bodylen;
             int ready = 1;
@@ -1380,6 +1392,7 @@ static int write_to_members(server_t *s, const fanout_target_t *t,
                     n++;
                     continue;
                 }
+            }
             }
         }
         /* THE SLOW PATH: `all` IS BUILT PER MEMBER, and so is the line. It is
