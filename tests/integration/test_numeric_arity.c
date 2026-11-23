@@ -122,25 +122,27 @@ typedef struct {
  * the de-facto '*' mask and answers 352, which is the right answer and not this
  * file's subject.
  *
- * USERHOST, ISON, JOIN and PART appear ONCE rather than twice, for two reasons
+ * USERHOST, ISON and PART appear ONCE rather than twice, for two reasons
  * worth writing down because both were found by trying the probe and reading the
  * wire rather than by reading the handler:
  *
  *   - USERHOST and ISON take a MASK LIST, so `nparams < 1` is the only arity they
  *     have. `USERHOST a b` is a well-formed question about two masks and is
  *     answered 302/304, not 461.
- *   - JOIN and PART take a COMMA-SEPARATED CHANNEL LIST in their first parameter
- *     and have no upper bound at all, so `JOIN #A #B` is well-formed (the second
- *     parameter is ignored) and `PART #c x y` carries a part reason. Neither has a
- *     too-MANY direction to drive, which is a fact about this node's handlers and
- *     not about RFC 2812. */
+ *   - PART takes a COMMA-SEPARATED CHANNEL LIST in its first parameter and a
+ *     reason in its second, so neither direction is probed twice here.
+ *
+ * JOIN appears TWICE: `JOIN #A #B` was well-formed (the second parameter is the
+ * key list, which this node ignores) until issue #492. Keys are not implemented,
+ * so a second JOIN parameter is now refused 461 rather than silently accepted,
+ * and both directions are driven. */
 static const arity_case_t k_arity[] = {
     /* TOO FEW or TOO MANY, and the `why` says which -- because 461's own text
      * reads "Not enough parameters" in BOTH directions, so the number cannot tell
      * them apart and only the command word says which command it was. */
     { "NICK a b"                   , "NICK",    "a space in a nickname is two -- too MANY" },
     { "USERHOST"                   , "USERHOST", "the mask is mandatory -- too FEW" },
-    { "JOIN"                       , "JOIN",    "no channel named -- too FEW" },
+    { "JOIN #A #B"                  , "JOIN",    "keys are unimplemented -- too MANY" },
     { "PART"                       , "PART",    "no channel named -- too FEW" },
     { "TOPIC"                      , "TOPIC",   "no channel named -- too FEW" },
     { "KICK"                       , "KICK",    "no channel named -- too FEW" },
@@ -159,7 +161,9 @@ static const arity_case_t k_arity[] = {
     { "ADMIN " BIN_NAME " x"       , "ADMIN",   "at most one mask -- too MANY" },
     { "TOPIC " ARITY_CHAN " x y"   , "TOPIC",   "at most a channel and a topic -- too MANY" },
     { "KICK " ARITY_CHAN " a b c"  , "KICK",    "at most a channel, a nick, a comment -- too MANY" },
-    { "MODE " ARITY_CHAN " +k a b" , "MODE",    "at most a channel, modes, one argument -- too MANY" },
+    /* No MODE too-MANY probe: issue #498 deleted the early have>cap 461, so
+     * `MODE #c +k a b` reaches the loop and is answered 472 for `k` -- a surplus
+     * argument is not an arity fault for a letter this node does not evaluate. */
     { "NAMES " ARITY_CHAN " #x"    , "NAMES",   "at most one channel -- too MANY" },
     { "LIST " ARITY_CHAN " #x"     , "LIST",    "at most one channel -- too MANY" },
 };
@@ -167,10 +171,10 @@ static const arity_case_t k_arity[] = {
 /* Join ARITY_CHAN and wait for the end of the JOIN sequence.
  *
  * ONE CHANNEL, JOINED BEFORE THE SWEEP, and the reason is a single handler
- * ordering: handle_mode() checks `nparams > 3` -- its too-MANY 461 -- AFTER
- * resolve_joined(), while every other handler checks arity first. So
- * `MODE #ARITY +k a b` is answered 403 on a channel that does not exist and 461 on
- * one that does. Joining first makes the sweep test what it claims to test (the
+ * ordering: handle_mode() answers unknown letters 472 AFTER resolve_joined(),
+ * while every other handler checks arity first. So `MODE #ARITY +k a b` is
+ * answered 403 on a channel that does not exist and 472 on one that does.
+ * Joining first makes the sweep test what it claims to test (the
  * arity field) rather than which of the two refusals comes first.
  *
  * It is still not load-bearing for the other twenty-three probes, and that is
@@ -396,7 +400,6 @@ static void expect_461_fields(const char *line, const char *who,
                  "%s: the trailing text is \"%s\" and must be "
                  "\":Not enough parameters\"\n  line: %s", who, fields[3], line);
 }
-
 /* ===========================================================================
  * 1. THE LEGACY CLIENT: TWENTY-FOUR PROBES, ONE FIELD LIST
  * ====================================================================== */

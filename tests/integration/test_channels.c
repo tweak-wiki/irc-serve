@@ -1075,9 +1075,8 @@ static void test_part(nf_node_t *node)
 }
 
 /* JOIN with empty list elements: a trailing comma ("JOIN #je,") or a doubled
- * one ("JOIN #je2,,#je3") skips the empty element and joins the named
- * channels, instead of refusing the whole list with 461. */
-static void test_join_skips_empty(nf_node_t *node)
+ * one ("JOIN #je2,,#je3") refuses the whole list with 461 (issue #493). */
+static void test_join_refuses_empty(nf_node_t *node)
 {
     client_t a;
     size_t ma;
@@ -1086,20 +1085,18 @@ static void test_join_skips_empty(nf_node_t *node)
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je,");
     (void)send_and_drain(&a, "je-trailing");
-    expect_line(&a.c, "JOIN with a trailing comma still joins the channel",
-                ":jea!jea@127.0.0.1 JOIN #JE\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the trailing comma",
-                       " 461 ");
+    expect_line(&a.c, "461 for the trailing comma",
+                ":irc.test 461 jea JOIN :Not enough parameters\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the trailing comma",
+                       " JOIN #");
 
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je2,,#je3");
     (void)send_and_drain(&a, "je-double");
-    expect_line(&a.c, "JOIN with a doubled comma joins the first channel",
-                ":jea!jea@127.0.0.1 JOIN #JE2\r\n");
-    expect_line(&a.c, "JOIN with a doubled comma joins the second channel",
-                ":jea!jea@127.0.0.1 JOIN #JE3\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the doubled comma",
-                       " 461 ");
+    expect_line(&a.c, "461 for the doubled comma",
+                ":irc.test 461 jea JOIN :Not enough parameters\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the doubled comma",
+                       " JOIN #");
 
     tc_close(&a.c);
 }
@@ -2249,7 +2246,7 @@ int main(void)
     test_topic(&node);
     test_kick_authority(&node);
     test_part(&node);
-    test_join_skips_empty(&node);
+    test_join_refuses_empty(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
