@@ -825,6 +825,44 @@ int main(void)
         expect_absent_in_window(&carol, f1, e1, "another member, empty NOTICE",
                                 "NOTICE");
     }
+    /* A body that strips to NOTHING is the same 412 (#491). `PRIVMSG #t :<ESC>`
+     * passes the pre-strip empty check and the strip then removes the escape,
+     * so without a re-check an empty trailing parameter goes out to every
+     * member. One case per verb: both share send_message(). */
+    {
+        size_t s1 = open_window(&bob);
+        size_t f1 = open_window(&carol);
+        size_t s2, e1;
+
+        (void)snprintf(want, sizeof want, ":%s 412 bob :No text to send\r\n",
+                       BIN_NAME);
+        TF_CHECK_MSG(tc_send(&bob.c, "PRIVMSG #t :\033") == 0, "tc_send failed");
+        s2 = drain(&bob); /* sender first -- see section 1 */
+        e1 = drain(&carol);
+        expect_in_window(&bob, s1, s2, "412 for a PRIVMSG stripped to empty", want);
+        TF_CHECK_MSG(tf_count(tc_buffer(&bob.c) + s1, " 412 ") == 1u,
+                     "stripped-empty PRIVMSG produced %zu 412 lines, expected exactly one",
+                     tf_count(tc_buffer(&bob.c) + s1, " 412 "));
+        expect_absent_in_window(&carol, f1, e1, "another member, stripped-empty PRIVMSG",
+                                "PRIVMSG");
+    }
+    {
+        size_t s1 = open_window(&bob);
+        size_t f1 = open_window(&carol);
+        size_t s2, e1;
+
+        (void)snprintf(want, sizeof want, ":%s 412 bob :No text to send\r\n",
+                       BIN_NAME);
+        TF_CHECK_MSG(tc_send(&bob.c, "NOTICE #t :\033") == 0, "tc_send failed");
+        s2 = drain(&bob); /* sender first -- see section 1 */
+        e1 = drain(&carol);
+        expect_in_window(&bob, s1, s2, "412 for a NOTICE stripped to empty", want);
+        TF_CHECK_MSG(tf_count(tc_buffer(&bob.c) + s1, " 412 ") == 1u,
+                     "stripped-empty NOTICE produced %zu 412 lines, expected exactly one",
+                     tf_count(tc_buffer(&bob.c) + s1, " 412 "));
+        expect_absent_in_window(&carol, f1, e1, "another member, stripped-empty NOTICE",
+                                "NOTICE");
+    }
 
     /* =======================================================================
      * The node's own accounting
