@@ -730,6 +730,9 @@ int sasl_plain_verify(const sasl_store_t *store,
     unsigned char dummy[SASL_HASH_LEN];
     unsigned saw_match = 0u;
     unsigned dummy_used = 0u;
+    /* #487: a miss never writes `want`, but the dummy compare below reads it
+     * unconditionally -- zero it so the read is defined either way. */
+    memset(want, 0, sizeof want);
 
     if (authcid == NULL || authcid[0] == '\0' || passwd == NULL) {
         return 0;
