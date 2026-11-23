@@ -126,6 +126,15 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
             s->n_msg_stripped++;
         }
         text = clean;
+        /* The strip can empty the text the arity check above already accepted --
+         * `PRIVMSG #c :<ESC>` is non-empty before it and nothing after. That is
+         * the same "no text to send" the pre-strip check answers, so it gets
+         * the same 412 and no delivery, with no log of its own for the same
+         * reason that check has none. */
+        if (text[0] == '\0') {
+            (void)reply_refused(s, c, verb, NULL, "412", NULL, 0, "No text to send");
+            return;
+        }
     }
 
     /* The source prefix, built BEFORE resolution because it is needed to render
