@@ -529,6 +529,9 @@ int account_store_verify(const account_store_t *store, const char *name,
     unsigned char dummy[ACCOUNT_HASH_LEN];
     unsigned saw_match = 0u;
     unsigned dummy_used = 0u;
+    /* #487: a miss never writes `want`, but the dummy compare below reads it
+     * unconditionally -- zero it so the read is defined either way. */
+    memset(want, 0, sizeof want);
 
     if (name == NULL || name[0] == '\0' || password == NULL) {
         return 0;
