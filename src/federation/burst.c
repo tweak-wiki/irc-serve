@@ -2,6 +2,7 @@
  * the transaction that replaces rather than merges. */
 #include "federation/burst.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -272,6 +273,13 @@ static int stage_grow(burst_stage_t *st, size_t want)
     char *grown;
 
     while (ncap < want) {
+        /* A want past half of SIZE_MAX would wrap the doubling to zero and
+         * spin here forever: take want itself, which always fits, and let
+         * the realloc below refuse what does not fit. */
+        if (ncap > SIZE_MAX / 2u) {
+            ncap = want;
+            break;
+        }
         ncap *= 2u;
     }
     grown = (char *)realloc(st->buf, ncap);
@@ -364,6 +372,13 @@ static int stage_line(burst_stage_t *st, server_t *s, const char *origin,
      * staging buffer exists: once a byte is in the buffer it is a byte this node
      * intends to send, and a burst that stops half way is the truncated
      * transaction the format exists to prevent. */
+    /* A burst_max_bytes near SIZE_MAX could wrap the addition below into a
+     * small need that passes the budget check: refuse before it wraps, the
+     * same pre-check burst_parse_u64() uses. len + 2u cannot wrap (len fits
+     * the stack line above), so the subtraction here is safe. */
+    if (st->len > SIZE_MAX - (len + 2u)) {
+        return -1;
+    }
     need = st->len + len + 2u;
     if (need > s->burst_max_bytes) {
         return -1;
