@@ -19,6 +19,20 @@ The first server to see a channel SHALL own it (`creation_epoch`, `server_name`)
 - **WHEN** a channel action cannot be routed to the channel's origin
 - **THEN** the node refuses with 437 instead of applying or queueing it.
 
+#### Scenario: Actor's own echo on forwarded change
+- **WHEN** a client's state change (JOIN/KICK/MODE/TOPIC) is forwarded to a
+  channel origin this node does not own
+- **THEN** the issuing client still receives its own client-shaped echo
+  synchronously (its `JOIN`/`KICK`/`MODE`/`TOPIC` line) — the forward-only
+  rule forbids writing to *other* local members, never to the actor.
+
+#### Scenario: Local preconditions beat routing
+- **WHEN** a channel action fails a locally-checkable precondition (not on
+  channel, not operator, unknown target, over bound) on an orphaned or
+  non-owned channel
+- **THEN** the node answers the specific numeric (442/482/401/417) — 437
+  is reserved for "the checks passed but the origin is unreachable".
+
 
 ### Requirement: Verb arity and reasons
 

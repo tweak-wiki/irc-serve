@@ -213,6 +213,18 @@ applies a channel state change it cannot route to the channel's origin; it
 refuses the action (`437`). It does not queue and apply later. This converts
 permanent divergence into transient, self-healing divergence.
 
+**Local preconditions are checked BEFORE routing, and they keep their own
+numeric.** `437` answers exactly one question — "this node cannot route to the
+origin" — and it must never be the answer to a question the node CAN evaluate
+locally. A `KICK` from a non-operator on an orphaned channel is `482`, not
+`437`; a `MODE` from a client not on the channel is `442`; a `KICK` naming an
+unknown nick is `401`; a `TOPIC` beyond the length bound is `417`. The handler
+order is therefore: arity → local preconditions (membership, privilege,
+bounds) → routing verdict (`437` only if the first two passed). Collapsing
+permission failures into `437` sends the client down the "server down, retry
+later" path for a refusal that will never clear — the same ambiguity §4.4.3
+removes from the other four numerics.
+
 **Owner death — fail closed.** Origin is immutable for a channel's lifetime.
 With no ESTABLISHED link to the origin the channel is **locally orphaned**:
 local members still see each other, but origin-requiring actions are refused
@@ -744,15 +756,30 @@ field so a resync does not lose what the live path writes (§4.3.1 argues why it
 on the member record and not on `SBURSTN`). `chan_remote_t` grows an `account`, and
 `chan_remote_add()` takes one.
 
-**What is still absent, and it is a bigger gap than the capability's absence:**
-**this node emits no local client line for an INBOUND `SJOIN`.** 4.3's SJOIN carries
-only a server prefix, so `verbs.c` cannot render `:bob!user@host JOIN #T alice *`
-from a prefix that says `irc.b`, and a JOIN with a server prefix is a line no client
-understands. A local member therefore learns about a remote member through the
-roster (`353`) and not through an extended JOIN — which is the pre-existing gap
-`verbs.c` names, and it means the account a peer reported is stored and not yet
-shown. Closing it needs a hostmask for a remote member, which is `chan_remote_t`'s
-`host` field and a decision this phase does not make.
+**INBOUND STATE VERBS MUST EMIT CLIENT-SHAPED LINES TO LOCAL MEMBERS.** The gap
+above is now a RULE, not an observation: an `SJOIN`/`SPART`/`STOPIC`/`SSMODE`/
+`SKICK`/`SNICK`/`SQUIT` that this node applies to its cache MUST also render the
+corresponding client line (`JOIN`/`PART`/`TOPIC`/`MODE`/`KICK`/`NICK`/`QUIT`) to
+every local member of the affected channel(s), through `fanout_deliver()` with
+the CLIENT verb (a client is never sent an S-verb). Roster-only convergence
+(`353` on next `NAMES`) is not convergence: every modern client maintains its
+member list from the `JOIN`/`PART` stream, and a membership event that never
+renders is a member the client never sees.
++
+**The hostmask problem, and the sanctioned answer.** 4.3's live `SJOIN` carries
+only a server prefix, so the member's hostmask is not on the wire. The fix is
+NOT to invent a host: 2.1's point is that a hostmask is OBSERVED, not asserted.
+Instead `SBURSTN` (which already carries `<user> <host>`) populates
+`chan_remote_t`'s `user`/`host`, and an inbound `SJOIN` for a member the burst
+path has already described renders from the stored fields. For a member learned
+ONLY from a live `SJOIN` (no burst record yet), the node renders the JOIN with
+the observed prefix it has — `nick!*@*` is FORBIDDEN (a byte on the wire that
+means nothing to a hostmask parser); the sanctioned fallback is to hold the
+emission until the next burst completes the record, and the roster (`353` with
+the documented bare-nick rendering for empty-host entries) remains the interim
+truth. `SSMODE`/`STOPIC`/`SKICK` carry their setter in parameters and render
+immediately. `SQUIT` renders one `QUIT` per affected channel the local client
+shares with the departed member, exactly as a local quit would.
 
 ---
 
@@ -794,7 +821,7 @@ which is a separate concern. The original claim was overstated:
 | owned channel | `message` | write to each local member **and** forward to every peer in `servers[]` ∪ every `ESTABLISHED` link — the same forward arm as `state-change` |
 | owned channel | `state-change` | apply locally **and** forward to every peer in `servers[]` ∪ every `ESTABLISHED` link |
 | non-owned channel | `message` | write to local members **and** forward to the owner |
-| non-owned channel | `state-change` | **forward only** — never a local write |
+| non-owned channel | `state-change` | **forward only — never a local write**, except the actor's own echo (see below) |
 | remote user `nick@server` | either | forward to that server |
 
 The verb class is what resolves the old table's self-contradiction: a non-owner
@@ -803,6 +830,22 @@ and "local channel with remote members → write locally AND forward".
 Concretely, `SPRIVMSG` to a non-owned channel does **both** (local write +
 forward to owner); `SJOIN` does **only** forward. §2.2's "do not broadcast" is
 true only for state-changes.
+
+**The actor's own echo is not a local write.** "Forward only" forbids writing the
+state change to OTHER local members of a channel this node does not own — the
+single-writer rule exists so the origin is the one voice those members hear.
+But the client that issued the command MUST receive its own echo (RFC 2812: the
+joiner sees its own `JOIN`, the parter its own `PART`, the kicker its own `KICK`,
+the mode-setter its own `MODE`, the topic-setter its own `TOPIC`). That echo is
+the protocol's acknowledgement of the client's own action — the same class as the
+`331`/`353`/`366` numerics that already go direct to the actor — not state applied
+to a channel this node does not own. A `JOIN` on a non-owned channel that forwards
+the `SJOIN` but never emits the joiner's own echo leaves the client on a channel
+it cannot see: its window never opens, because every client gates the window on
+its own `JOIN` line. `PART` already implements this correctly (`chan_member_leave`
+with `echo_to_who=1` runs on the FORWARD row too); `JOIN`/`KICK`/`MODE`/`TOPIC`
+must do the same: after the forward, emit the plain client-shaped echo to the
+issuing connection only, synchronously, without waiting for the origin's relay.
 
 After the amendment above the class decides one thing only: **whether the caller
 also writes locally.** It no longer selects a forward target set — the two owned
@@ -1784,6 +1827,23 @@ refusal happened.
 | `482` `ERR_CHANOPRIVSNEEDED` | not a channel operator (`KICK`, `MODE`, `INVITE`), not an IRC operator (`KNOCK`), the verb is disabled (`REGISTER`) — **three** | `ERR_CHANOPRIVSNEEDED` / `ERR_NOPRIVILEGES` / `ERR_ACCOUNTREGISTRATIONDISABLED` |
 | `464` `ERR_NOPRIVILEGES` | not an IRC operator (`CHOPER`), SASL authentication failed (`AUTHENTICATE`) | `ERR_NOPRIVILEGES` / `INVALID_AUTHENTICATE` / `ERR_AUTHENTICATIONFAILED` |
 
+**SASL completion is NOT a `464` — it is `903`–`908`, unconditionally.** The
+`464` row above names `AUTHENTICATE` failures, and that was wrong in the same
+way `482`-for-`REGISTER` was: `464 ERR_PASSWDMISMATCH` is a password-check
+numeric, but a SASL exchange has its OWN numerics — `903 RPL_SASLSUCCESS`,
+`904 ERR_SASLFAIL`, `905 ERR_SASLTOOLONG`, `906 RPL_SASLABORTED`, `908
+RPL_SASLMECHS` — and every SASL client library parses those five and only
+those. Answering a failed SASL login with `464` sends the client down the
+"wrong oper password" UI path; answering a SUCCESS with nothing but the
+registration burst (no `903`) leaves SASL-only clients polling `WHOIS` to
+infer login. The fix: `AUTHENTICATE` answers `903` on verify, `904` on bad
+credentials, `905` on an over-long payload, `906` on client abort
+(`AUTHENTICATE *`), and `908` for the mechanism list — whether or not
+`standard-replies` is negotiated, because these are SASL's own numerics, not
+legacy ones being migrated. `464` keeps only `CHOPER`. `standard-replies`
+clients additionally get `FAIL AUTHENTICATE ERR_AUTHENTICATIONFAILED` on the
+`904` path, per the existing migration.
+
 **EVERY OTHER NUMERIC STAYS**, and the reason is the same rule pointed the other way:
 `401`, `403`, `404`, `421`, `431`, `432`, `433`, `437`, `441`, `442`, `451`, `472`
 and the rest each answer exactly **one** question on this node, so the number is
@@ -2069,6 +2129,22 @@ the channel goes.
 path has no forward arm. And here the cost is *louder* than away-notify's: 4.3's frozen
 verb table has **no S-verb for an invitation at all**, so there is nothing to add even in
 principle without a wire-format change (§6 forbids inventing one).
+
+**DECISION: notifies stay local-only, and that is now a documented limit, not a
+gap.** `SETNAME`/`AWAY`/`INVITE` notifications are channel-scoped assertions, and
+on a mesh the members of that channel sit on several nodes — so a `SETNAME` on
+node A that only node A's members see is a real divergence: node B's clients
+show a stale realname until the next burst, and never learn of the change at
+all. The honest fix — `SSETNAME`/`SAWAY`/`SINVITE` S-verbs — needs a 4.3 wire
+version bump (§6), which is out of scope for this pass. What this pass does
+instead: (1) the roster path already carries the underlying facts (`SBURSTN`
+carries `user`/`host`, §2.5.9's account fields ride `SJOIN`/`SBURSTM`), so a
+relinked node converges; (2) `WHOIS`/`311` for a remote nick MUST render from
+the freshest cached record and MUST NOT present burst-time facts as live ones
+— where the record is known-stale (a `SETNAME`/`AWAY` changed it locally after
+the last burst), the reply carries the cached value and the node does not claim
+otherwise; (3) the `005`/`CAP` surface documents that notifies are node-local
+until the wire bump lands. The bump itself is tracked as its own issue.
 
 #### 4.4.6 `462 ERR_ALREADYREGISTRED`, and the second `USER`
 
