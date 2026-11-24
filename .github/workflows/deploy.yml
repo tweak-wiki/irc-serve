@@ -5,7 +5,7 @@ on:
       target:
         description: "Which slot to deploy"
         type: choice
-        options: [staging, stable, promote]
+        options: [staging, stable, promote, fed-staging]
         default: staging
       stable_port:
         description: "Stable IRC port"
@@ -166,3 +166,69 @@ jobs:
             sudo journalctl -u irc-serve-stable --no-pager -n 40
             exit 1
           fi
+
+  fed-staging:
+    needs: build
+    if: inputs.target == 'fed-staging'
+    runs-on: [self-hosted, tweak-deploy]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: irc-serve-release
+          path: /tmp/irc-deploy
+      - name: Install federated pair (irc.a:6668 + irc.b:6669)
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/irc-deploy/irc-serve
+          if [ ! -r /etc/irc-serve/fed-secret ]; then
+            echo "/etc/irc-serve/fed-secret missing or unreadable -- see docs/DEPLOY.md"
+            exit 1
+          fi
+          sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
+          sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-a"
+          sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
+          sudo tee /etc/systemd/system/irc-serve-fed-a.service > /dev/null <<UNIT_EOF
+          [Unit]
+          Description=irc-serve federated node A (irc.a :6668)
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=irc-serve
+          ExecStart=$INSTALL_DIR/irc-serve-fed-a --name irc.a --secret-file /etc/irc-serve/fed-secret --peer irc.b,127.0.0.1,6669 6668
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          UNIT_EOF
+          sudo tee /etc/systemd/system/irc-serve-fed-b.service > /dev/null <<UNIT_EOF
+          [Unit]
+          Description=irc-serve federated node B (irc.b :6669)
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=irc-serve
+          ExecStart=$INSTALL_DIR/irc-serve-fed-b --name irc.b --secret-file /etc/irc-serve/fed-secret --peer irc.a,127.0.0.1,6668 6669
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          UNIT_EOF
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now irc-serve-fed-a irc-serve-fed-b
+          sleep 5
+          for port in 6668 6669; do
+            if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+              echo "node listening on port $port"
+            else
+              echo "node on $port did not come up"
+              exit 1
+            fi
+          done
+          sleep 5
+          echo "--- link status A ---"
+          sudo journalctl -u irc-serve-fed-a --no-pager -n 40 | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
+          echo "--- link status B ---"
+          sudo journalctl -u irc-serve-fed-b --no-pager -n 40 | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
