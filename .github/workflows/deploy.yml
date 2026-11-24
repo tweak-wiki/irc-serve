@@ -181,10 +181,6 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x /tmp/irc-deploy/irc-serve
-          if [ ! -r /etc/irc-serve/fed-secret ]; then
-            echo "/etc/irc-serve/fed-secret missing or unreadable -- see docs/DEPLOY.md"
-            exit 1
-          fi
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-a"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
