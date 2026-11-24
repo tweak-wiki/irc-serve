@@ -347,7 +347,7 @@ static void origin_client_op(raw_peer_t *peer, nf_node_t *node,
                  "delivery to her would prove nothing");
 
     stamp(block, sizeof block, 900UL);
-    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - *\r\n", block);
+    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - * - -\r\n", block);
     TF_CHECK_MSG(pf_send_line(peer->fd, line) == 0, "the SJOIN send failed");
     TF_CHECK_MSG(nf_expect(node, "fed_sjoin: channel=" CHAN " member=carol",
                            T_IO_MS) == 0,
@@ -493,7 +493,10 @@ static void case_member_server_ban_applied(void)
                  "the origin still answers a ban-list query with 367 after the mask was "
                  "removed, so `-b` set the letter and left the list alone.\n"
                  "  alice saw: %s", tc_buffer(&alice) + mark);
-    TF_CHECK_MSG(strstr(tc_buffer(&alice) + mark, MASK) == NULL,
+    /* No 367 after the mark is the list reading empty. The mask itself DOES
+     * appear -- in the `-b` MODE line #559 renders to the channel's members,
+     * which is the event stream doing its job, not the list retaining the ban. */
+    TF_CHECK_MSG(strstr(tc_buffer(&alice) + mark, " 367 ") == NULL,
                  "the removed mask is still in the origin's ban list.\n"
                  "  alice saw: %s", tc_buffer(&alice) + mark);
 
@@ -692,7 +695,7 @@ static void case_origin_modes_reach_second_node(void)
     /* The peer's member, which puts "irc.b" in the channel's `servers[]` and makes the
      * member-server term of the entitlement test true. */
     stamp(block, sizeof block, 950UL);
-    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - *\r\n", block);
+    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - * - -\r\n", block);
     TF_CHECK_MSG(pf_send_line(peer.fd, line) == 0, "the SJOIN send failed");
     TF_CHECK_MSG(nf_expect(&node, "fed_sjoin: channel=" CHAN " member=carol",
                            T_IO_MS) == 0,

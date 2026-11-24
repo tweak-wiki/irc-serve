@@ -463,6 +463,14 @@ static void case_the_loser_renames_and_the_winner_keeps(void)
      * timeout and would dump the child on the way out: the claim "this client was
      * not sent a NICK" is exactly a statement about this client's buffer, and the
      * buffer is complete as soon as the node has answered the PING that follows. */
+    /* Sync BEFORE the mark: the loser's rename echo to this channel's members
+     * (#559) is queued on irc.b just before the `fed_snick:` line above is
+     * printed, and a mark taken before the client socket is drained would
+     * catch that legitimate NICK and read it as a second rename. */
+    (void)snprintf(line, sizeof line, "PING :pre-win");
+    TF_CHECK_MSG(tc_send(&b_zed, line) == 0, "irc.b's user's PING send failed");
+    TF_CHECK_MSG(tc_expect(&b_zed, "pre-win", T_IO_MS) == 0,
+                 "irc.b's user never got its pre-win PONG: %s", tc_buffer(&b_zed));
     mark = tc_received(&b_zed);
     (void)snprintf(line, sizeof line, "PING :after-win");
     TF_CHECK_MSG(tc_send(&b_zed, line) == 0, "irc.b's user's PING send failed");

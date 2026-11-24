@@ -145,7 +145,8 @@ typedef enum {
 } chan_verdict_t;
 
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
- * validate arity, resolve the channel, ask the authority question, and only then
+ * validate arity, resolve the channel, answer the local preconditions (442/482/
+ * 401/417 keep their own numerics), ask the authority question, and only then
  * touch state. The authority question is asked in chan_verbs.c's own
  * authority_ok(), which every one of these calls -- there is no verb that
  * decides it for itself.

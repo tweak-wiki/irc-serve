@@ -578,7 +578,7 @@ static void case_third_server_claim_refused(void)
      * any handler runs. Sending the SJOIN first is what puts the origin on the
      * PEER's side of the wire. */
     stamp(block, sizeof block, PEER, 900UL);
-    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - *\r\n", block);
+    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " carol - * - -\r\n", block);
     TF_CHECK_MSG(pf_send_line(peer.fd, line) == 0, "the SJOIN send failed");
     TF_CHECK_MSG(nf_expect(&node, "fed_sjoin: channel=" CHAN " member=carol",
                            T_IO_MS) == 0,

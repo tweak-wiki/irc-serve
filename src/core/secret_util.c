@@ -260,19 +260,20 @@ void secret_wipe(void *p, size_t n)
     }
 }
 
-void secret_gen_salt(unsigned char salt[SECRET_SALT_LEN])
+int secret_gen_salt(unsigned char salt[SECRET_SALT_LEN])
 {
 #if defined(__APPLE__)
     if (getentropy(salt, SECRET_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     /* getentropy() cannot fail for 16 bytes short of a broken libc, but the
-     * salt decides whether two boots' hashes can be told apart, so the
+     * salt decides whether two records' hashes can be told apart, so the
      * fallback is the call that cannot fail rather than a zeroed salt. */
     arc4random_buf(salt, SECRET_SALT_LEN);
+    return 1;
 #else
     if (getentropy(salt, SECRET_SALT_LEN) == 0) {
-        return;
+        return 1;
     }
     {
         FILE *f = fopen("/dev/urandom", "re");
@@ -282,32 +283,14 @@ void secret_gen_salt(unsigned char salt[SECRET_SALT_LEN])
 
             (void)fclose(f);
             if (got == SECRET_SALT_LEN) {
-                return;
+                return 1;
             }
         }
     }
-    /* Last resort: no kernel RNG and no urandom device. Time, pid and a stack
-     * address vary per boot; hashed, they are a unique salt, and uniqueness
-     * (not secrecy) is all a per-boot salt needs. */
-    {
-        char mix[96];
-        secret_sha256_t ctx;
-        unsigned char digest[SECRET_HASH_LEN];
-        int n = snprintf(mix, sizeof mix, "%llu-%ld-%p",
-                         (unsigned long long)time(NULL), (long)getpid(),
-                         (void *)mix);
-
-        if (n < 0) {
-            mix[0] = '\0';
-        }
-        secret_sha256_init(&ctx);
-        secret_sha256_update(&ctx, (const unsigned char *)mix, strlen(mix));
-        secret_sha256_final(&ctx, digest);
-        memcpy(salt, digest, SECRET_SALT_LEN);
-        secret_wipe(&ctx, sizeof ctx);
-        secret_wipe(digest, sizeof digest);
-        secret_wipe(mix, sizeof mix);
-    }
+    /* Fail closed: a time/pid hash here would be ~30 guessable bits shared
+     * per boot window, silently degrading the whole store. */
+    memset(salt, 0, SECRET_SALT_LEN);
+    return 0;
 #endif
 }
 
@@ -316,12 +299,20 @@ void secret_hash_password(const unsigned char salt[SECRET_SALT_LEN],
                           unsigned char out[SECRET_HASH_LEN])
 {
     secret_sha256_t ctx;
+    size_t plen = strlen(password);
+    unsigned int r;
 
     secret_sha256_init(&ctx);
     secret_sha256_update(&ctx, salt, SECRET_SALT_LEN);
-    secret_sha256_update(&ctx, (const unsigned char *)password,
-                         strlen(password));
+    secret_sha256_update(&ctx, (const unsigned char *)password, plen);
     secret_sha256_final(&ctx, out);
+    for (r = 1u; r < SECRET_HASH_ROUNDS; r++) {
+        secret_sha256_init(&ctx);
+        secret_sha256_update(&ctx, out, SECRET_HASH_LEN);
+        secret_sha256_update(&ctx, salt, SECRET_SALT_LEN);
+        secret_sha256_update(&ctx, (const unsigned char *)password, plen);
+        secret_sha256_final(&ctx, out);
+    }
     /* The tail of the password may still sit in the context's block. */
     secret_wipe(&ctx, sizeof ctx);
 }

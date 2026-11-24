@@ -219,9 +219,10 @@ static client_t *CUR_CLIENT;
 
 /* Send a complete, correct PLAIN credential in the two-parameter one-shot form.
  * The expectation is on the node's own output rather than on the wire, because
- * a successful exchange produces NO numeric in this tree: SASL grants nothing
- * and says so with `granted=0`. Asserting a numeric here would be asserting a
- * feature Phase 8 deliberately does not have. */
+ * the wire verdict (903) is already pinned byte-for-byte by
+ * test_cap_negotiation.c: asserting it here too would pin one line in two
+ * places. What is asserted here is the account side -- `granted=0` says SASL
+ * authenticates the connection and grants nothing by itself. */
 static void authenticate(const char *authcid, const char *passwd)
 {
     char payload[512];
@@ -1354,7 +1355,7 @@ static void test_account_tag_on_the_wire(const char *sasl, const char *registry)
      * a feature a client discovers as a bug. */
     bb = drain(&bob);
     (void)snprintf(line, sizeof line, "PRIVMSG bob direct");
-    ae = speak_and_close(&alice, line, watched, 1u, ends);
+    (void)speak_and_close(&alice, line, watched, 1u, ends);
     (void)snprintf(want, sizeof want,
                    "@account=alice :alice!alice@127.0.0.1 PRIVMSG bob direct\r\n");
     expect_in_window(&bob, bb, ends[0], "the account tag on a direct message", want);
