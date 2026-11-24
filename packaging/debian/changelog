@@ -1,3 +1,12 @@
+irc-serve (0.2.0-1) unstable; urgency=medium
+
+  * 4.3 wire extension (#563): SJOIN carries user+host; SSETNAME, SAWAY and
+  * SINVITE federate realname, away and invite notify across peer links.
+  * FEDERATE still requires an exact version match, so 0.1.x nodes refuse
+  * 0.2.0 links at the handshake instead of misparsing the new shapes.
+
+ -- TheFirstIstari <euphonium.ashe.f@gmail.com>  Tue, 24 Nov 2026 00:00:00 +0000
+
 irc-serve (0.1.0-1) unstable; urgency=medium
 
   * Initial release: federated modern-spec IRC server in C.
