@@ -452,10 +452,22 @@ static void check_no_raw_params_in_printf(void)
 static void check_target_is_validated_at_the_struct(void)
 {
     char code[TF_SRC_MAX];
+    char rest[TF_SRC_MAX];
     size_t stores;
     size_t i;
 
-    read_src(code, sizeof code, "src/core/fanout.c");
+    /* #543 TU-5: the resolution family (and with it the store) moved verbatim
+     * from fanout.c to core/fanout_resolve.c. The shape asserted below is
+     * unchanged; both halves are read so a writer hiding in either file fails
+     * here rather than passing unexamined. */
+    read_src(code, sizeof code, "src/core/fanout_resolve.c");
+    read_src(rest, sizeof rest, "src/core/fanout.c");
+    TF_CHECK_MSG(strlen(code) + strlen(rest) + 1u <= sizeof code,
+                 "resolution sources do not fit one buffer -- every check below "
+                 "would examine a truncated file, and a source check that "
+                 "silently examines half a file reports clean for a reason "
+                 "nobody can see");
+    strcat(code, rest);
     squash(code);
 
     /* THE HELPER EXISTS, and it is not a stub: it must consult a predicate. The
@@ -464,10 +476,11 @@ static void check_target_is_validated_at_the_struct(void)
      * SOMETHING before it copies, and that the something is the display walk the
      * two other stored identity fields use. */
     TF_CHECK_MSG(has(code, "static int fanout_name_store("),
-                 "fanout.c no longer defines fanout_name_store(). It is the one "
-                 "place a byte gets into fanout_target_t::name, and without it the "
-                 "safety of that field is back to whichever guard chain a reader "
-                 "can reconstruct -- which is the shape the audit named.");
+                 "fanout_resolve.c no longer defines fanout_name_store(). It is "
+                 "the one place a byte gets into fanout_target_t::name, and "
+                 "without it the safety of that field is back to whichever guard "
+                 "chain a reader can reconstruct -- which is the shape the audit "
+                 "named.");
     TF_CHECK_MSG(has(code, "conn_text_display_check( src )") ||
                  has(code, "conn_text_display_check(src)"),
                  "fanout_name_store() no longer asks conn_text_display_check(). "
@@ -491,11 +504,11 @@ static void check_target_is_validated_at_the_struct(void)
         }
     }
     TF_CHECK_MSG(stores == 1u,
-                 "fanout.c holds %lu memcpy() call(s) into out->name and exactly "
-                 "one is allowed: the one inside fanout_name_store(), immediately "
-                 "after the predicate. A second one is a writer that does not go "
-                 "through the store, and it is the writer a future refactor will "
-                 "loosen first.", (unsigned long)stores);
+                 "the resolution sources hold %lu memcpy() call(s) into out->name "
+                 "and exactly one is allowed: the one inside fanout_name_store(), "
+                 "immediately after the predicate. A second one is a writer that "
+                 "does not go through the store, and it is the writer a future "
+                 "refactor will loosen first.", (unsigned long)stores);
 
     /* AND IT IS ACTUALLY ASKED, rather than defined and ignored. The resolution
      * function has four branches -- channel, `nick@server` naming this node, the
