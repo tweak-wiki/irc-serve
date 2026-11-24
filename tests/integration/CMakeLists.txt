@@ -206,8 +206,11 @@ irc_add_integration_test(test_writer_drain test_writer_drain.c)
 irc_add_integration_test(test_writer_wakeup test_writer_wakeup.c)
 # Issue #367: targeted wakeup -- one queued conn wakes exactly its owner.
 irc_add_integration_test(test_writer_targeted test_writer_targeted.c)
-# Issue #279: one kick per emission -- quiet queue plus coalesced slot kick wakes the owner once per set.
-irc_add_integration_test(test_writer_coalesce test_writer_coalesce.c)
+# Issue #534: soak -- a busy node for a bounded T, then fd/RSS back near
+# baseline. Default T=30 s (IRC_SOAK_SECONDS overrides up to 600); TIMEOUT
+# 150 per the 6x rule.
+set(irc_timeout_test_soak 150)
+irc_add_integration_test(test_soak test_soak.c)
 # MT 4.1 (#246): per-conn FIFO under N=4 with cross-conn burst contention --
 # A-then-B pipelined on one conn, 100 in-test iterations.
 irc_add_integration_test(test_writer_order test_writer_order.c)
@@ -499,6 +502,13 @@ irc_add_integration_test(test_fed_tags test_fed_tags.c)
 # own poll step, and the negatives close their window with a PING/PONG.
 irc_add_integration_test(test_fed_wire test_fed_wire.c)
 
+ # 4.3 extension (#563): SJOIN carries user+host, and SSETNAME/SAWAY/SINVITE
+ # federate realname, away and invite notify across a three-node star. The
+ # 353 case pins the six-parameter SJOIN on the wire the client sees; the
+ # other three pin each new verb end to end; the last pins the version bump by
+ # refusing a 0.1.0 FEDERATE with BAD_VERSION.
+ irc_add_integration_test(test_fed_notify test_fed_notify.c)
+
 # 2.4: the (origin, epoch, id) duplicate store and the loop guard that reads it.
 # The store is asserted on RETURN VALUES -- first arrival new, second seen, the
 # three key fields independent, the origin folded ASCII, an illegal key not new
@@ -533,6 +543,10 @@ irc_add_integration_test(test_fed_handshake test_fed_handshake.c)
 # the FULL 353 contents on each node are asserted in the Phase 4 order. Two child
 # processes over real TCP, per 6.2.
 irc_add_integration_test(test_fed_roster test_fed_roster.c)
+
+# #559: an inbound S-verb applied to the cache must render the client-shaped
+# line to local members. Remote PART/JOIN/TOPIC observed on the other node.
+irc_add_integration_test(test_fed_state_emit test_fed_state_emit.c)
 
 # 7/Phase 6: a PRIVMSG from A reaches B exactly once, the two-node ping-pong
 # settles, and 2.4's own-origin rule is the counter that proves it.

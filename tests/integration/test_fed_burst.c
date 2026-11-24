@@ -3345,7 +3345,6 @@ static void case_identifiers_are_refused_and_the_record_kept(void)
                  "node A never sent the hand-built transaction, so the assertions "
                  "above are about an earlier one.\n  node said: %s", a.out);
     at = tc_received(&ann);
-    at = tc_received(&ann);
     TF_CHECK_MSG(tc_send(&ann, "MODE " CHAN_T) == 0, "carol's MODE query failed");
     TF_CHECK_MSG(tc_expect(&ann, " 324 ", T_IO_MS) == 0,
                  "node B did not answer a MODE query, so the mode set cannot be read "

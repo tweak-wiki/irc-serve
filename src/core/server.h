@@ -155,15 +155,24 @@ struct fed_rnick;
  * field), so this header names it and nothing more. */
 struct burst_shadow;
 
-/* The version string this build reports in 002, 004 and PONG.
+/* The version string this build reports in 002, 004 and PONG, and the wire
+ * version FEDERATE handshakes against (exact match: a peer running anything
+ * else is refused before a link establishes, so two nodes never run different
+ * wire shapes against each other).
  *
  * It lives here, and not in the node's own banner, so that there is exactly
  * ONE copy of it: a version number stated twice in one binary is a version
  * number that will eventually be wrong in one of the two places, and 004 is
  * the one clients show to report bugs against. This is not a server-identity
  * system -- Phase 6 owns that, and it will want a real version/identity
- * surface -- it is the single constant the Phase 3 numerics need. */
-#define IRC_SERVE_VERSION "irc-serve-0.1.0"
+ * surface -- it is the single constant the Phase 3 numerics need.
+ *
+ * 0.2.0, not 0.1.x: the 4.3 extension (#563) changes SJOIN's frozen arity and
+ * adds three verbs, so a 0.1.x node and a 0.2.0 node cannot share a link. The
+ * bump is what keeps that refusal at the handshake (FED_BAD_VERSION, counted,
+ * link never established) instead of letting it surface as malformed S-lines
+ * on an established link. Additive-only changes (SNICK was one) do not bump. */
+#define IRC_SERVE_VERSION "irc-serve-0.2.0"
 
 /* Issue #173: the federation secret bound. The DOCUMENTED bound lives in
  * federation/link.h (why 128, why refused-not-truncated); this is the same
@@ -1062,8 +1071,8 @@ struct server {
      * inside the event loop"). The tick's T7 arm dials only a link that has
      * `initiator != 0` AND `addrlen != 0`, and both of those are set by that one
      * function. A learned advertisement cannot reach either field because there
-     * is no API that would let it, and `fed_advertised_*` below returns TEXT for
-     * logs and counters and nothing else.
+     * is no API that would let it, and `fed_advertised_count` below returns a COUNT
+     * for counters and nothing else.
      *
      * A future reader who wants to dial from this store is about to introduce an
      * SSRF and must first write the threat model that makes it acceptable: which

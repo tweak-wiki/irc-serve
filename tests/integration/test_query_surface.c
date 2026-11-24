@@ -266,7 +266,7 @@ int main(void)
 
         from = drain(&alice);
         TF_CHECK_MSG(tc_send(&alice.c, "LUSERS") == 0, "LUSERS send failed");
-        end = drain(&alice);
+        (void)drain(&alice);
         at254 = strstr(tc_buffer(&alice.c) + from, ":" BIN_NAME " 254 alice ");
         TF_CHECK_MSG(at254 != NULL,
                      "LUSERS did not report 254 RPL_LUSERCHANNELS while %zu channels "

@@ -494,8 +494,12 @@ static const struct {
      * is `*` here because this fixture's client never authenticated. `*` is the
      * protocol's spelling of "not logged in to an account", and putting it in the
      * expected wire line rather than leaving the row three-wide is what makes the
-     * format change visible in this test instead of only in the acceptance. */
-    { "JOIN",    "SJOIN",    CHAN " " CLIENT_NICK " - *", NULL, NULL, 0 },
+     * format change visible in this test instead of only in the acceptance. The
+     * fifth and sixth are the 4.3 extension (#563): the joiner's ident and
+     * observed host -- `- -` here, because this fixture has no channel and the
+     * shaper falls back to the "not told" spelling rather than failing. The
+     * end-to-end case below pins the real values on a live membership. */
+    { "JOIN",    "SJOIN",    CHAN " " CLIENT_NICK " - * - -", NULL, NULL, 0 },
     { "PART",    "SPART",    CLIENT_NICK " " CHAN " :" TEXT, TEXT, NULL, 1 },
     { "TOPIC",   "STOPIC",   CLIENT_NICK " " CHAN " :" TEXT, TEXT, NULL, 1 },
     /* SMODES' subject is the SERVER that evaluated the change, per 2.2, and it
@@ -763,7 +767,7 @@ int main(void)
         (void)snprintf(hostmask, sizeof hostmask, "%s!%s@%s", CLIENT_NICK,
                        CLIENT_NICK, CLIENT_HOST);
         want_line(want, sizeof want, hostmask, epoch, 48u, 0u, "SJOIN",
-                  CHAN " " CLIENT_NICK " +o *");
+                  CHAN " " CLIENT_NICK " +o * " CLIENT_NICK " " CLIENT_HOST);
     }
     TF_CHECK_MSG(drive_until(&s, &cli, &peer, &peer, want, T_IO_MS) == 0,
                  "a JOIN did not reach the owning server, so 3.1's state-change "

@@ -215,7 +215,7 @@ endif()
 target_include_directories(irc_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 
 # Executable for federated node
-add_executable(irc-serve node_main.c)
+add_executable(irc-serve node_main.c node_opts.c)
 target_link_libraries(irc-serve PRIVATE irc_core)
 
 install(TARGETS irc-serve RUNTIME DESTINATION bin)

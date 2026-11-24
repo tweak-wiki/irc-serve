@@ -16,7 +16,10 @@
  * through the field's own policy, and SMODES through chan_mode_implemented(). */
 #include "core/connection.h"
 #include "core/channel.h"
+#include "core/message.h"
 #include "core/fanout.h"
+#include "core/cap.h"
+#include "core/reply.h"
 #include "federation/burst.h"
 #include "federation/dedup.h"
 #include "federation/link.h"
@@ -370,7 +373,14 @@ static const struct {
      * read from the wrong place rather than a visible error. */
     { "STOPIC",   2, STRIP_STORED },
     { "SKICK",    3, STRIP_STORED },
-    { "SMODES",   2, STRIP_STORED }
+    { "SMODES",   2, STRIP_STORED },
+    /* The 4.3 extension's free-text fields (#563): the realname SSETNAME carries
+     * and the message SAWAY carries, both STORED -- a receiving node renders
+     * them to its own clients, and the stored-value policy is what the client
+     * path applies to the same values. SINVITE has no free text (channel and
+     * nick are validated names), so it needs no row. */
+    { "SSETNAME", 1, STRIP_STORED },
+    { "SAWAY",    1, STRIP_STORED }
 };
 #define OUTBOUND_TEXT_COUNT \
     ((int)(sizeof OUTBOUND_TEXT / sizeof OUTBOUND_TEXT[0]))
@@ -737,6 +747,50 @@ static int fed_member_account(const chan_t *ch, const char *nick, char *out,
     return fed_account_token("", out, cap);
 }
 
+/* The member's ident and visible host as 4.3's extended SJOIN carries them.
+ *
+ * READ OUT OF THE MEMBERSHIP, like the flags and the account above, and only
+ * ever asked at the ORIGIN: fed_sverb_params() runs where the membership was
+ * just made, so the member is local and the connection is its authority. A
+ * relay never re-shapes, so this never sees a remote member in practice -- but
+ * the fallback is `*`/`-`-shaped anyway rather than a refusal, for the same
+ * reason fed_member_account() falls back to `*`: shaping a JOIN must not fail
+ * for a record that is already gone.
+ *
+ * `-` IS THE EMPTY SPELLING for both fields (burst.c's burst_mid_or_dash()
+ * contract), and it is translated back to "" on receipt. The copies cannot
+ * truncate -- the scratch is sized for the widest value each conn_t field can
+ * hold -- so a short buffer is a caller bug and refused rather than cut. */
+static int fed_member_hostmask(const chan_t *ch, const char *nick, char *user,
+                               size_t user_cap, char *host, size_t host_cap)
+{
+    const struct member *local;
+
+    if (nick == NULL || user == NULL || host == NULL || user_cap < 2u ||
+        host_cap < 2u) {
+        return 0;
+    }
+    if (ch != NULL) {
+        local = chan_find_nick(ch, nick);
+        if (local != NULL && local->c != NULL) {
+            const char *u = (local->c->user[0] != '\0') ? local->c->user : "-";
+            const char *h = (local->c->host[0] != '\0') ? local->c->host : "-";
+
+            if (strlen(u) + 1u > user_cap || strlen(h) + 1u > host_cap) {
+                return 0;
+            }
+            memcpy(user, u, strlen(u) + 1u);
+            memcpy(host, h, strlen(h) + 1u);
+            return 1;
+        }
+    }
+    user[0] = '-';
+    user[1] = '\0';
+    host[0] = '-';
+    host[1] = '\0';
+    return 1;
+}
+
 static unsigned fed_member_flags(const chan_t *ch, const char *nick)
 {
     const struct member *local;
@@ -807,7 +861,7 @@ int fed_sverb_params(const char *client_verb, const char *target,
     }
 
     if (strcmp(client_verb, "JOIN") == 0) {
-        /* <channel> <member> <flags> <account>.
+        /* <channel> <member> <flags> <account> <user> <host>.
          *
          * THE ACCOUNT IS THE FOURTH PARAMETER AND IT IS DERIVED FROM THE CHANNEL
          * HERE, for exactly the reason `<flags>` is: both are properties of the
@@ -818,11 +872,20 @@ int fed_sverb_params(const char *client_verb, const char *target,
          * "not logged in to an account", and it is what BOTH of those render as
          * when there is nothing.
          *
-         * THE PEER ALWAYS GETS THE SAME FOURTH PARAMETER, which is the reason the
+         * <user> and <host> are the 4.3 extension (#563): the member's ident and
+         * visible host, read out of the member's OWN CONNECTION -- the same
+         * authority the flags and the account come from, because the forwarder
+         * is the node that just made the membership. `-` is the empty spelling
+         * for both (burst.c's burst_mid_or_dash() contract, mirrored), because
+         * a middle parameter cannot be empty on this wire and a connection with
+         * no ident is a legal state. The copies cannot truncate: the scratch
+         * fields are sized for the widest value each conn_t field can hold.
+         *
+         * THE PEER ALWAYS GETS THE SAME SIX PARAMETERS, which is the reason the
          * client-facing `extended` shape is not handed to the forward
          * (fanout.h): which of this node's CLIENTS negotiated `extended-join` must
          * not change what this node says to a peer. */
-        if (n != 1 || nparams != 0 || cap < 4) {
+        if (n != 1 || nparams != 0 || cap < 6) {
             return -1;
         }
         if (fed_flag_token(fed_member_flags(ch, member), scratch->flags,
@@ -833,9 +896,15 @@ int fed_sverb_params(const char *client_verb, const char *target,
                                sizeof scratch->account) == 0) {
             return -1;
         }
+        if (fed_member_hostmask(ch, member, scratch->user, sizeof scratch->user,
+                                scratch->host, sizeof scratch->host) == 0) {
+            return -1;
+        }
         out[n++] = member;
         out[n++] = scratch->flags;
         out[n++] = scratch->account;
+        out[n++] = scratch->user;
+        out[n++] = scratch->host;
         return n;
     }
     if (strcmp(client_verb, "PART") == 0) {
@@ -1137,22 +1206,47 @@ static void fed_in_message(server_t *s, fanout_target_t *t, const char *prefix,
            strlen((prefix != NULL) ? prefix : "?"),
            conn_text_bad_count((prefix != NULL) ? prefix : "?"));
 }
+/* The local half of an inbound state verb: resolve the channel and write the
+ * CLIENT-shaped line to local members, with NO forward. The forward is the
+ * handler's existing fanout_forward_channel_sverb() call, which is untouched:
+ * this only adds the local emission fed_in_message() has always had. One
+ * helper rather than inline code in seven handlers, so the resolve class
+ * cannot drift between them: every state verb resolves FANOUT_STATE_CHANGE,
+ * and deliver_local writes to members of either channel kind without
+ * forwarding, which is exactly the half that was missing. */
+static void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
+                           const char *verb, const char *const *params, int nparams)
+{
+    fanout_target_t t;
 
-/* SJOIN: <channel> <member> <flags>. */
+    if (ch == NULL || verb == NULL) {
+        return;
+    }
+    if (fanout_resolve(s, NULL, ch->name, FANOUT_STATE_CHANGE, &t) == 0) {
+        return;
+    }
+    (void)fanout_deliver_local(s, &t, prefix, verb, params, nparams, NULL);
+}
+
+/* SJOIN: <channel> <member> <flags> <account> <user> <host>. */
 static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
                          const char *prefix, const irc_serve_tags_t *tags,
                          const char *const *params, int nparams)
 {
     unsigned flags = 0u;
 
-    /* FOUR PARAMETERS NOW, not three: `<channel> <member> <flags> <account>`, and
-     * the arity is the FORMAT's and is enforced here rather than guessed at, which
-     * is the reason the table in this file carries an SJOIN row of 4,4. A peer
-     * running a build without 4.3's extension sends three and is refused, which is
-     * a loud incompatibility rather than a member silently recorded with no
-     * account -- and the same direction 4.3.1 chose for `<server>`, which was added
-     * before a second implementation existed rather than after. */
-    if (nparams != 4 || fed_parse_flags(params[2], &flags) != 0 ||
+    /* SIX PARAMETERS NOW, not four: `<channel> <member> <flags> <account> <user>
+     * <host>`, and the arity is the FORMAT's and is enforced here rather than
+     * guessed at, which is the reason the table in this file carries an SJOIN
+     * row of 6,6. A peer running a build without the 4.3 extension sends four
+     * and is refused, which is a loud incompatibility rather than a member
+     * silently recorded with no host -- and the same direction 4.3.1 chose for
+     * `<server>`, which was added before a second implementation existed rather
+     * than after. The version bump is what keeps the two builds from linking at
+     * all, so this refusal is a backstop rather than a case that happens. */
+    if (nparams != 6 || fed_parse_flags(params[2], &flags) != 0 ||
+        strlen(params[4]) > (size_t)CONN_USER_MAX ||
+        strlen(params[5]) > (size_t)CHAN_MAX_REMOTE_HOST ||
         /* NULL for the HOLDER, and that absence is the whole of what an SJOIN can
          * say about one: 4.3's SJOIN carries no server field, so the holder is
          * unknown and is recorded as such ("not told", which chan_remote_add()
@@ -1179,6 +1273,20 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
                conn_text_bad_count((nparams > 1) ? params[1] : "?"));
         return;
     }
+    /* <user> and <host>, the 4.3 extension's fields: `-` is "not told" (the
+     * sender's spelling of an empty ident or host), translated to "" on receipt
+     * the way the account's `*` is. Set SEPARATELY from the add above, the way
+     * burst.c installs them from its shadow records: the two have different
+     * failure modes, and a refusal of one must not cost the other. The length
+     * check above means the setters cannot fail on width here. */
+    (void)chan_remote_set_user(ch, link->name, params[1],
+                               (params[4][0] == '-' && params[4][1] == '\0')
+                                   ? ""
+                                   : params[4]);
+    (void)chan_remote_set_host(ch, link->name, params[1],
+                               (params[5][0] == '-' && params[5][1] == '\0')
+                                   ? ""
+                                   : params[5]);
     /* 2.1's REGISTRY, on the LIVE path and not only on the burst path, and the
      * reason is that a burst is per link ESTABLISHMENT: a member who joined this
      * node's mesh ten minutes after the last one would be unknown to a registry
@@ -1203,6 +1311,11 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
            "local=%zu remote=%zu origin=%s owned=%d member_len=%zu member_bad_bytes=%zu\n",
            ch->name, params[1], link->name, flags, ch->nmembers, ch->nremotes,
            ch->origin, chan_origin_is_self(s, ch), strlen(params[1]), conn_text_bad_count(params[1]));
+    /* The JOIN this node's own clients see. The prefix is the observed one --
+     * the joiner's hostmask on a well-formed mesh -- passed through for the
+     * reason fed_in_message() gives: a client is never sent an S-verb, and the
+     * only hostmask this node has for the joiner is the one on the line. */
+    fed_local_emit(s, ch, prefix, "JOIN", NULL, 0);
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SJOIN", prefix,
                                        params, nparams, tags);
 }
@@ -1281,6 +1394,15 @@ static void fed_in_snick(server_t *s, server_link_t *link, const char *prefix,
              * fanout is the only path to a client that exists. */
             (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SNICK",
                                                link->name, params, nparams, tags);
+            /* The NICK the channel's own clients see: old nick as the prefix
+             * with the new nick as the parameter, exactly the shape nickreg.c
+             * renders for a local rename. */
+            {
+                const char *lp[1];
+
+                lp[0] = params[1];
+                fed_local_emit(s, ch, params[0], "NICK", lp, 1);
+            }
         }
     }
     if (renamed == 0) {
@@ -1294,6 +1416,366 @@ static void fed_in_snick(server_t *s, server_link_t *link, const char *prefix,
         fed_obs("[observable] fed_snick: server=%s from=%s to=%s rosters=%d to_len=%zu to_bad_bytes=%zu\n",
                link->name, params[0], params[1], renamed, strlen(params[1]), conn_text_bad_count(params[1]));
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * THE 4.3 EXTENSION'S INBOUND HALF (#563): SSETNAME, SAWAY, SINVITE
+ * ---------------------------------------------------------------------------
+ *
+ * These three name NO server and fit no INBOUND row: SSETNAME and SAWAY name
+ * only a nick (like SNICK), and SINVITE names a channel AND a user (like
+ * nothing in the table -- the rows resolve a target and relay a channel state
+ * change, and an invite is neither). So they are asked beside SQUIT/SNICK,
+ * after the burst family and before the table, and the whole guard chain above
+ * -- G1's link state, G4's identity, G5's hop ceiling, G6's own-origin refusal
+ * and G7's dedup -- has already run for them. A handler below that applied
+ * nothing and forwarded nothing would be a verb-shaped hole in the mesh.
+ *
+ * THE SUBJECT'S SERVER IS THE ARRIVAL LINK, exactly as SNICK's member server
+ * is: a rename does not move anybody between servers, and neither does a
+ * realname change, an away transition or an invitation. A peer can therefore
+ * only ever report on nicks attributed to itself, and a lying peer's blast
+ * radius is its own roster entries -- the same bound SNICK's prefix rule gives.
+ * The prefix is IGNORED for attribution (it is the origin's render of the
+ * setter's hostmask, for the log and for nothing else), with one exception:
+ * SINVITE's prefix is PRESERVED on relay because the delivered client line is
+ * prefixed with it, and a relay that rewrote it would deliver a lie about who
+ * invited.
+ *
+ * STATELESS EXCEPT FOR THE ROSTER THEY STAND ON. Neither SSETNAME nor SAWAY
+ * stores anything: there is no remote WHOIS in this build (nickreg.h records
+ * the decision), so a stored realname or away text would have no reader, and a
+ * field with no reader is a field whose staleness nobody can observe. What
+ * they do is notify: the local members this node holds in a channel with the
+ * remote member get the same client line the origin's own members got, through
+ * the same capability gates. A member who joins afterwards learns nothing --
+ * the same limit the local emissions already disclose, and the burst does not
+ * close it either (frozen SBURSTN carries away but no realname). Stated rather
+ * than solved: solving it is a roster field per channel per member, which is
+ * the next change and not this one. */
+
+/* The relay: every ESTABLISHED link except the one this arrived on, with the
+ * SAME tags. SQUIT's broadcast loop with SQUIT's exclusions, minus the
+ * departed-server one (these verbs name no server). Carrying the tags is what
+ * keeps the loop from running for ever: the arrival link's echo would arrive
+ * with an id this node already recorded, and G7 drops it as a duplicate. The
+ * exclusion is still written out rather than relied on dedup for, because a
+ * counter that must move for correctness and a counter that moves by accident
+ * read the same on a dashboard. */
+static void fed_relay_notify(server_t *s, server_link_t *link, const char *sverb,
+                             const char *prefix, const char *const *params,
+                             int nparams, const irc_serve_tags_t *tags)
+{
+    size_t k;
+
+    for (k = 0; k < server_link_count(s); k++) {
+        server_link_t *lk = server_link_at(s, k);
+
+        if (lk == NULL || lk == link || lk->state != (int)ESTABLISHED) {
+            continue;
+        }
+        (void)fanout_forward_sverb(s, lk->name, sverb, prefix, params, nparams,
+                                   tags);
+    }
+}
+
+/* The notifier's hostmask as this node renders it: `nick!user@host` from the
+ * remote roster entry this node holds for (nick, link). Mirrors conn_hostmask()
+ * byte for byte -- the same snprintf, the same truncation refusal -- because
+ * the line it prefixes is the same line the origin's own members got, and a
+ * second rendering rule would put a different author on the two halves of one
+ * event. Returns NULL when this node holds no entry (a user in no channel this
+ * node knows): the caller notifies nothing then, and still relays -- the
+ * downstream node may hold the channel. */
+static const char *fed_notify_prefix(server_t *s, server_link_t *link,
+                                     const char *nick, char *out, size_t cap)
+{
+    size_t ci;
+    int n;
+
+    for (ci = 0; ci < server_chan_count(s); ci++) {
+        chan_t *ch = server_chan_at(s, ci);
+        size_t i;
+
+        if (ch == NULL) {
+            continue;
+        }
+        for (i = 0; i < ch->nremotes; i++) {
+            const chan_remote_t *r = &ch->remotes[i];
+
+            if (!chan_same_name(r->server, link->name) ||
+                !chan_same_name(r->nick, nick)) {
+                continue;
+            }
+            n = snprintf(out, cap, "%s!%s@%s", r->nick, r->user, r->host);
+            if (n < 0 || (size_t)n >= cap) {
+                out[0] = '\0';
+                return NULL;
+            }
+            return out;
+        }
+    }
+    return NULL;
+}
+
+/* Collect the channels whose roster holds (nick, link->name) into `found`.
+ * Returns how many, capped at `cap`. The caller notifies that set: the local
+ * members of every channel the subject shares with them. A member of three
+ * shared channels is reached through the union once for SETNAME (whose line
+ * names no channel) and three times for AWAY (whose line names each one),
+ * which is why this returns the SET rather than notifying inside the walk. */
+static size_t fed_notify_channels(server_t *s, server_link_t *link,
+                                 const char *nick, chan_t **found, size_t cap)
+{
+    size_t n = 0u;
+    size_t ci;
+
+    for (ci = 0; ci < server_chan_count(s); ci++) {
+        chan_t *ch = server_chan_at(s, ci);
+        size_t i;
+
+        if (ch == NULL) {
+            continue;
+        }
+        for (i = 0; i < ch->nremotes; i++) {
+            if (!chan_same_name(ch->remotes[i].server, link->name) ||
+                !chan_same_name(ch->remotes[i].nick, nick)) {
+                continue;
+            }
+            if (n < cap) {
+                found[n++] = ch;
+            }
+            break;
+        }
+    }
+    return n;
+}
+
+/* SSETNAME <nick> :<realname>. */
+static void fed_in_ssetname(server_t *s, server_link_t *link,
+                            const irc_serve_tags_t *tags,
+                            const char *const *params, int nparams)
+{
+    char prefix[CONN_HOSTMASK_MAX];
+    const char *pp;
+    (void)tags;
+    fanout_form_t plain;
+    const char *rp[1];
+    chan_t **channels;
+    size_t nchans;
+    size_t nfound;
+    int delivered;
+
+    /* The realname is last and always present: an SSETNAME naming no value is
+     * a peer running a different format, and G9's arity rule for the table
+     * verbs applies here in prose -- refuse rather than guess. The value runs
+     * the same predicate both client writers ran, because a value with two
+     * writers needs the writers to agree (connection.h). */
+    if (nparams != 2 || conn_realname_check(params[1]) != CONN_REALNAME_OK) {
+        s->n_fed_malformed++;
+        fed_obs("[observable] fed_malformed: fd=%d command=SSETNAME field=%s "
+               "nparams=%d nick_len=%zu nick_bad_bytes=%zu\n",
+               link->fd, (nparams != 2) ? "arity" : "realname", nparams,
+               strlen((nparams > 0) ? params[0] : "?"),
+               conn_text_bad_count((nparams > 0) ? params[0] : "?"));
+        return;
+    }
+    if (!valid_nick(params[0])) {
+        s->n_fed_malformed++;
+        fed_obs("[observable] fed_malformed: fd=%d command=SSETNAME field=nick "
+               "nparams=%d nick_len=%zu nick_bad_bytes=%zu\n",
+               link->fd, nparams, strlen(params[0]),
+               conn_text_bad_count(params[0]));
+        return;
+    }
+    /* THE RELAY FIRST, and the order is deliberate: the notify below walks
+     * this node's roster, and a relay that ran after it would still run -- the
+     * two do not interact -- but a reader checking "did this node forward what
+     * it applied" should find the forward unconditional on whether this node
+     * had anything to notify. A relay that shares no channel with the subject
+     * still carries the line onward. */
+    fed_relay_notify(s, link, "SSETNAME", NULL, params, nparams, NULL);
+    pp = fed_notify_prefix(s, link, params[0], prefix, sizeof prefix);
+    if (pp == NULL) {
+        fed_obs("[observable] fed_ssetname: server=%s nick=%s rosters=0\n",
+               link->name, params[0]);
+        return;
+    }
+    nchans = server_chan_count(s);
+    channels = (chan_t **)malloc((nchans > 0u ? nchans : 1u) * sizeof *channels);
+    if (channels == NULL) {
+        return;
+    }
+    nfound = fed_notify_channels(s, link, params[0], channels, nchans);
+    rp[0] = params[1];
+    plain.params = rp;
+    plain.nparams = 1;
+    delivered = fanout_deliver_union_local_gated(s, channels, nfound, pp,
+                                                 "SETNAME", &plain, NULL,
+                                                 cap_gate_setname, NULL, NULL);
+    free(channels);
+    fed_obs("[observable] fed_ssetname: server=%s nick=%s channels=%zu "
+           "recipients=%d realname_len=%zu realname_bad_bytes=%zu\n",
+           link->name, params[0], nfound, delivered, strlen(params[1]),
+           conn_text_bad_count(params[1]));
+}
+
+/* SAWAY <nick> [:<message>]. */
+static void fed_in_saway(server_t *s, server_link_t *link,
+                         const irc_serve_tags_t *tags,
+                         const char *const *params, int nparams)
+{
+    char prefix[CONN_HOSTMASK_MAX];
+    const char *pp;
+    size_t ci;
+    int delivered = 0;
+    size_t nchans = 0u;
+
+    /* One parameter is "back", two is "away with this message" -- the client's
+     * own AWAY grammar, applied to a nick. An empty trailing parameter is not
+     * a third shape: 3.2 drops empty middle tokens and `AWAY #c :` parses to
+     * one parameter, so the cleared edge arrives as one parameter here too. */
+    if ((nparams != 1 && nparams != 2) || !valid_nick(params[0])) {
+        s->n_fed_malformed++;
+        fed_obs("[observable] fed_malformed: fd=%d command=SAWAY field=%s "
+               "nparams=%d nick_len=%zu nick_bad_bytes=%zu\n",
+               link->fd,
+               (nparams != 1 && nparams != 2) ? "arity" : "nick", nparams,
+               strlen((nparams > 0) ? params[0] : "?"),
+               conn_text_bad_count((nparams > 0) ? params[0] : "?"));
+        return;
+    }
+    fed_relay_notify(s, link, "SAWAY", NULL, params, nparams, tags);
+    pp = fed_notify_prefix(s, link, params[0], prefix, sizeof prefix);
+    if (pp == NULL) {
+        fed_obs("[observable] fed_saway: server=%s nick=%s rosters=0\n",
+               link->name, params[0]);
+        return;
+    }
+    /* PER CHANNEL, like the local notify_away(): the client's own AWAY line
+     * names each channel (`AWAY #chan :message`), so a member of three shared
+     * channels gets three true lines, and the gate is asked per destination
+     * the same way. The walk is over the channels that hold the subject, not
+     * over the subject's membership -- a remote member has no conn_t whose
+     * channel list could be walked. */
+    for (ci = 0; ci < server_chan_count(s); ci++) {
+        chan_t *ch = server_chan_at(s, ci);
+        fanout_form_t plain;
+        const char *ap[1];
+        fanout_target_t t;
+        size_t i;
+        int holds = 0;
+
+        if (ch == NULL || ch->name[0] == '\0') {
+            continue;
+        }
+        for (i = 0; i < ch->nremotes; i++) {
+            if (chan_same_name(ch->remotes[i].server, link->name) &&
+                chan_same_name(ch->remotes[i].nick, params[0])) {
+                holds = 1;
+                break;
+            }
+        }
+        if (holds == 0) {
+            continue;
+        }
+        if (conn_text_display_check(ch->name) != CONN_DISPLAY_OK) {
+            continue;
+        }
+        nchans++;
+        memset(&t, 0, sizeof t);
+        t.kind = FANOUT_LOCAL_CHANNEL;
+        t.vclass = FANOUT_MESSAGE;
+        t.chan = ch;
+        memcpy(t.name, ch->name, sizeof t.name);
+        if (nparams == 2) {
+            ap[0] = params[1];
+            plain.params = ap;
+            plain.nparams = 1;
+        } else {
+            plain.params = NULL;
+            plain.nparams = 0;
+        }
+        delivered += fanout_deliver_local_gated(s, &t, pp, "AWAY", &plain, NULL,
+                                                cap_gate_away_notify, NULL,
+                                                NULL);
+    }
+    fed_obs("[observable] fed_saway: server=%s nick=%s channels=%zu "
+           "recipients=%d state=%s\n",
+           link->name, params[0], nchans, delivered,
+           (nparams == 2) ? "set" : "cleared");
+}
+
+/* SINVITE <channel> <target>: the inviter's hostmask is the prefix. */
+static void fed_in_sinvite(server_t *s, server_link_t *link,
+                           const irc_serve_tags_t *tags, const char *prefix,
+                           const char *const *params, int nparams)
+{
+    chan_t *ch;
+    conn_t *target;
+    const char *ip[2];
+    fanout_form_t plain;
+    chan_t *one[1];
+    int delivered;
+
+    /* The channel this node must hold: an invite names one, and a channel this
+     * node has never heard of is the ordinary "not a member of my mesh" case
+     * the message verbs count as malformed rather than create from. The target
+     * is a nickname by the same charset the roster enforces. */
+    if (nparams != 2 || !chan_name_valid(params[0]) ||
+        !valid_nick(params[1])) {
+        s->n_fed_malformed++;
+        fed_obs("[observable] fed_malformed: fd=%d command=SINVITE field=%s "
+               "nparams=%d channel_len=%zu channel_bad_bytes=%zu\n",
+               link->fd,
+               (nparams != 2) ? "arity"
+                              : (!chan_name_valid(params[0]) ? "channel"
+                                                             : "target"),
+               nparams, strlen((nparams > 0) ? params[0] : "?"),
+               conn_text_bad_count((nparams > 0) ? params[0] : "?"));
+        return;
+    }
+    ch = server_chan_get(s, params[0]);
+    if (ch == NULL) {
+        s->n_fed_malformed++;
+        fed_obs("[observable] fed_malformed: fd=%d command=SINVITE field=channel "
+               "nparams=%d channel_len=%zu channel_bad_bytes=%zu\n",
+               link->fd, nparams, strlen(params[0]),
+               conn_text_bad_count(params[0]));
+        return;
+    }
+    /* Relay first, unconditional on whether this node holds the invitee --
+     * the downstream node may, and the line must reach it. The prefix is
+     * PRESERVED: it is the inviter's hostmask and the delivered line carries
+     * it, so a relay that replaced it would name the wrong author. */
+    fed_relay_notify(s, link, "SINVITE", prefix, params, nparams, tags);
+    /* THE INVITEE, if local: the same `:inviter INVITE <target> <channel>`
+     * line the local handler delivers, through the same door. A remote
+     * invitee is the relay's business, which just ran. */
+    target = server_nick_lookup(s, params[1]);
+    if (target != NULL) {
+        ip[0] = params[1];
+        ip[1] = params[0];
+        (void)send_line(s, target,
+                        (prefix != NULL && prefix[0] != '\0') ? prefix
+                                                              : link->name,
+                        "INVITE", ip, 2);
+    }
+    /* THE CHANNEL'S OWN MEMBERS, with the invite-notify gate: the same
+     * audience the local handler notifies, minus the inviter exclusion (the
+     * inviter is not local -- its 341 was the origin's business). */
+    one[0] = ch;
+    ip[0] = params[1];
+    ip[1] = params[0];
+    plain.params = ip;
+    plain.nparams = 2;
+    delivered = fanout_deliver_union_local_gated(
+        s, one, 1u, (prefix != NULL && prefix[0] != '\0') ? prefix : link->name,
+        "INVITE", &plain, NULL, cap_gate_invite_notify, NULL, NULL);
+    fed_obs("[observable] fed_sinvite: server=%s channel=%s target=%s "
+           "local=%d recipients=%d\n",
+           link->name, params[0], params[1], (target != NULL) ? 1 : 0,
+           delivered);
 }
 
 /* Does this node ALREADY hold a link to the server called `name`? The
@@ -1369,14 +1851,6 @@ static struct fed_advert *advert_table(server_t *s)
     return s->advs;
 }
 
-/* The advertised fields of one peer, FOR A LOG OR A COUNTER. This is the whole
- * read surface of the store, and its return type is the enforcement of the SSRF
- * property as much as the comment is: it hands out two bounded strings and two
- * numbers, and there is no function in this file that returns a sockaddr, a
- * server_link_t or anything the dial path could be built from. */
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out);
 
 /* ADVERTISE <load%> [<name> <host> <port>].
  *
@@ -1641,48 +2115,6 @@ static void fed_in_advertise(server_t *s, server_link_t *link, const char *prefi
     }
 }
 
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out)
-{
-    size_t i;
-
-    if (name != NULL && name_cap > 0u) {
-        name[0] = '\0';
-    }
-    if (host != NULL && host_cap > 0u) {
-        host[0] = '\0';
-    }
-    if (port_out != NULL) {
-        *port_out = 0u;
-    }
-    if (load_out != NULL) {
-        *load_out = 0u;
-    }
-    if (s == NULL || s->advs == NULL || peer == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < s->nadv; i++) {
-        if (!chan_same_name(s->advs[i].peer, peer)) {
-            continue;
-        }
-        if (name != NULL) {
-            (void)bounded_copy(name, name_cap, s->advs[i].name);
-        }
-        if (host != NULL) {
-            (void)bounded_copy(host, host_cap, s->advs[i].host);
-        }
-        if (port_out != NULL) {
-            *port_out = s->advs[i].port;
-        }
-        if (load_out != NULL) {
-            *load_out = s->advs[i].load_pct;
-        }
-        return s->advs[i].name;
-    }
-    return NULL;
-}
-
 size_t fed_advertised_count(const server_t *s)
 {
     return (s != NULL) ? s->nadv : 0u;
@@ -1849,6 +2281,18 @@ static void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
     fed_touch_server(ch, link->name, 0);
     fed_obs("[observable] fed_spart: channel=%s member=%s server=%s remote=%zu\n",
            ch->name, params[0], link->name, ch->nremotes);
+    /* The PART this node's own clients see, with the reason stripped the way
+     * the local PART path strips it -- announced nowhere else, stored nowhere. */
+    if (nparams > 2) {
+        char clean[CHAN_MAX_PART_REASON + 1u];
+        const char *lp[1];
+
+        (void)conn_text_strip(clean, sizeof clean, params[2], STRIP_STORED);
+        lp[0] = clean;
+        fed_local_emit(s, ch, prefix, "PART", lp, 1);
+    } else {
+        fed_local_emit(s, ch, prefix, "PART", NULL, 0);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SPART", prefix,
                                        params, nparams, tags);
     (void)chan_dispose_if_empty(s, ch);
@@ -1964,6 +2408,14 @@ static void fed_in_stopic(server_t *s, server_link_t *link, chan_t *ch,
     }
     fed_obs("[observable] fed_topic: channel=%s member=%s len=%zu\n", ch->name,
            params[0], strlen(ch->topic));
+    /* ch->topic, NOT params[2]: the stored value is the stripped one, and the
+     * local echo of a locally-set topic renders the same stored field. */
+    {
+        const char *lp[1];
+
+        lp[0] = ch->topic;
+        fed_local_emit(s, ch, prefix, "TOPIC", lp, 1);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "STOPIC", prefix,
                                        params, nparams, tags);
 }
@@ -2223,6 +2675,27 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
                (applied[0] != '\0') ? applied : "-",
                (refused[0] != '\0') ? refused : "-", ch->modes, strlen(ch->modes), conn_text_bad_count(ch->modes));
     }
+    /* The MODE this node's own clients see: the mode string and the optional
+     * mask, stripped the way the stored values are. Both are peer-chosen, and
+     * the client line is a second reader the forward path's filter does not
+     * cover -- a control byte in either would otherwise reach a terminal. */
+    {
+        char clean_modes[CHAN_MAX_MODES + 1u];
+        char clean_mask[CHAN_MAX_BAN + 1u];
+        const char *lp[2];
+        int nlp = 1;
+
+        (void)conn_text_strip(clean_modes, sizeof clean_modes, params[2],
+                              STRIP_STORED);
+        lp[0] = clean_modes;
+        if (nparams > 3) {
+            (void)conn_text_strip(clean_mask, sizeof clean_mask, params[3],
+                                  STRIP_STORED);
+            lp[1] = clean_mask;
+            nlp = 2;
+        }
+        fed_local_emit(s, ch, prefix, "MODE", lp, nlp);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SMODES", prefix,
                                        params, nparams, tags);
 }
@@ -2279,6 +2752,19 @@ static void fed_in_skick(server_t *s, server_link_t *link, chan_t *ch,
             "target=%s target_len=%zu target_bad_bytes=%zu\n",
             ch->name, shown_by, strlen(params[0]), conn_text_bad_count(params[0]),
             shown_target, strlen(params[2]), conn_text_bad_count(params[2]));
+    /* The KICK this node's own clients see: target, then the reason stripped
+     * the way the local KICK path strips it. */
+    if (nparams > 3) {
+        char clean[CHAN_MAX_KICK_REASON + 1u];
+        const char *lp[2];
+
+        (void)conn_text_strip(clean, sizeof clean, params[3], STRIP_STORED);
+        lp[0] = params[2];
+        lp[1] = clean;
+        fed_local_emit(s, ch, prefix, "KICK", lp, 2);
+    } else {
+        fed_local_emit(s, ch, prefix, "KICK", &params[2], 1);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SKICK", prefix,
                                        params, nparams, tags);
     (void)chan_dispose_if_empty(s, ch);
@@ -2405,6 +2891,51 @@ static void fed_in_squit(server_t *s, server_link_t *link,
      * silently, and a channel that silently survives a purge is a roster the
      * operator is told is gone. chan_remote_purge() walks the same way for the
      * same reason. */
+    /* The QUIT each remaining local member sees, one per departed member of
+     * every channel it shares with the gone server. BEFORE the purge below,
+     * which is the only point the names are still known; the channels
+     * themselves are disposed in the walk, so a line for a member of a
+     * channel about to vanish still reaches the members who stay. The prefix
+     * is the stored hostmask where the burst path described the member, else
+     * the bare nick -- the same rule 353 renders by, and for the same reason. */
+    {
+        /* Stripped once, outside the walk: one reason for every channel, and
+         * the client line is a reader the forward path's filter does not
+         * cover. IRC_MAX_LINE always fits it, because the whole peer line
+         * already did. */
+        char clean_reason[IRC_MAX_LINE];
+        const char *qp[1] = { NULL };
+        int nqp = 0;
+
+        if (nparams > 1) {
+            (void)conn_text_strip(clean_reason, sizeof clean_reason, params[1],
+                                  STRIP_STORED);
+            qp[0] = clean_reason;
+            nqp = 1;
+        }
+        for (size_t ci = 0, nch = server_chan_count(s); ci < nch; ci++) {
+            chan_t *qch = server_chan_at(s, ci);
+
+            if (qch == NULL) {
+                continue;
+            }
+            for (size_t r = 0; r < qch->nremotes; r++) {
+                const chan_remote_t *m = &qch->remotes[r];
+                char mask[CONN_HOSTMASK_MAX];
+
+                if (!chan_same_name(m->server, gone)) {
+                    continue;
+                }
+                if (m->user[0] != '\0' && m->host[0] != '\0') {
+                    (void)snprintf(mask, sizeof mask, "%s!%s@%s", m->nick,
+                                   m->user, m->host);
+                } else {
+                    (void)snprintf(mask, sizeof mask, "%s", m->nick);
+                }
+                fed_local_emit(s, qch, mask, "QUIT", qp, nqp);
+            }
+        }
+    }
     while (i < server_chan_count(s)) {
         chan_t *ch = server_chan_at(s, i);
         int disposed;
@@ -2509,7 +3040,7 @@ int fed_forward_all(server_t *s, const char *sverb, const char *prefix,
  * run time.
  *
  * `min`/`max` are the parameter bounds, and they are the FROZEN shapes' bounds
- * rather than a range: an SJOIN is always three parameters, an SPART is two or
+ * rather than a range: an SJOIN is always six parameters, an SPART is two or
  * three, and a verb arriving with a different count is a peer running a
  * different format and is REFUSED rather than guessed at. Refusing is the safe
  * direction because the alternative -- reading params[1] of a two-parameter
@@ -2526,7 +3057,7 @@ static const struct {
 } INBOUND[] = {
     { "SPRIVMSG", 2, 2, NULL, FANOUT_MESSAGE,  "PRIVMSG" },
     { "SNOTICE",  2, 2, NULL, FANOUT_MESSAGE,  "NOTICE"  },
-    { "SJOIN",    4, 4, NULL, FANOUT_STATE_CHANGE, "JOIN"  },
+    { "SJOIN",    6, 6, NULL, FANOUT_STATE_CHANGE, "JOIN"  },
     { "SPART",    2, 3, NULL, FANOUT_STATE_CHANGE, "PART"  },
     { "STOPIC",   3, 3, NULL, FANOUT_STATE_CHANGE, "TOPIC" },
     { "SMODES",   3, 4, NULL, FANOUT_STATE_CHANGE, "MODE"  },
@@ -2935,6 +3466,36 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
             sp[i] = m->params[i];
         }
         fed_in_snick(s, link, m->prefix, &tags, sp, m->nparams);
+        return;
+    }
+
+    /* SSETNAME, SAWAY and SINVITE, in SNICK's place in the chain, for SNICK's
+     * reason: none of them fits INBOUND's position-indexed read. SSETNAME and
+     * SAWAY name no channel at all, and SINVITE names a channel AND a user --
+     * a row for it would resolve the wrong target and relay it as a channel
+     * state change, which an invite is not. They are asked AFTER the SNICK arm
+     * and BEFORE the table, so the guard chain above has already run: G1, G4,
+     * G5, G6 and G7 all apply, and a peer replaying one line under a new id
+     * is recorded rather than re-applied. */
+    if (strcmp(m->command, "SSETNAME") == 0) {
+        for (int i = 0; i < m->nparams && i < IRC_MAX_PARAMS; i++) {
+            sp[i] = m->params[i];
+        }
+        fed_in_ssetname(s, link, &tags, sp, m->nparams);
+        return;
+    }
+    if (strcmp(m->command, "SAWAY") == 0) {
+        for (int i = 0; i < m->nparams && i < IRC_MAX_PARAMS; i++) {
+            sp[i] = m->params[i];
+        }
+        fed_in_saway(s, link, &tags, sp, m->nparams);
+        return;
+    }
+    if (strcmp(m->command, "SINVITE") == 0) {
+        for (int i = 0; i < m->nparams && i < IRC_MAX_PARAMS; i++) {
+            sp[i] = m->params[i];
+        }
+        fed_in_sinvite(s, link, &tags, m->prefix, sp, m->nparams);
         return;
     }
 

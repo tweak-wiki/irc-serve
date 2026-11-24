@@ -1315,12 +1315,21 @@ format cannot be invented later).
 
 `FEDERATE` (link handshake — existing FSM) `SJOIN` `SPART` `SPRIVMSG` `SNOTICE`
 `STOPIC` `SNAMES` `SSMODE` `SKICK` `SQUIT` `SHASH` `SBURST` `SNICK` `ADVERTISE`
-`SHUTDOWN`
+`SHUTDOWN` `SSETNAME` `SAWAY` `SINVITE`
 
-`SJOIN` is `<channel> <member> <flags> <account>`: the account field is Phase
-10.3's and is `*` for a member who is not logged in to an account, derived from
-the membership exactly as the flags are. It is also `SBURSTM`'s fifth parameter,
-for the reason §4.3.1 records.
+The last three are the 4.3 extension (#563) and ride the `irc-serve-0.2.0`
+version: `FEDERATE` requires an exact version match, so a 0.1.x node refuses
+a 0.2.0 link at the handshake instead of misparsing the new shapes. Additive
+verbs need no table row elsewhere -- they are originated with `fed_forward_all()`
+and handled in `fed_dispatch()` ahead of the position-indexed table, because
+none of them names its channel in a fixed position.
+
+`SJOIN` is `<channel> <member> <flags> <account> <user> <host>`: the account field
+is Phase 10.3's and is `*` for a member who is not logged in to an account,
+derived from the membership exactly as the flags are. It is also `SBURSTM`'s fifth
+parameter, for the reason §4.3.1 records. `<user>` and `<host>` are the 4.3
+extension (#563): the member's ident and visible host, read from the joiner's own
+connection at the origin, with `-` as the "not told" spelling for an empty half.
 
 These are the internal verbs behind the client commands. Designing them as
 *distinct verbs* rather than reusing `JOIN`/`PRIVMSG` is what keeps the wire
