@@ -1962,6 +1962,19 @@ static void test_single_writer_rule(nf_node_t *node)
                        "own", ":irc.fixture 437 opa #TIE");
     expect_absent_from(tc_buffer(&op.c), window, "the refused KICK", " KICK ");
 
+    /* #561: local preconditions beat routing. `plain` is a member but holds no
+     * +o, so its KICK is refused 482 -- the refusal will never clear, so 437
+     * ("the origin is unreachable, retry later") would be the wrong answer.
+     * `op`'s KICK above still draws 437 because every local check passes for
+     * an operator naming a member who is there. */
+    window = tc_received(&plain.c);
+    client_send(&plain, "KICK #tie opa");
+    (void)send_and_drain_fix(&plain, "sw-482-kick");
+    expect_line(&plain.c, "482 for a non-op KICK on an orphaned channel",
+                ":irc.fixture 482 plb #TIE :You're not a channel operator\r\n");
+    expect_absent_from(tc_buffer(&plain.c), window, "the non-operator KICK",
+                       " 437 ");
+
     window = tc_received(&plain.c);
     client_send(&plain, "PART #tie");
     (void)send_and_drain_fix(&plain, "sw-437-part");
@@ -1969,11 +1982,11 @@ static void test_single_writer_rule(nf_node_t *node)
                         "not own", ":irc.fixture 437 plb #TIE");
     expect_absent_from(tc_buffer(&plain.c), window, "the refused PART", "PART #");
 
-    /* 482, not 437, would be wrong here for a different reason: authority is
-     * asked BEFORE privilege, so a node that answered 437 to everybody -- the
-     * "a node that answered 482 to everybody would pass the test" failure mode,
-     * in its other direction -- would be caught by the positive half below,
-     * where a state change on a channel the node DOES own still succeeds. */
+    /* The 437s above are drawn where every local check passes: privilege is
+     * asked BEFORE routing (#561), so a node that answered 437 to everybody is
+     * still caught by the positive half below, where a state change on a
+     * channel the node DOES own still succeeds -- and a node that answered 482
+     * to everybody now fails the 437 assertions above outright. */
 
     /* ---- and the channel is UNCHANGED ---- */
 
