@@ -1283,9 +1283,10 @@ static int init_runtime(server_t *srv, node_opts_t *opts)
      * ------------------------------------------------------------------------
      * It is loaded BEFORE the loop is armed and that is the whole of the design:
      * 3.4 forbids a blocking call inside the event loop, and reading a file is
-     * the most blocking call there is. Once loaded, the store is an in-memory
      * array on server_t and every AUTHENTICATE is a bounded linear scan of at
-     * most SASL_MAX_CREDENTIALS records.
+     * most ACCOUNT_MAX_RECORDS records -- the ONE user table (#538), loaded
+     * here from the legacy two-field file, and the same table core/account.c
+     * verifies logins against.
      *
      * A STORE THAT FAILED TO LOAD IS NOT A STARTUP FAILURE. The node comes up,
      * says so on stderr and in the startup line, and advertises no `sasl`. The
@@ -1520,7 +1521,7 @@ static int init_runtime(server_t *srv, node_opts_t *opts)
                (int)server_link_count(srv),
                secret_state,
                secret_source,
-               sasl_store_count(srv->sasl_store) > 0u ? "loaded" : "none",
+               account_store_count(srv->sasl_store) > 0u ? "loaded" : "none",
                account_store_count(srv->account_store) > 0u ? "loaded" : "none",
                tls_state, server_tls_port(srv),
                (unsigned)srv->sts_duration);

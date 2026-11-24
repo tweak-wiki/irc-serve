@@ -285,11 +285,11 @@ struct account_store {
     unsigned char salt[ACCOUNT_SALT_LEN];
 };
 
-/* ASCII-folded compare, for the same reason sasl_framework.c's authcid_eq()
- * exists: an account name is a nickname in every client that displays one, and
- * RFC 2812 2.3.1 says nicknames compare case-insensitively. Comparing
- * case-sensitively would let `Alice` and `alice` both exist, and which one a
- * client authenticated as would then decide what other users are shown. */
+/* ASCII-folded compare: an account name is a nickname in every client that
+ * displays one, and RFC 2812 2.3.1 says nicknames compare case-insensitively.
+ * Comparing case-sensitively would let `Alice` and `alice` both exist, and
+ * which one a client authenticated as would then decide what other users
+ * are shown. */
 static int name_eq(const char *a, const char *b)
 {
     size_t la = (a != NULL) ? strlen(a) : 0u;
@@ -364,18 +364,9 @@ void account_store_free(account_store_t *store)
      *
      * THE `volatile` IS THE POINT and it is not decorative: the compiler is
      * entitled to see a block of stores to memory it is about to release, prove
-     * the values are dead, and delete the writes. sasl_store_free() carries the
-     * identical pass for the identical reason, and this is the second copy
-     * rather than a shared helper on purpose -- see the note in the block
-     * comment below.
-     *
-     * WHY A COPY AND NOT A HELPER, since the argument has been made elsewhere in
-     * this tree (the federation modules' ASCII fold) and the answer here is different:
-     * the two stores are separate FILES, and a shared scrub helper would put a
-     * function in one of them that the other had to link -- which is the same
-     * coupling that account_store.h argues against for the records themselves.
-     * Six lines, written twice, is cheaper than a module boundary crossed to
-     * save six lines. */
+     * the values are dead, and delete the writes. This used to be written twice
+     * -- sasl_framework.c carried the identical pass for its own table -- and
+     * it is the sole copy now that there is one table (#538). */
     {
         volatile char *p = (volatile char *)store->rec;
         const size_t n = sizeof store->rec;
@@ -480,8 +471,7 @@ int account_store_add(account_store_t *store, const char *name,
     }
     /* A TAB cannot appear in either field: the first is the separator and the
      * second is what would follow it. A SPACE in the PASSWORD is allowed and is
-     * the reason the separator is a TAB rather than a split on whitespace --
-     * sasl_store_add() makes the same call for the same reason.
+     * the reason the separator is a TAB rather than a split on whitespace.
      *
      * AND THE NAME MUST BE PUBLISHABLE, which is the one asymmetry between the two
      * fields and it is Phase 10.3 that made it visible. A password never leaves
