@@ -132,6 +132,10 @@ add_library(irc_core STATIC
   core/reply.c
   core/resume.c
   core/fanout.c
+  # #543: the resolution family (mask match, nick lookup, target resolve,
+  # membership) split out of fanout.c. Delivery and forwarding stay there;
+  # this file holds the "what did this name refer to" half.
+  core/fanout_resolve.c
   core/commands.c
   # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
   # The dispatch table stays there; this file holds the verbs and their helpers.
