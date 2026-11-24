@@ -299,7 +299,7 @@ int main(void)
      * gone -- the same defect test_queries.c asserts against for ISON. */
     from = mark(&bob);
     TF_CHECK_MSG(tc_send(&bob.c, "AWAY :brb") == 0, "tc_send failed");
-    end = mark(&bob);
+    (void)mark(&bob);
     TF_CHECK_MSG(strstr(tc_buffer(&bob.c) + from, " 306 bob ") != NULL,
                  "bob's AWAY was not acknowledged, so the next assertion would "
                  "be about nothing");

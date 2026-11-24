@@ -83,14 +83,16 @@ int main(void)
     /* #281(a): the bound fired even though the lock never freed. The conn is
      * still attached -- #242 outranks the deadline -- but the socket is shut
      * down, so the wedged writer's next pump fails instead of pinning the fd
-     * and its queue. The peer end reads end-of-stream. */
+     * and its queue. The peer end reads end-of-stream. Read it after the
+     * unlock: the shutdown state persists, and a blocking read must not sit
+     * inside the critical section. */
+    TF_CHECK_MSG(pthread_mutex_unlock(&c->wq_lock) == 0, "unlock failed");
     {
         char b;
 
         TF_CHECK_MSG(read(pair[1], &b, sizeof b) == 0,
                      "past-deadline contention left the socket open");
     }
-    TF_CHECK_MSG(pthread_mutex_unlock(&c->wq_lock) == 0, "unlock failed");
 
     /* --- lock free and deadline expired: the bound holds, conn closes --- */
     TF_CHECK_MSG(server_reap(&s) == 1,
