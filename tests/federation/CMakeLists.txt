@@ -1,6 +1,6 @@
 # These are UNIT tests: they exercise a function directly, need no sockets, no
 # children and no loop, and link the library and nothing else. Two of them exercise
-# federation_handshake.c with a caller-owned context; the third exercises 2.1's
+# federation/handshake.c with a caller-owned context; the third exercises 2.1's
 # rename-the-loser comparison.
 add_executable(test_federate_handshake test_federate_handshake.c)
 add_executable(test_heartbeat test_heartbeat.c)
