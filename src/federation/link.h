@@ -962,25 +962,6 @@ void fed_set_load(server_t *s, unsigned pct);
  * it has no basis for. */
 void fed_set_shed_pct(server_t *s, unsigned pct);
 
-/* What one peer ADVERTISED, for a log or a counter. `name` and `host` are bounded
- * buffers and `port_out`/`load_out` may be NULL; each is zeroed or emptied on
- * entry so a caller that ignores one gets an empty value rather than a stale one.
- * Returns the advertised NAME, which is the peer's own claim and need not equal
- * the link it arrived on -- a relay is a legitimate thing to be -- or NULL when
- * this peer has advertised nothing.
- *
- * THIS FUNCTION IS THE ENTIRE READ SURFACE OF THE ADVERTISEMENT STORE, and its
- * RETURN TYPE IS PART OF THE SSRF ENFORCEMENT and not only a comment. It hands out
- * two bounded strings and two numbers. There is no function anywhere in this
- * module that returns a sockaddr, a server_link_t, or anything the dial path could
- * be built from, and the only writer of a link's dial address is
- * fed_link_configure(), which takes it from the operator's command line. See
- * server.h on server_t::advs for the threat and for what a future reader would
- * have to write down before changing any of this. */
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out);
-
 /* How many peers have advertised something. 0 on a node with no peers, and the
  * number a test asserts on to tell "the store recorded nothing" from "the store
  * does not exist". */

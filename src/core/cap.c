@@ -505,11 +505,6 @@ void cap_init(conn_t *c)
     c->cap_negotiating = 0;
 }
 
-void cap_reset(conn_t *c)
-{
-    cap_init(c);
-}
-
 int cap_negotiating(const conn_t *c)
 {
     return (c != NULL && c->cap_negotiating != 0) ? 1 : 0;

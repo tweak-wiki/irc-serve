@@ -1034,8 +1034,8 @@ struct server {
      * inside the event loop"). The tick's T7 arm dials only a link that has
      * `initiator != 0` AND `addrlen != 0`, and both of those are set by that one
      * function. A learned advertisement cannot reach either field because there
-     * is no API that would let it, and `fed_advertised_*` below returns TEXT for
-     * logs and counters and nothing else.
+     * is no API that would let it, and `fed_advertised_count` below returns a COUNT
+     * for counters and nothing else.
      *
      * A future reader who wants to dial from this store is about to introduce an
      * SSRF and must first write the threat model that makes it acceptable: which
