@@ -859,7 +859,6 @@ static const char *fanout_tag_block(const conn_t *dst,
                 out[0] = '\0';
                 return NULL;
             }
-            n += (size_t)w;
         }
     }
     return (out[0] != '\0') ? out : NULL;
