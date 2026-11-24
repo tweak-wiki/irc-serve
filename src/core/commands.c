@@ -243,7 +243,12 @@ static const char *const k_005[] = {
     "MAXTARGETS=1",                            /* MSG_MAX_TARGETS, msg_verbs.h */
     "NAMELEN=" IRC_STR(CONN_MAX_REALNAME),     /* conn_t::realname; SETNAME 417s */
     "NICKLEN=" IRC_STR(IRC_MAX_NICK),
-    "TOPICLEN=" IRC_STR(CHAN_MAX_TOPIC)         /* 417, chan_verbs.c */
+    "TOPICLEN=" IRC_STR(CHAN_MAX_TOPIC),         /* 417, chan_verbs.c */
+    /* NOTIFYLOCAL names the notifications this node emits node-local only
+     * (SERVER_DESIGN 4.4.9): SETNAME/AWAY/INVITE reach local channel members
+     * only until the 4.3 wire bump. Zero wire-format change: an ISUPPORT token
+     * a client that does not know it ignores. */
+    "NOTIFYLOCAL=SETNAME,AWAY,INVITE"
 };
 
 /* The MOTD body, sent as one 372 per line. It describes what the node IS
@@ -1706,6 +1711,8 @@ static const char *const k_info[] = {
     "  offered with MODE is refused too.",
     "- federation: FEDERATE link handshake, the S-verb set, SBURST resync,",
     "  per-node (origin,epoch,id) dedup, hop ceiling 10.",
+    "- notify locality: SETNAME/AWAY/INVITE notify local channel members only;",
+    "  cross-node delivery waits on a 4.3 wire bump. 005 NOTIFYLOCAL says so too.",
     "- no authentication, no services, no operator flags: PASS is recorded and not",
     "  checked, and CHOPER is refused with 464 because there is nothing to grant.",
     "- free software under the GNU AGPL v3.0 or later; see LICENSE and NOTICE."
