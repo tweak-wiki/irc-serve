@@ -336,7 +336,7 @@ int main(void)
     /* =======================================================================
      * 3. THE LIST IS READ FROM THE NODE'S STATE, NOT REBUILT FROM THE COMMAND
      * ==================================================================== */
-    from = drain(&alice);
+    (void)drain(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "MODE " BAN_CHAN " -b *!*@10.9.9.1") == 0,
                  "MODE -b <mask> failed");
     (void)drain(&alice);

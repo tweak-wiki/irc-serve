@@ -447,7 +447,6 @@ static void case_away_stripped_for_member(void)
      *   3. The log says `kept_len=0 reason=ALL_BYTES_REFUSED state=NOT_SET`, so the
      *      `305` is distinguishable from a client that genuinely came back.
      */
-    mark = tc_received(&member);
     (void)tc_send(&setter, "AWAY :away");   /* away first, so the clear edge has work */
     TF_CHECK_MSG(tc_expect(&setter, " 306 ", T_IO_MS) == 0, "could not set an away state");
     drain(&member);

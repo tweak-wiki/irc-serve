@@ -682,9 +682,12 @@ static char *sw_read_table_text(size_t *len_out)
             if (ch == '\\') {
                 int esc = fgetc(f);
 
-                if (esc != EOF) {
-                    out[len++] = (char)esc;
+                /* An escape at end-of-file ends the input: ignoring EOF and
+                 * looping would re-read a dead stream. */
+                if (esc == EOF) {
+                    break;
                 }
+                out[len++] = (char)esc;
                 prev = 0;
                 continue;
             }
