@@ -2,7 +2,7 @@
 
 # Project status
 
-Generated `2026-11-24T21:14:30Z` from commit `bed41a2` by
+Generated `2026-11-24T21:29:10Z` from commit `11f3be4` by
 [stats.yml](../../blob/main/.github/workflows/stats.yml).
 
 ## Test suite
@@ -27,8 +27,8 @@ Generated `2026-11-24T21:14:30Z` from commit `bed41a2` by
 
 | | lines |
 |---|---|
-| `src/` | 50990 |
-| `tests/` | 82652 |
+| `src/` | 51012 |
+| `tests/` | 82666 |
 
 ## Build phases
 
