@@ -2320,7 +2320,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
     * client is already unable to register (SASL_FAILED is terminal), so the
     * connection is effectively dead and will be reaped on disconnect/timeout. */
     if (c->sasl_failures >= 3) {
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", ERR_SASLFAIL,
                             NULL, 0, "SASL authentication failed: too many attempts");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TOO_MANY_ATTEMPTS\n",
                c->fd);
@@ -2332,7 +2332,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * AUTHENTICATE * (below) or a fresh AUTHENTICATE PLAIN would clear the
      * failure and let NICK+USER register anonymously. */
     if (c->sasl == (int)SASL_FAILED) {
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", ERR_SASLFAIL,
                             NULL, 0, "SASL authentication failed");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=ALREADY_FAILED\n",
                c->fd);
@@ -2439,7 +2439,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
         params[0] = "*";
         (void)send_line(s, c, NULL, "AUTHENTICATE", params, 1);
         (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED",
-                            "904", NULL, 0,
+                            ERR_SASLFAIL, NULL, 0,
                             "SASL authentication failed: TLS is required on "
                             "this node for SASL PLAIN");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TLS_REQUIRED\n",
@@ -2490,7 +2490,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
              * exactly this -- an AUTHENTICATE whose payload this node cannot read --
              * and standard-replies says an existing code MUST be used where one is
              * defined. */
-            (void)reply_refused(s, c, "AUTHENTICATE", "INVALID_AUTHENTICATE", "904",
+            (void)reply_refused(s, c, "AUTHENTICATE", "INVALID_AUTHENTICATE", ERR_SASLFAIL,
                                 NULL, 0,
                                 "SASL PLAIN payload was not base64 or not three "
                                 "NUL-separated fields");
@@ -2524,7 +2524,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
          * client reading `SAASL_FAIL` would offer the user to wait and retry a
          * password that will never verify. The registry has no code for "the
          * credentials did not verify", so this one is `ERR_`-prefixed as ours. */
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", ERR_SASLFAIL,
                             NULL, 0, "SASL authentication failed: %s",
                             no_store ? "this node holds no client credential store"
                             : "the credentials did not verify");
