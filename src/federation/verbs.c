@@ -16,6 +16,7 @@
  * through the field's own policy, and SMODES through chan_mode_implemented(). */
 #include "core/connection.h"
 #include "core/channel.h"
+#include "core/message.h"
 #include "core/fanout.h"
 #include "core/cap.h"
 #include "core/reply.h"
@@ -1522,6 +1523,7 @@ static void fed_in_ssetname(server_t *s, server_link_t *link,
 {
     char prefix[CONN_HOSTMASK_MAX];
     const char *pp;
+    (void)tags;
     fanout_form_t plain;
     const char *rp[1];
     chan_t **channels;
@@ -1698,7 +1700,7 @@ static void fed_in_sinvite(server_t *s, server_link_t *link,
                conn_text_bad_count((nparams > 0) ? params[0] : "?"));
         return;
     }
-    ch = server_chan_find(s, params[0]);
+    ch = server_chan_get(s, params[0]);
     if (ch == NULL) {
         s->n_fed_malformed++;
         fed_obs("[observable] fed_malformed: fd=%d command=SINVITE field=channel "
@@ -2976,6 +2978,7 @@ static const struct {
     { "STOPIC",   3, 3, NULL, FANOUT_STATE_CHANGE, "TOPIC" },
     { "SMODES",   3, 4, NULL, FANOUT_STATE_CHANGE, "MODE"  },
     { "SKICK",    3, 4, NULL, FANOUT_STATE_CHANGE, "KICK"  }
+};
 
 static int inbound_index(const char *verb)
 {

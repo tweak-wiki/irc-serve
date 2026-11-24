@@ -1265,8 +1265,9 @@ void handle_ison(server_t *s, conn_t *c, const message_t *m)
  *   forward arm and no question about whether a peer should be told: a peer is not
  *   a client that negotiated anything, and design 3.1.1's argument for there being
  *   no gated variant of the forwarding path is exactly this case. Away STATE
- *   federates -- 4.3's SBURST carries it and a resync rebuilds it -- and a
- *   notification is not state.
+ *   federates -- 4.3's SBURST carries it and a resync rebuilds it -- and the
+ *   TRANSITIONS federate too: `away_federate()` below emits SAWAY (#563) for
+ *   the same edge, and the mesh delivers the notification from it.
  *
  * THE CLEARED CASE IS NOT AN OMISSION, and it is the half implementations get
  * wrong: `AWAY` with no message must still notify, because the notification is the
@@ -1442,6 +1443,7 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
         c->away[0] = '\0';
         (void)reply(s, c, "305", NULL, 0, "You are no longer marked as being away");
         notify_away(s, c, NULL);
+        away_federate(s, c);
         printf("[observable] away: nick=%s state=clear\n", c->nick);
         return;
     }
@@ -1561,6 +1563,7 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
         c->away[0] = '\0';
         (void)reply(s, c, "305", NULL, 0, "You are no longer marked as being away");
         notify_away(s, c, NULL);
+        away_federate(s, c);
         printf("[observable] away: nick=%s state=clear\n", c->nick);
         printf("[observable] away_stripped: nick=%s removed=%zu in_len=%zu "
                "kept_len=0 reason=ALL_BYTES_REFUSED state=NOT_SET\n",
@@ -1569,6 +1572,7 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
     }
     (void)reply(s, c, "306", NULL, 0, "You have been marked as being away");
     notify_away(s, c, c->away);
+    away_federate(s, c);
     printf("[observable] away: nick=%s state=set len=%zu\n", c->nick, kept);
     /* THE STRIP IS ANNOUNCED, on its own line and only when it happened. The line
      * above reports the length actually stored, which a reader can compare with

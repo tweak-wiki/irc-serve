@@ -1138,13 +1138,13 @@ static void handle_user(server_t *s, conn_t *c, const message_t *m)
  * de-duplication is a search over the caller's own `conn_t::chans` rather than a
  * cache -- which is why there is no bounded store here with a teardown arm to forget.
  *
- * NOT FORWARDED, for the same reason away-notify is not: this is an originating
- * emission and the local-only entry points have no forward arm. Worth being honest
- * about what that costs: 4.3's frozen `SBURSTN` carries no realname, so a mesh
- * member's clients learn a peer's realname from its own roster -- `extended-join` --
- * and never learn that it CHANGED, because there is no S-verb to carry the change and
- * a wire format cannot be invented after Phase 6. Closing that needs a new 4.3 verb
- * and a version bump, not a decision. */
+ * MESH-REACHABLE THROUGH SSETNAME, while the notify itself stays local-only: this
+ * is an originating emission through the local-only entry point, and the
+ * `handle_setname()` line above carries the change across the mesh as
+ * `:hostmask SSETNAME <nick> :<realname>` (#563). A resync still rebuilds only
+ * what 4.3's `SBURSTN` carries, but a live change now reaches the mesh as it
+ * happens.
+ */
 static void setname_notify_channels(server_t *s, conn_t *c)
 {
     const char *params[1];
@@ -1248,6 +1248,12 @@ static void handle_setname(server_t *s, conn_t *c, const message_t *m)
     params[0] = c->realname;
     (void)send_line(s, c, prefix, "SETNAME", params, 1);
     setname_notify_channels(s, c);
+    /* Originated SSETNAME: the mesh half of this change. The nick rides in
+     * params[0] because the inbound half resolves the subject from there, not
+     * from the prefix. Runs even with no local audience, for the same reason
+     * away_federate() does -- a relay carries it to members this node never
+     * sees. */
+    { const char *sp[2]; sp[0] = c->nick; sp[1] = c->realname; (void)fed_forward_all(s, "SSETNAME", prefix, sp, 2); }
     printf("[observable] setname: fd=%d nick=%s len=%zu\n", c->fd, c->nick,
            strlen(c->realname));
 }

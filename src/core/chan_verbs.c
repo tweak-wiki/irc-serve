@@ -366,10 +366,12 @@ static const char *names_signs(unsigned flags, int multiprefix, char *out,
  *
  *   - a LOCAL member always has both halves. `c->host` was filled by accept()
  *     before the connection had a nickname, and `c->user` by USER.
- *   - a REMOTE member has them only if 4.3's SBURSTN announced them. A live SJOIN
- *     carries neither (4.3's SJOIN is `<server> <chan> <nick> <flags>`), so the
- *     empty host is the NORMAL state for a member learned from one -- channel.h
- *     says so at `chan_remote_t` and that note is still true.
+ *   - a REMOTE member has them only if 4.3's SBURSTN announced them or a live
+ *     SJOIN carried them. The 4.3 extension (#563) widened SJOIN to six
+ *     parameters with `<user> <host>` appended, so a member learned from one now
+ *     normally HAS both -- channel.h says so at `chan_remote_t`. An empty half
+ *     remains possible (the sender spells "not told" as `-`), and still renders
+ *     as the bare nick.
  *
  * The alternative would be to put `*` in place of a missing half, and that is
  * refused on purpose: `*` would be a byte on the wire that reads as part of a
@@ -556,9 +558,9 @@ static void send_names_list(server_t *s, conn_t *dst, const chan_t *ch)
              * `names_entry()` takes (nick, ident, host) rather than a conn_t: a
              * remote member has no conn_t, so a renderer that read one could not
              * have drawn it at all and the roster would carry two shapes by
-             * construction. The empty ident and empty host are the documented normal
-             * state for a member learned from a live SJOIN, and they render as the
-             * bare nick rather than as a half-built hostmask. */
+             * construction. An empty ident or host (a peer that sent `-` for
+             * "not told") still renders as the bare nick rather than as a
+             * half-built hostmask. */
             char entry[CONN_HOSTMASK_MAX];
 
             if (r->nick[0] == '\0' || names_group_flags(r->flags) != group) {
@@ -2835,8 +2837,7 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
                "reason=INVITE_NEEDS_ORIGIN\n",
                ch->name, c->nick);
         (void)reply(s, c, "437", (const char *const[]){ ch->name }, 1,
-                    "Cannot invite to %s: there is no SINVITE to send its origin "
-                    "(%s)",
+                    "Cannot invite to %s: this server is not its origin (%s)",
                     ch->name, ch->origin);
         return;
     }
@@ -2890,6 +2891,9 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
     (void)reply(s, c, "341", (const char *const[]){ ch->name, t.user->nick }, 2,
                 "%s has invited you to channel %s", c->nick, ch->name);
     notify_invite(s, c, ch, prefix, t.user->nick);
+    /* Originated SINVITE: the mesh half of this invite. The inviter's hostmask
+     * rides as the prefix because the inbound half delivers from it. */
+    { const char *sip[2]; sip[0] = ch->name; sip[1] = t.user->nick; (void)fed_forward_all(s, "SINVITE", prefix, sip, 2); }
     printf("[observable] chan_invite: channel=%s by=%s target=%s\n", ch->name,
            c->nick, t.user->nick);
 }
@@ -2915,12 +2919,11 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
  * -- and the specification's own phrase is "a standard way that allows clients to learn
  * when ANOTHER client does an /INVITE". One line per event, to the audience it is for.
  *
- * NOT FORWARDED, for the reason `notify_away()` is not forwarded: this is an originating
- * emission and the local-only entry point has no forward arm. The cost is stated at
- * `away-notify`'s §3.1.1 note and applies verbatim -- away STATE federates through 4.3's
- * SBURST and a notification is not state; the same is true of an invitation, which 4.3's
- * frozen verb table has no S-verb for at all, so a mesh member's clients learn of an
- * invitation to a channel they can see by being in it and by nothing else.
+ * MESH-REACHABLE THROUGH SINVITE, while the notify itself stays local-only: this
+ * is an originating emission through the local-only entry point, and the
+ * `handle_invite()` line above carries it across the mesh as
+ * `:inviter SINVITE <channel> <target>`. A mesh member's clients learn of an
+ * invitation two ways -- by sharing the channel, and by the SINVITE relay.
  *
  * PER CHANNEL, NOT OVER A UNION, and the reason is the shape: the line's own grammar is
  * `:<inviter> INVITE <target> <channel>` and it NAMES its channel, so a member of three

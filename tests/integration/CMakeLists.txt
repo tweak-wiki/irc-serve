@@ -499,6 +499,13 @@ irc_add_integration_test(test_fed_tags test_fed_tags.c)
 # own poll step, and the negatives close their window with a PING/PONG.
 irc_add_integration_test(test_fed_wire test_fed_wire.c)
 
+ # 4.3 extension (#563): SJOIN carries user+host, and SSETNAME/SAWAY/SINVITE
+ # federate realname, away and invite notify across a three-node star. The
+ # 353 case pins the six-parameter SJOIN on the wire the client sees; the
+ # other three pin each new verb end to end; the last pins the version bump by
+ # refusing a 0.1.0 FEDERATE with BAD_VERSION.
+ irc_add_integration_test(test_fed_notify test_fed_notify.c)
+
 # 2.4: the (origin, epoch, id) duplicate store and the loop guard that reads it.
 # The store is asserted on RETURN VALUES -- first arrival new, second seen, the
 # three key fields independent, the origin folded ASCII, an illegal key not new
