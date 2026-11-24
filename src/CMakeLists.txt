@@ -168,6 +168,9 @@ add_library(irc_core STATIC
   # the message path yet. Putting them beside core/ would imply they are part of
   # the always-on path, and a reader would expect to find them in fanout.c.
   federation/verbs.c
+  # The frozen S-verb shapes: the per-verb parameter encoders, split out of
+  # verbs.c (issue #543). Listed beside verbs.c, whose header declares them.
+  federation/shapes.c
   federation/dedup.c
   # The peer link: the table, the FEDERATE exchange and the tick. It is listed
   # after the two above because it uses both -- dedup for T5 and verbs.c for
