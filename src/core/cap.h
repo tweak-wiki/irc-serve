@@ -472,12 +472,4 @@ int cap_gate_invite_notify(const conn_t *dst, void *ctx);
  * all (which cannot happen: the caller has already dispatched on the verb). */
 void cap_handle(server_t *s, conn_t *c, const message_t *m);
 
-/* Release negotiation state. Called when a connection is torn down, so a
- * conn_t that is freed and re-used at the same descriptor cannot inherit a
- * capability it negotiated in a previous life. conn_t is calloc'd by conn_new()
- * and freed by conn_free(), so this is belt to those braces -- and it is on the
- * same list as "there is no per-connection message id" for the same reason: the
- * state must not outlive the connection that owns it. */
-void cap_reset(conn_t *c);
-
 #endif /* IRC_CORE_CAP_H */
