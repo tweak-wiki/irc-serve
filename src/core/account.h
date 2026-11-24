@@ -24,7 +24,8 @@
  *
  * It is not a convention. It is structural, and it is structural because there
  * is exactly ONE writer -- account_set(), below, whose contract requires a
- * verified `sasl_store_t` AND a verified `account_store_t` -- and because the
+ * SASL-verified authcid AND a verified `account_store_t` (the one user table,
+ * #538) -- and because the
  * predicate every consumer asks (account_logged_in()) is local to the
  * connection and needs no store of its own:
  *
