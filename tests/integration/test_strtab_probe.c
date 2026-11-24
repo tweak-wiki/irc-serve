@@ -112,7 +112,7 @@ static const char *const WRAP[] = {
 /* ---------------------------------------------------------------------------
  * The table's own hash, reimplemented for the premise check and nothing else.
  *
- * This is a copy of strtab_hash() in core/server.c and of the STRTAB_BUCKETS it
+ * This is a copy of strtab_hash() in core/strtab.c and of the STRTAB_BUCKETS it
  * divides by. Both are file-private, so a collision-dependent test cannot ask the
  * table where a name lands. The duplication is confined to the function below and
  * to the two assertions that use it, and it is checked against the table's

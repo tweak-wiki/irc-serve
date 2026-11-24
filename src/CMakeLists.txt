@@ -127,6 +127,9 @@ add_library(irc_core STATIC
   core/message.c
   core/connection.c
   core/server.c
+  # #543: the nick/channel string -> pointer map split out of server.c.
+  # The registries that use it stay there; this file holds the table.
+  core/strtab.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
