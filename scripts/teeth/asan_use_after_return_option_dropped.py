@@ -12,8 +12,8 @@ stack-use-after-return is SILENT -- the read returns its value and the process e
 DEFAULT is false in this image and true in gcc 16 on linux, so the cell's coverage was a
 property of whichever gcc its image happened to ship.
 
-The fix was one word in `ASAN_RUN_OPTS`, plus a probe that fails unless each class is
-reported. This fault removes the word.
+The fix was one word in `GATE_ASAN_OPTS_LINUX` (scripts/gate-lib.sh), plus a probe
+that fails unless each class is reported. This fault removes the word.
 
 WHAT MUST HAPPEN, AND IT IS TWO ASSERTIONS
 ------------------------------------------
@@ -38,9 +38,9 @@ here can only be this fault.
 import os
 import sys
 
-TARGET = "scripts/gate-linux-cell.sh"
-ORIGINAL = 'ASAN_RUN_OPTS="detect_leaks=1:detect_stack_use_after_return=1"'
-FAULTED = 'ASAN_RUN_OPTS="detect_leaks=1"'
+TARGET = "scripts/gate-lib.sh"
+ORIGINAL = 'GATE_ASAN_OPTS_LINUX="detect_leaks=1:detect_stack_use_after_return=1"'
+FAULTED = 'GATE_ASAN_OPTS_LINUX="detect_leaks=1"'
 
 
 def main():
@@ -52,8 +52,8 @@ def main():
         text = fh.read()
     if ORIGINAL not in text:
         sys.stderr.write(
-            "teeth fault: %s does not contain the expected ASAN_RUN_OPTS line, so "
-            "this fault would be a no-op. If it has been reworded, this fault has to "
+            "teeth fault: %s does not contain the expected GATE_ASAN_OPTS_LINUX line, "
+            "so this fault would be a no-op. If it has been reworded, this fault has to "
             "follow it -- which is the right outcome, because a fault script that "
             "quietly stopped applying is the worst kind of green.\n" % TARGET)
         return 1
