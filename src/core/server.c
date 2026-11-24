@@ -1540,7 +1540,7 @@ void server_shutdown_phase2_close(server_t *s)
      * Every connection is already closed by the walk above, so no sasl_ctx_t --
      * and no connection that borrowed this store -- can still be holding a
      * pointer into it. */
-    sasl_store_free(s->sasl_store);
+    account_store_free(s->sasl_store);
     s->sasl_store = NULL;
     /* Phase 10.1's account registry: the same SHAPE of obligation as the
      * credential store above and the same reason it is a call rather than a

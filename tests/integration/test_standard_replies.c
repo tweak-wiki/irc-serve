@@ -17,7 +17,7 @@
  *   461  too few AND too many -- and its text says "Not enough parameters" in the
  *        too-many case too, so the number is ambiguous AND the text is wrong
  *   482  not a channel operator | not an IRC operator | the verb is disabled
- *   464  not an IRC operator | SASL authentication failed
+ *   464  not an IRC operator (SASL failures are 904, never 464)
  *
  * Every OTHER numeric on this node answers exactly one question and is asserted
  * UNCHANGED here, because "only these four" is half the claim and a test that only
@@ -422,14 +422,12 @@ static void case_482(void)
     nf_free(&node);
 }
 
-/* 464, WHICH ON THIS NODE IS BOTH "not an IRC operator" AND "SASL failed".
+/* 464, WHICH ON THIS NODE IS ONLY "not an IRC operator".
  *
- * Only the operator half is reachable without an operator file, and it is the half
- * that shares its NUMBER with the SASL refusals: `handle_authenticate()` answers
- * 464 for a payload it cannot read and for credentials that do not verify, which
- * `test_account.c` already pins byte-for-byte. So what is asserted here is that the
- * operator refusal got its own code, and `test_account.c` staying green is what
- * says the two no longer share a rendering. */
+ * SASL failures used to share this number and are now 904 (see
+ * `test_cap_negotiation.c`, which pins the SASL numerics byte-for-byte), so
+ * what is asserted here is that the operator refusal got its own code and
+ * keeps it. */
 static void case_464(void)
 {
     nf_node_t node;

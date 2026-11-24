@@ -133,6 +133,9 @@ add_library(irc_core STATIC
   core/resume.c
   core/fanout.c
   core/commands.c
+  # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
+  # The dispatch table stays there; this file holds the verbs and their helpers.
+  core/commands_info.c
   # Phase 10.1: the account IDENTITY on a connection. It is a module of its own
   # for the reason core/cap.c is -- the predicate every consumer asks must have
   # one home, or two callers will each write `c->logged_in && c->account[0]` and
@@ -165,12 +168,19 @@ add_library(irc_core STATIC
   # the message path yet. Putting them beside core/ would imply they are part of
   # the always-on path, and a reader would expect to find them in fanout.c.
   federation/verbs.c
+  # The frozen S-verb shapes: the per-verb parameter encoders, split out of
+  # verbs.c (issue #543). Listed beside verbs.c, whose header declares them.
+  federation/shapes.c
   federation/dedup.c
   # The peer link: the table, the FEDERATE exchange and the tick. It is listed
   # after the two above because it uses both -- dedup for T5 and verbs.c for
   # the outbound side of the wire -- which is the first time anything in this
   # tree has had a reason to depend on more than one module under federation/.
   federation/link.c
+  # The handshake FSM: the caller-owned-context transition rules, split out of
+  # link.c (issue #543). It is listed here, beside its only production caller,
+  # because that is where a reader looking for the rules will look first.
+  federation/handshake.c
   # The resync: 4.3's SBURST, the wire format it froze, and the transaction that
   # replaces rather than merges. It is listed LAST because it is the one module
   # here that depends on both of the others -- link.c calls federation_resync()
@@ -215,7 +225,7 @@ endif()
 target_include_directories(irc_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 
 # Executable for federated node
-add_executable(irc-serve node_main.c)
+add_executable(irc-serve node_main.c node_opts.c)
 target_link_libraries(irc-serve PRIVATE irc_core)
 
 install(TARGETS irc-serve RUNTIME DESTINATION bin)

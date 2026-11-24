@@ -24,7 +24,8 @@
  *
  * It is not a convention. It is structural, and it is structural because there
  * is exactly ONE writer -- account_set(), below, whose contract requires a
- * verified `sasl_store_t` AND a verified `account_store_t` -- and because the
+ * SASL-verified authcid AND a verified `account_store_t` (the one user table,
+ * #538) -- and because the
  * predicate every consumer asks (account_logged_in()) is local to the
  * connection and needs no store of its own:
  *
@@ -119,7 +120,7 @@ int account_set(server_t *s, conn_t *c, const char *name, const char *password);
  *
  * WHO CALLS IT, and why it is here rather than only in conn_free(): a connection
  * is freed by conn_free() and never re-used, so on its own this would be belt to
- * those braces. It is on the same list as cap_reset() and server_nick_unclaim()
+ * those braces. It is on the same list as server_nick_unclaim()
  * for the same reason -- the state must not outlive the connection that owns it,
  * and `server_close_conn()` is the one function every retirement goes through --
  * and because a reader of conn_t's teardown wants to see the account released

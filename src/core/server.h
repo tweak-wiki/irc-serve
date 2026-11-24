@@ -88,17 +88,21 @@
  * dependency runs the other way, through the four functions in it. */
 struct fed_dedup_entry;
 
-/* The credential store SASL PLAIN verifies against (Phase 8). It is an OPAQUE
+/* The user table SASL PLAIN verifies against (Phase 8). It is an OPAQUE
  * pointer for the same reason the dedup entry's and the topic cache's are:
- * sasl_framework.h owns the layout, and this header holds only the pointer, so a
- * reader of server_t does not also have to understand a file format and four
- * size bounds.
+ * account_store.h owns the layout, and this header holds only the pointer, so
+ * a reader of server_t does not also have to understand a file format and
+ * four size bounds. There is ONE user table in this tree (#538): this field
+ * and account_store below are two POINTERS to it, loaded from two options so
+ * that a deployment can keep the legacy two-field credential file, the
+ * three-field registry, or -- by naming the same file twice -- one user
+ * population for both. sasl_store_load() and account_store_load() both
+ * return account_store_t for exactly that reason.
  *
  * It is NULL until sasl_store_load() succeeds, which is the honest state of a node
  * started without --sasl-store -- and it is the thing cap.c asks before
  * advertising `sasl`. NULL therefore means "this node can authenticate nobody",
  * and the SASL path treats it that way rather than treating it as "no opinion". */
-struct sasl_store;
 
 /* Phase 10.1's ACCOUNT REGISTRY: which account names EXIST, and the password each
  * is held under. It is an OPAQUE pointer for the same reason the credential
@@ -1043,8 +1047,8 @@ struct server {
      * inside the event loop"). The tick's T7 arm dials only a link that has
      * `initiator != 0` AND `addrlen != 0`, and both of those are set by that one
      * function. A learned advertisement cannot reach either field because there
-     * is no API that would let it, and `fed_advertised_*` below returns TEXT for
-     * logs and counters and nothing else.
+     * is no API that would let it, and `fed_advertised_count` below returns a COUNT
+     * for counters and nothing else.
      *
      * A future reader who wants to dial from this store is about to introduce an
      * SSRF and must first write the threat model that makes it acceptable: which
@@ -1222,7 +1226,7 @@ struct server {
      * the observable facts an operator needs are how many exchanges failed and
      * why (the sasl_state_t), and every one of those is countable without
      * touching a secret. */
-    struct sasl_store *sasl_store;
+    struct account_store *sasl_store;
     uint64_t  n_sasl_ok;
     uint64_t  n_sasl_fail;
     /* #539: process-wide credential-verification budget. Each AUTHENTICATE that

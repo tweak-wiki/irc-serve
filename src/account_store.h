@@ -21,36 +21,37 @@
  * the socket that proved it.
  *
  * ---------------------------------------------------------------------------
- * WHY THIS IS A SEPARATE FILE FROM THE CREDENTIAL STORE, STATED AS A DECISION
+ * ONE TABLE, TWO QUESTIONS (#538)
  * ---------------------------------------------------------------------------
- * It is the same KIND of thing and it is a DIFFERENT file, and the reason is
- * that the two have different lifetimes and different blast radii:
+ * There used to be a second user table in sasl_framework.c -- its own record,
+ * salt, hash and compare beside this registry's -- so one user add was two
+ * writes in two formats and a user in one store only could SASL-auth but not
+ * log in, or the reverse, with no error logged. Now this registry IS the
+ * credential store: SASL PLAIN verifies against it (see sasl_framework.h),
+ * and account login verifies against it below. One row per name, one add,
+ * one verify function, and no second table to disagree.
  *
- *   sasl_store_t  WHO MAY AUTHENTICATE HERE. One row per authcid. A client that
- *                 authenticates as `alice` gets the same treatment whether or
- *                 not a row for `alice` exists -- SASL PLAIN grants nothing on
- *                 this node at all (see sasl_framework.h), so the credential
- *                 store is a gate and nothing more. Its rows can be rewritten
- *                 freely: delete one and that login stops working, and nobody
- *                 else is affected.
+ * The two QUESTIONS stay distinct, and the distinction is load-bearing:
  *
- *   account_store_t  WHICH ACCOUNTS EXIST. A row is a statement about a name,
+ *   SASL          WHO MAY AUTHENTICATE HERE. A client that authenticates as
+ *                 `alice` gets the same treatment whether or not a row for
+ *                 `alice` exists -- SASL PLAIN grants nothing on this node at
+ *                 all (see sasl_framework.h), so the table is a gate and
+ *                 nothing more. Its rows can be rewritten freely: delete one
+ *                 and that login stops working, and nobody else is affected.
+ *
+ *   account login WHICH ACCOUNTS EXIST. A row is a statement about a name,
  *                 not about a login: `alice` is an account whether or not she
  *                 has ever connected, and the row is what `account-tag` will
  *                 eventually have to be true against. That makes an accidental
  *                 deletion a different kind of event from a failed login -- it
- *                 is the loss of an identity, not the loss of access -- and the
- *                 two do not belong in one file where one `grep` and one edit
- *                     reaches both.
+ *                 is the loss of an identity, not the loss of access.
  *
- * The cost is stated rather than hidden: an operator configures TWO files, they
- * are read at the same point in main() and in the same pre-loop phase 3.4
- * requires, and the two must agree or authentication stops (see
- * account_lookup()'s contract). The alternative -- one file with a per-record
- * "this is also an account" flag -- was rejected because it makes the FILE's
- * meaning a property of a byte inside a line, and a credential file whose rows
- * mean different things depending on a flag is a file whose blast radius is one
- * bad edit wide. Two files, two blast radii.
+ * An operator configures --sasl-store (the legacy two-field file, loaded with
+ * created=0) and --account-store (this three-field registry) separately, and
+ * the two NULL states stay distinct for the reason server.h gives. Naming the
+ * same file for both options is one user population for both uses, which is
+ * the shape that cannot disagree with itself.
  *
  * ---------------------------------------------------------------------------
  * THE FORMAT, AND WHY IT IS THREE TAB-SEPARATED FIELDS
@@ -212,9 +213,9 @@ int account_name_wire_safe(const char *name);
                                     * build for a table this size */
 #define ACCOUNT_MAX_LINE      512  /* one record in the file, NUL included */
 
-/* An opaque registry. Declared here and defined in account_store.c for the same
- * reason sasl_store_t is: a caller cannot build one by laying out fields, so the
- * bounds above are the bounds rather than a suggestion. */
+/* An opaque registry. Declared here and defined in account_store.c so a caller
+ * cannot build one by laying out fields -- the bounds above are the bounds
+ * rather than a suggestion. */
 typedef struct account_store account_store_t;
 
 /* ---------------------------------------------------------------------------
@@ -293,10 +294,10 @@ int account_store_holds_no_plaintext(const account_store_t *store,
  * LeakSanitizer runs on the Linux CI job, so anything allocated here has to be
  * freed there.
  *
- * THE PASSWORDS ARE OVERWRITTEN BEFORE THE MEMORY IS RELEASED, and the comment
- * says why in the same words sasl_store_free() uses: free() does return the
- * memory, but the allocator reuses the buffer for the next node of the same
- * size, and a password still legible there outlives the record that named it.
+ * THE PASSWORDS ARE OVERWRITTEN BEFORE THE MEMORY IS RELEASED: free() does
+ * return the memory, but the allocator reuses the buffer for the next node
+ * of the same size, and a password still legible there outlives the record
+ * that named it.
  * The write pass goes through a `volatile` pointer so the compiler cannot elide
  * the stores as dead, which is the whole reason it is not a memset(). The cost
  * is one pass over ~13 KB on a path that runs once per process. */

@@ -219,9 +219,10 @@ static client_t *CUR_CLIENT;
 
 /* Send a complete, correct PLAIN credential in the two-parameter one-shot form.
  * The expectation is on the node's own output rather than on the wire, because
- * a successful exchange produces NO numeric in this tree: SASL grants nothing
- * and says so with `granted=0`. Asserting a numeric here would be asserting a
- * feature Phase 8 deliberately does not have. */
+ * the wire verdict (903) is already pinned byte-for-byte by
+ * test_cap_negotiation.c: asserting it here too would pin one line in two
+ * places. What is asserted here is the account side -- `granted=0` says SASL
+ * authenticates the connection and grants nothing by itself. */
 static void authenticate(const char *authcid, const char *passwd)
 {
     char payload[512];
@@ -2325,29 +2326,31 @@ static void expect_account_set_refuses(void)
 }
 
 /* ---------------------------------------------------------------------------
- * THE CREDENTIAL STORE HOLDS HASHES, NOT PASSWORDS
+ * THE USER TABLE HOLDS HASHES, NOT PASSWORDS
  * ---------------------------------------------------------------------------
- * The account-registry half of this property is asserted in-process above, on
- * the registry the refusal cases build. This is the SASL half, on a store
- * built the same way -- sasl_store_new() plus sasl_store_add(), which is the
- * path sasl_state_machine() and every operator file take through the loader.
+ * The registry half of this property is asserted in-process above, on
+ * the registry the refusal cases build. This is the SASL half, on the SAME
+ * table -- account_store_new() plus account_store_add(), which is the path
+ * sasl_state_machine() and every operator file take through the loader --
+ * because there is one table now (#538) and the store sasl_plain_verify()
+ * reads is the store account_store_verify() reads.
  *
- * Two claims, and both are about the SAME store: no byte run in it still
+ * Two claims, and both are about the SAME table: no byte run in it still
  * equals the literal, and authentication against it behaves identically --
  * correct verifies, wrong does not, a prefix of the right one does not, and
  * an unknown authcid does not. */
 static void expect_sasl_store_hashes_passwords(void)
 {
-    sasl_store_t *store = sasl_store_new();
+    account_store_t *store = account_store_new();
 
-    TF_CHECK_MSG(store != NULL, "sasl_store_new() failed");
+    TF_CHECK_MSG(store != NULL, "account_store_new() failed");
     if (store == NULL) {
         return;
     }
-    TF_CHECK_MSG(sasl_store_add(store, "alice", "correct horse") == 0,
-                 "sasl_store_add() refused a valid credential");
-    TF_CHECK_MSG(sasl_store_holds_no_plaintext(store, "correct horse") == 1,
-                 "the credential store still holds the literal password in "
+    TF_CHECK_MSG(account_store_add(store, "alice", "correct horse", 0) == 0,
+                 "account_store_add() refused a valid credential");
+    TF_CHECK_MSG(account_store_holds_no_plaintext(store, "correct horse") == 1,
+                 "the user table still holds the literal password in "
                  "memory; it must hold only the salted hash");
     TF_CHECK_MSG(sasl_plain_verify(store, "", "alice", "correct horse") == 1,
                  "a correct credential no longer verifies against its hash");
@@ -2357,22 +2360,21 @@ static void expect_sasl_store_hashes_passwords(void)
                  "a password that is only a PREFIX of the right one verified");
     TF_CHECK_MSG(sasl_plain_verify(store, "", "mallory", "correct horse") == 0,
                  "an unknown authcid verified");
-    sasl_store_free(store);
+    account_store_free(store);
 }
 /* ---------------------------------------------------------------------------
  * THE DUMMY COMPARE RUNS ON A HIT TOO (#271)
  * ---------------------------------------------------------------------------
- * Hit and miss must pay the same compare count, so the dummy compare in both
- * verify paths runs unconditionally and its result stays ignored. The `if`
+ * Hit and miss must pay the same compare count, so the dummy compare in the
+ * ONE verify path runs unconditionally and its result stays ignored. The `if`
  * this replaced is invisible at runtime -- hit still verifies, miss still
  * does not -- so only a shape check fails if it comes back: no
  * `if (saw_match ...)` guard may remain, and the `secret_const_time_eq(dummy`
- * call must still be there. `saw_match` appears nowhere else in either file,
+ * call must still be there. `saw_match` appears nowhere else in the file,
  * so a whole-file search is the function-body search. */
 static void expect_dummy_compare_is_unconditional(void)
 {
     static const char *const files[] = {
-        "src/sasl_framework.c",
         "src/account_store.c",
     };
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
