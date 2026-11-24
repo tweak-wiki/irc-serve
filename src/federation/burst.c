@@ -2072,6 +2072,13 @@ static chan_t *resolve_shadow_chan(server_t *s, const burst_chan_t *sc,
     }
     ch = chan_new(sc->name, sc->origin, epoch);
     if (ch == NULL || server_chan_attach(s, ch) != 0) {
+        /* The node-wide cap (#542): a refused creation is loud, in the local
+         * JOIN's spelling, rather than a silent bump of the dropped total. */
+        if (ch != NULL && s->nchan_objs >= SERVER_MAX_CHANNELS) {
+            fed_obs("[observable] chan_create_refused: channel=%s origin=%s "
+                   "nchan=%zu cap=%d reason=TOO_MANY_CHANNELS\n",
+                   sc->name, sc->origin, s->nchan_objs, SERVER_MAX_CHANNELS);
+        }
         chan_free(ch);
         return NULL;
     }
