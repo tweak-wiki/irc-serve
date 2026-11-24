@@ -455,6 +455,8 @@ static const char *fanout_tag_block(const conn_t *dst,
                 out[0] = '\0';
                 return NULL;
             }
+            /* NOT dead: n carries the write offset into the NEXT pair block
+             * (bounds via cap - n, separator via n > 0). */
             n += (size_t)w;
         }
     }
