@@ -307,7 +307,7 @@ int main(void)
     /* --- a live SJOIN: bob's holder is unknown --------------------------- */
     stamp(block, sizeof block, 101UL);
     (void)snprintf(line, sizeof line,
-                   "%s :" NAME_B " SJOIN " CHAN_T " " NICK_BOB " - *\r\n", block);
+                   "%s :" NAME_B " SJOIN " CHAN_T " " NICK_BOB " - * - -\r\n", block);
     TF_CHECK_MSG(pf_send_line(p1_fd, line) == 0, "the SJOIN send failed");
     TF_CHECK_MSG(nf_expect(&a, "fed_sjoin: channel=" CHAN_T " member=" NICK_BOB
                                " server=" NAME_B,
@@ -345,7 +345,7 @@ int main(void)
     /* --- the repeat: the same live SJOIN, after the correction ------------ */
     stamp(block, sizeof block, 107UL);
     (void)snprintf(line, sizeof line,
-                   "%s :" NAME_B " SJOIN " CHAN_T " " NICK_BOB " - *\r\n", block);
+                   "%s :" NAME_B " SJOIN " CHAN_T " " NICK_BOB " - * - -\r\n", block);
     TF_CHECK_MSG(pf_send_line(p1_fd, line) == 0, "the repeat SJOIN failed");
     TF_CHECK_MSG(nf_expect_nth(&a, "fed_sjoin: channel=" CHAN_T " member="
                                   NICK_BOB,
