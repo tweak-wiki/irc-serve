@@ -2245,7 +2245,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * client did nothing wrong and retries. */
     if (!auth_try_spend(s)) {
         (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED",
-                            "464", NULL, 0,
+                            ERR_SASLFAIL, NULL, 0,
                             "SASL authentication failed: too many attempts, "
                             "try again later");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=RATE_LIMITED\n",

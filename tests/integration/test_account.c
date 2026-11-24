@@ -1192,9 +1192,9 @@ static void test_login_rate_limited(const char *sasl, const char *registry)
             /* Wait for the refusal BEFORE closing: a close with the request still
              * unread lets the kernel discard it, and a login the loop never
              * dispatched spends no token. */
-            TF_CHECK_MSG(tc_expect(&cl.c, " 464 ", T_IO_MS) == 0,
-                         "no 464 for flood attempt %d", i);
-            /* The 464's text names the refusal: the budget's is "too many
+            TF_CHECK_MSG(tc_expect(&cl.c, " 904 ", T_IO_MS) == 0,
+                         "no 904 for flood attempt %d", i);
+            /* The 904's text names the refusal: the budget's is "too many
              * attempts", a bad password's is "did not verify". */
             limited = (strstr(tc_buffer(&cl.c), "too many attempts") != NULL);
             tc_close(&cl.c);
