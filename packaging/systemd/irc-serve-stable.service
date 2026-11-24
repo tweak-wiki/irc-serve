@@ -1,0 +1,18 @@
+# Reference systemd units for the CachyOS deploy box.
+#
+# These are HAND-MANAGED: copy to /etc/systemd/system/, adjust ports/names,
+# then `systemctl daemon-reload`. CI never writes unit files -- it ships only
+# the binary and runs `enable --now` / `restart` (#532). The `tee` sudoers
+# rule that used to let a deploy write arbitrary unit content is gone.
+[Unit]
+Description=irc-serve stable (:6667)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=nobody
+ExecStart=/opt/irc-serve/irc-serve-stable --name irc.test 6667
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
