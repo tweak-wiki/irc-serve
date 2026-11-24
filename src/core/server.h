@@ -1257,6 +1257,14 @@ struct server {
     struct account_store *sasl_store;
     uint64_t  n_sasl_ok;
     uint64_t  n_sasl_fail;
+    /* #539: process-wide credential-verification budget. Each AUTHENTICATE that
+     * reaches the KDF spends one token; an empty bucket is refused WITHOUT
+     * hashing, so a reconnect+login loop across connections cannot steal loop
+     * time from every client. auth_last_ms == 0 means "never refilled", which
+     * the spender initialises to the burst, mirroring poll_loop.c's flood
+     * bucket (#168); a zeroed server_init() is therefore already full. */
+    double      auth_tokens;
+    uint64_t    auth_last_ms;
 
     /* ------------------------------------------------------------------------
      * Phase 10.1: the account registry and the ONE event it has.
