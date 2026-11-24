@@ -91,8 +91,9 @@ Signals SHALL stop the loop, never reconfigure it.
 
 #### Scenario: Clean stop
 - **WHEN** SIGTERM or SIGINT arrives
-- **THEN** the loop stops and the node shuts down (a goodbye is queued but
-  currently never sent — see the open shutdown-drain issue).
+- **THEN** the loop stops and the node shuts down (a goodbye is sent
+   best-effort, flushed by a bounded write drain before close; a peer that
+   stays unwritable past the budget is marked clean locally instead).
 
 #### Scenario: Pipe and interrupt noise
 - **WHEN** a peer write fails with EPIPE, or SIGUSR1 arrives

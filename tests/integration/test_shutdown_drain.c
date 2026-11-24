@@ -19,6 +19,7 @@
  * NO FIXED sleep() (6.3): streams and stops are deadline-driven, and the
  * link precondition is nf_expect() on link_established.
  */
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@
 #include <unistd.h>
 
 #include "core/commands.h"
+#include "core/connection.h"
 #include "core/server.h"
 #include "federation/link.h"
 #include "harness/irc_client.h"
@@ -85,6 +87,84 @@ static void register_client(test_client_t *c, int port, const char *nick)
     TF_CHECK_MSG(tc_expect(c, " 001 ", T_IO_MS) == 0, "%s never registered",
                  nick);
 }
+
+/* #564: the bounded write drain, without a mesh. A socketpair's buffers are
+ * fixed -- no TCP autotuning to absorb the backlog -- so an unread reader
+ * stalls the writer deterministically. Fill the write queue past the buffer,
+ * drain against a short deadline: the helper must time out with bytes still
+ * queued, the link marked clean locally. Then empty the far end and drain
+ * again: this time it must flush. NO FIXED sleep(): the deadline bounds the
+ * first drain, and the second has nothing to wait for. */
+static void drain_helper_case(void)
+{
+    int fds[2] = { -1, -1 };
+    conn_t *c;
+    server_t s;
+    server_link_t link;
+    char bulk[32768];
+    char sink[32768];
+    uint64_t t0;
+    uint64_t elapsed_ms;
+    ssize_t got;
+    int flags;
+    int rc;
+    int i;
+
+    memset(bulk, 'X', sizeof bulk);
+    memset(&s, 0, sizeof s);
+    memset(&link, 0, sizeof link);
+    (void)snprintf(s.name, sizeof s.name, "irc.a");
+    (void)snprintf(link.name, sizeof link.name, "irc.b");
+    TF_CHECK_MSG(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0,
+                 "socketpair failed");
+    /* Nonblocking both ends, the way accepted sockets arrive: a full buffer
+     * must surface as RETRY, never as a blocked test. */
+    for (i = 0; i < 2; i++) {
+        flags = fcntl(fds[i], F_GETFL, 0);
+        TF_CHECK_MSG(flags >= 0 &&
+                     fcntl(fds[i], F_SETFL, flags | O_NONBLOCK) == 0,
+                     "could not make socketpair nonblocking");
+    }
+    c = conn_new(fds[0], CONN_CLIENT);
+    TF_CHECK_MSG(c != NULL, "conn_new failed");
+    for (i = 0; i < 8; i++) {
+        if (conn_queue(c, bulk, sizeof bulk) != 0) {
+            break; /* at the queue cap: backpressure, not a teardown */
+        }
+    }
+    TF_CHECK_MSG(conn_write_pending(c) > 0u,
+                 "no backlog queued for the drain");
+    /* Nobody reads fds[1]: the buffer stays full, the deadline expires. */
+    t0 = server_now_ms();
+    rc = fed_drain_writes(&s, &link, c, t0 + 500u);
+    elapsed_ms = server_now_ms() - t0;
+    TF_CHECK_MSG(rc == 0, "the drain reported flushed on a stalled socket");
+    TF_CHECK_MSG(link.clean_leave == 1,
+                 "an undrained goodbye left no local clean-leave mark");
+    TF_CHECK_MSG(conn_write_pending(c) > 0u,
+                 "the drain emptied a queue nobody read");
+    TF_CHECK_MSG(elapsed_ms < 8000u,
+                 "the bounded drain took %llu ms",
+                 (unsigned long long)elapsed_ms);
+    /* Empty the far end in rounds: each drain moves a kernel-buffer worth
+     * into the peer buffer, each read frees it again, until the user queue
+     * is gone. The last drain -- with nothing left to wait for -- is the
+     * one that must report flushed. */
+    rc = 0;
+    for (i = 0; i < 40 && conn_write_pending(c) > 0u; i++) {
+        rc = fed_drain_writes(&s, &link, c, server_now_ms() + 100u);
+        do {
+            got = read(fds[1], sink, sizeof sink);
+        } while (got > 0);
+    }
+    TF_CHECK_MSG(conn_write_pending(c) == 0u,
+                 "bytes left queued after a successful drain");
+    TF_CHECK_MSG(rc == 1, "the drain reported pending on an empty queue");
+    conn_free(c);
+    (void)close(fds[0]);
+    (void)close(fds[1]);
+}
+
 
 int main(void)
 {
@@ -205,6 +285,53 @@ int main(void)
                              "queue spins teardown forever (#308)");
             }
         }
+        { /* #564: BOUNDED WRITE drain, in fed_drain_writes(). The first pump
+            * stops at RETRY on a saturated socket, so the goodbye waits for
+            * writability: a poll for POLLOUT while the queue is still
+            * pending, bounded by one shared FED_SHUTDOWN_FLUSH_MS deadline,
+            * and a local clean_leave mark when the budget expires with bytes
+            * still queued. Ordered against the receive drain below: the write
+            * wait runs first, still under the one wq_lock hold. */
+            const char *hfn = strstr(code, "fed_drain_writes(server_t");
+            const char *wd;
+            const char *po;
+            const char *pl;
+            const char *cl;
+            const char *un;
+
+            TF_CHECK_MSG(hfn != NULL && hfn < drain,
+                         "could not find fed_drain_writes() in link.c");
+            wd = strstr(hfn, "conn_write_pending_held(c)");
+            TF_CHECK_MSG(wd != NULL && wd < drain,
+                         "the shutdown goodbye does not wait on a saturated "
+                         "socket: the first pump stops at RETRY with the "
+                         "SHUTDOWN still queued and the close discards it, "
+                         "so the peer times out the link (#564)");
+            po = strstr(wd, "POLLOUT");
+            TF_CHECK_MSG(po != NULL && po < drain,
+                         "the write drain never asks for writability: "
+                         "without POLLOUT it cannot tell a full socket from "
+                         "a dead one (#564)");
+            pl = strstr(wd, "poll(");
+            TF_CHECK_MSG(pl != NULL && pl < drain,
+                         "the write drain never waits: without a poll the "
+                         "goodbye leaves only if the first pump took it "
+                         "(#564)");
+            cl = strstr(po, "clean_leave = 1");
+            TF_CHECK_MSG(cl != NULL && cl < drain,
+                         "an undrainable goodbye is not marked clean "
+                         "locally: a reopened node would redial a peer it "
+                         "intentionally left (#564)");
+            un = strstr(cl, "printf(");
+            TF_CHECK_MSG(un != NULL && un < drain,
+                         "an undrainable goodbye prints nothing: the dropped "
+                         "departure is silent, and the runtime half asserts "
+                         "its fed_shutdown_undrained text (#564)");
+            TF_CHECK_MSG(strstr(code, "FED_SHUTDOWN_FLUSH_MS") != NULL,
+                         "the write drain has no shared deadline: ten slow "
+                         "peers cost ten waits and teardown is unbounded "
+                         "(#564)");
+        }
         }
 
     /* Shutdown while the peer is streaming: A's fed_send_shutdown() drains
@@ -220,6 +347,9 @@ int main(void)
     (void)nf_stop(&b);
     nf_free(&a);
     nf_free(&b);
+    /* #564: the bounded write drain, no mesh needed. Runs after the streaming
+     * case; it opens no nodes of its own. */
+    drain_helper_case();
     tf_done("shutdown_drain");
     return 0;
 }
