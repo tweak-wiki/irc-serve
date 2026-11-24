@@ -534,6 +534,10 @@ irc_add_integration_test(test_fed_handshake test_fed_handshake.c)
 # processes over real TCP, per 6.2.
 irc_add_integration_test(test_fed_roster test_fed_roster.c)
 
+# #559: an inbound S-verb applied to the cache must render the client-shaped
+# line to local members. Remote PART/JOIN/TOPIC observed on the other node.
+irc_add_integration_test(test_fed_state_emit test_fed_state_emit.c)
+
 # 7/Phase 6: a PRIVMSG from A reaches B exactly once, the two-node ping-pong
 # settles, and 2.4's own-origin rule is the counter that proves it.
 irc_add_integration_test(test_fed_loop test_fed_loop.c)
