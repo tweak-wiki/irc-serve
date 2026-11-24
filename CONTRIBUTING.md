@@ -38,6 +38,14 @@ Landing several PRs at once: `./scripts/merge-train.sh 12 13 14` brings each
 branch up to date and merges each as its checks go green. Never bypass
 protection to do this faster.
 
+## Tracking work
+
+No hidden work: open an issue before you start, and link it from the PR body
+with `Refs #n` or `Closes #n`. Cards live on the
+[project board](https://github.com/orgs/tweak-wiki/projects/1), which is
+managed as code — see
+[openspec/specs/workflow/spec.md](openspec/specs/workflow/spec.md).
+
 ## Before you open a PR
 
 ```sh
