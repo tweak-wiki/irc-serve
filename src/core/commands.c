@@ -1989,6 +1989,39 @@ static void auth_wipe_credential(unsigned char *payload, char *authzid,
     auth_wipe(passwd, SASL_MAX_PASSWORD + 1u);
 }
 
+/* #539: process-wide credential-verification budget, the flood bucket's shape
+ * (#168) applied to the KDF instead of to lines. Burst 64 absorbs a restart
+ * storm and the terminal sweep's 61-probe SASL pass; 2/sec sustained is orders
+ * of magnitude above legitimate login rate and bounds loop time stolen by a
+ * reconnect+login loop to ~2 KDFs/sec. */
+#define AUTH_BURST 64.0
+#define AUTH_REFILL_PER_SEC 2.0
+
+/* Spend one verification token. 1 when the caller may hash, 0 when the bucket
+ * is empty and the caller must refuse WITHOUT verifying. A refusal here sets
+ * no state and counts no failure, so a legitimate client simply retries. */
+static int auth_try_spend(server_t *s)
+{
+    uint64_t now = server_now_ms();
+
+    if (s->auth_last_ms == 0u) {
+        s->auth_tokens = AUTH_BURST;
+        s->auth_last_ms = now;
+    } else if (now > s->auth_last_ms) {
+        s->auth_tokens += (double)(now - s->auth_last_ms) *
+                          (AUTH_REFILL_PER_SEC / 1000.0);
+        if (s->auth_tokens > AUTH_BURST) {
+            s->auth_tokens = AUTH_BURST;
+        }
+        s->auth_last_ms = now;
+    }
+    if (s->auth_tokens < 1.0) {
+        return 0;
+    }
+    s->auth_tokens -= 1.0;
+    return 1;
+}
+
 static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
 {
     const char *mech = NULL;
@@ -2206,6 +2239,21 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * does not pretend otherwise: cap.c has already withheld `sasl` from CAP LS,
      * so a client that reached here has either ignored the advertisement or
      * arrived with a hard-coded configuration. */
+    /* #539: spend a verification token BEFORE hashing, so a reconnect+login
+     * loop cannot burn loop-thread KDF time faster than 2/sec no matter how
+     * many connections it opens. No state is set and no failure counted: the
+     * client did nothing wrong and retries. */
+    if (!auth_try_spend(s)) {
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED",
+                            ERR_SASLFAIL, NULL, 0,
+                            "SASL authentication failed: too many attempts, "
+                            "try again later");
+        printf("[observable] sasl: fd=%d outcome=REJECTED reason=RATE_LIMITED\n",
+               c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
+        return;
+    }
+
     if (!sasl_plain_verify(s->sasl_store, authzid, authcid, passwd)) {
         const int no_store = (account_store_count(s->sasl_store) == 0u);
 
