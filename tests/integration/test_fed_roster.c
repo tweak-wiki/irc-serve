@@ -438,6 +438,14 @@ static void case_cross_node_roster(void)
     TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
                  "alice's JOIN never completed on the node that does not own the "
                  "channel");
+    /* #558: the actor's own echo on a forwarded JOIN. A's non-owned row forwards
+     * the SJOIN without addressing any local member, so without the echo alice
+     * would sit on a channel she cannot see. The echo is synchronous, so by the
+     * 366 above it is already in her buffer. */
+    TF_CHECK_MSG(tc_expect(&alice, "JOIN " CHAN, T_IO_MS) == 0,
+                 "alice got no JOIN echo for her forwarded JOIN on the "
+                 "non-owning node: %s",
+                 tc_buffer(&alice));
 
     /* BOTH nodes, both names, in order. This is the acceptance criterion, and
      * the two assertions are independent: A's is about the SJOIN's member
