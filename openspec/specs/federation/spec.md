@@ -47,6 +47,19 @@ Bursts SHALL replace state atomically at SBURSTE.
 - **WHEN** the SBURSTE counts disagree with accepted records
 - **THEN** the burst is discarded, nothing is installed.
 
+#### Scenario: Inbound state emits client lines
+- **WHEN** an inbound S-verb (SJOIN/SPART/STOPIC/SSMODE/SKICK/SNICK/SQUIT)
+  is applied to this node's cache
+- **THEN** the corresponding client-shaped line (JOIN/PART/TOPIC/MODE/
+  KICK/NICK/QUIT) is rendered to every local member of the affected
+  channel(s) — roster-only convergence (353 on next NAMES) is not enough.
+
+#### Scenario: Notifies are node-local until wire bump
+- **WHEN** a SETNAME/AWAY/INVITE notification fires on one node of a mesh
+- **THEN** only that node's members observe it; cross-node notify
+  delivery (SSETNAME/SAWAY/SINVITE) waits on a 4.3 wire version bump,
+  tracked separately.
+
 ### Requirement: Loop safety
 
 Federation SHALL NOT circulate or amplify messages.

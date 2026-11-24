@@ -36,6 +36,12 @@ Login SHALL fail closed on anything unexpected.
 - **WHEN** a password or name is compared
 - **THEN** comparison runs in constant time over the folded form.
 
+#### Scenario: SASL completion numerics
+- **WHEN** an AUTHENTICATE exchange completes or fails
+- **THEN** the node answers 903 (success) / 904 (credentials rejected) /
+  905 (payload too long) / 906 (aborted) / 908 (mechanism list) —
+  the SASL numerics every client library parses — never 464 alone.
+
 ### Requirement: Credential files
 
 Secrets SHALL NOT leak through files, listings, or logs.
