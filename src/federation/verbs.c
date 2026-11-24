@@ -1206,16 +1206,61 @@ static void fed_in_message(server_t *s, fanout_target_t *t, const char *prefix,
            strlen((prefix != NULL) ? prefix : "?"),
            conn_text_bad_count((prefix != NULL) ? prefix : "?"));
 }
+/* The actor an inbound state line renders with. An S-verb's raw prefix is a
+ * peer-chosen string: a hostmask on a well-formed mesh, a server name on a
+ * relayed line or the s->name fallback, arbitrary bytes from a malicious
+ * peer. Rendering it raw puts `:irc.x JOIN #T` -- unparseable as an actor --
+ * on clients, so the prefix is trusted only when it IS a hostmask (`!`
+ * before `@`). Otherwise the burst-populated roster record speaks:
+ * `nick!user@host` from stored fields. A known member with no record yet
+ * renders as the bare nick -- the same rule 353 uses for empty-host entries
+ * -- except for JOIN, which withholds entirely: gap 2's burst completion
+ * emits the held JOIN, and `nick!*@*` is forbidden. A NULL nick (SMODES,
+ * whose subject is the evaluating server) has no roster identity and no
+ * bare form: NULL means withhold, and that caller falls back to the subject
+ * server explicitly rather than through here. Returns a pointer valid for
+ * the immediate fed_local_emit() call only when it returns `out`. */
+static const char *fed_actor_prefix(const chan_t *ch, const char *nick,
+                                    const char *prefix, int withhold_bare,
+                                    char *out, size_t cap)
+{
+    if (prefix != NULL) {
+        const char *bang = strchr(prefix, '!');
+
+        if (bang != NULL && strchr(bang + 1, '@') != NULL) {
+            return prefix; /* observed hostmask: the only attribution on the wire */
+        }
+    }
+    if (nick != NULL && ch != NULL) {
+        for (size_t i = 0; i < ch->nremotes; i++) {
+            const chan_remote_t *m = &ch->remotes[i];
+
+            if (!chan_same_name(m->nick, nick)) {
+                continue;
+            }
+            if (m->user[0] != '\0' && m->host[0] != '\0') {
+                (void)snprintf(out, cap, "%s!%s@%s", m->nick, m->user,
+                               m->host);
+                return out;
+            }
+        }
+    }
+    if (withhold_bare || nick == NULL) {
+        return NULL;
+    }
+    return nick;
+}
+
 /* The local half of an inbound state verb: resolve the channel and write the
- * CLIENT-shaped line to local members, with NO forward. The forward is the
+ * client-shaped line to local members, with NO forward. The forward is the
  * handler's existing fanout_forward_channel_sverb() call, which is untouched:
  * this only adds the local emission fed_in_message() has always had. One
  * helper rather than inline code in seven handlers, so the resolve class
  * cannot drift between them: every state verb resolves FANOUT_STATE_CHANGE,
  * and deliver_local writes to members of either channel kind without
  * forwarding, which is exactly the half that was missing. */
-static void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
-                           const char *verb, const char *const *params, int nparams)
+void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
+                     const char *verb, const char *const *params, int nparams)
 {
     fanout_target_t t;
 
@@ -1311,11 +1356,21 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
            "local=%zu remote=%zu origin=%s owned=%d member_len=%zu member_bad_bytes=%zu\n",
            ch->name, params[1], link->name, flags, ch->nmembers, ch->nremotes,
            ch->origin, chan_origin_is_self(s, ch), strlen(params[1]), conn_text_bad_count(params[1]));
-    /* The JOIN this node's own clients see. The prefix is the observed one --
-     * the joiner's hostmask on a well-formed mesh -- passed through for the
-     * reason fed_in_message() gives: a client is never sent an S-verb, and the
-     * only hostmask this node has for the joiner is the one on the line. */
-    fed_local_emit(s, ch, prefix, "JOIN", NULL, 0);
+
+    /* The JOIN this node's own clients see. The actor is the observed hostmask
+     * when the line carries one; otherwise the burst-described roster record --
+     * and when the member has no record yet, nothing at all: the next burst
+     * that completes the record emits the held JOIN, and neither a guessed
+     * `nick` nor a forbidden `nick!*@*` ever reaches a client. */
+    {
+    char actor[CONN_HOSTMASK_MAX];
+    const char *who = fed_actor_prefix(ch, params[1], prefix, 1, actor,
+                                       sizeof actor);
+
+    if (who != NULL) {
+        fed_local_emit(s, ch, who, "JOIN", NULL, 0);
+    }
+}
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SJOIN", prefix,
                                        params, nparams, tags);
 }
@@ -1851,14 +1906,6 @@ static struct fed_advert *advert_table(server_t *s)
     return s->advs;
 }
 
-/* The advertised fields of one peer, FOR A LOG OR A COUNTER. This is the whole
- * read surface of the store, and its return type is the enforcement of the SSRF
- * property as much as the comment is: it hands out two bounded strings and two
- * numbers, and there is no function in this file that returns a sockaddr, a
- * server_link_t or anything the dial path could be built from. */
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out);
 
 /* ADVERTISE <load%> [<name> <host> <port>].
  *
@@ -2123,48 +2170,6 @@ static void fed_in_advertise(server_t *s, server_link_t *link, const char *prefi
     }
 }
 
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out)
-{
-    size_t i;
-
-    if (name != NULL && name_cap > 0u) {
-        name[0] = '\0';
-    }
-    if (host != NULL && host_cap > 0u) {
-        host[0] = '\0';
-    }
-    if (port_out != NULL) {
-        *port_out = 0u;
-    }
-    if (load_out != NULL) {
-        *load_out = 0u;
-    }
-    if (s == NULL || s->advs == NULL || peer == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < s->nadv; i++) {
-        if (!chan_same_name(s->advs[i].peer, peer)) {
-            continue;
-        }
-        if (name != NULL) {
-            (void)bounded_copy(name, name_cap, s->advs[i].name);
-        }
-        if (host != NULL) {
-            (void)bounded_copy(host, host_cap, s->advs[i].host);
-        }
-        if (port_out != NULL) {
-            *port_out = s->advs[i].port;
-        }
-        if (load_out != NULL) {
-            *load_out = s->advs[i].load_pct;
-        }
-        return s->advs[i].name;
-    }
-    return NULL;
-}
-
 size_t fed_advertised_count(const server_t *s)
 {
     return (s != NULL) ? s->nadv : 0u;
@@ -2186,6 +2191,12 @@ void fed_advert_close(server_t *s)
     s->advs = NULL;
     s->nadv = 0u;
 }
+
+/* One QUIT per local member per departed member; defined beside fed_in_squit,
+ * which shares it. Forward-declared because fed_in_shutdown() below calls it
+ * and the definition lives with the SQUIT half it was extracted from. */
+static void fed_emit_departure_quits(server_t *s, const char *gone,
+                                     const char *reason);
 
 /* SHUTDOWN [:reason].
  *
@@ -2210,14 +2221,18 @@ void fed_advert_close(server_t *s)
  *      cannot explain. The purge is per-ORIGIN (chan_remote_purge is keyed on the
  *      reporting origin), so nothing another origin contributed is touched.
  *
- *   3. IT MUST NOT BE SILENT, AND IT MUST NOT BE A CLIENT EVENT. There is no
+ *   3. IT MUST NOT BE SILENT, AND IT MUST NOT BE A CLIENT NOTICE. There is no
  *      client NOTICE here, and the reason is that no client's session is affected
  *      by which server left: the affected party is the MESH. A NOTICE would have
  *      to name a server the client cannot reach, cannot ask about, and has no way
- *      to do anything with -- it is noise aimed at the wrong audience. What the
- *      surviving node does instead is three things an operator can act on: it
- *      prints the line with the peer and the reason, it tells its OTHER peers
- *      (below), and it leaves the dump saying why the link is not being dialled.
+ *      to do anything with -- it is noise aimed at the wrong audience. Per-member
+ *      QUIT is the carved-out exception: a departed member IS a client's
+ *      session fact, and the local members of its channels are the audience
+ *      for it. Silence there is the symptom #559 was filed for. What the
+ *      surviving node does instead is three things an operator
+ *      can act on: it prints the line with the peer and the reason, it tells
+ *      its OTHER peers (below), and it leaves the dump saying why the link is
+ *      not being dialled.
  *
  * AND IT IS TOLD ONWARD, which is the half that makes it a mesh feature rather
  * than a local one. The forwarding is a `SQUIT <peer>` -- not a `SHUTDOWN`, and
@@ -2265,6 +2280,12 @@ static void fed_in_shutdown(server_t *s, server_link_t *link, const char *prefix
      * before the consequences of it. The ordering also means that a purge which
      * somehow re-entered the tick could not find a dialable link. */
     (void)fed_mark_clean_leave(s, link, 1);
+
+    /* 1b. THE QUIT EACH MEMBER SEES, before the purge forgets the names. On a
+     * two-node mesh the relay below has no audience, so without this a
+     * graceful leave renders nothing anywhere -- the symptom #559 was filed
+     * for. Same helper SQUIT uses, same per-member hostmask-or-bare rule. */
+    fed_emit_departure_quits(s, link->name, (nparams == 1) ? params[0] : NULL);
 
     /* 2. THE PURGE, AND IT IS PER-ORIGIN AND IT IS THE SQUIT BODY'S. The walk
      * shape is fed_in_squit()'s exactly, including the "do not advance past a
@@ -2327,6 +2348,13 @@ static void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
     if (nparams < 2 || nparams > 3) {
         return;
     }
+    /* The actor BEFORE the removal below: the roster record is the only
+     * place this node's burst-described hostmask lives, and the purge
+     * forgets it. */
+    char actor[CONN_HOSTMASK_MAX];
+    const char *who = fed_actor_prefix(ch, params[0], prefix, 0, actor,
+                                       sizeof actor);
+
     (void)chan_remote_remove(ch, link->name, params[0]);
     fed_touch_server(ch, link->name, 0);
     fed_obs("[observable] fed_spart: channel=%s member=%s server=%s remote=%zu\n",
@@ -2339,9 +2367,9 @@ static void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
 
         (void)conn_text_strip(clean, sizeof clean, params[2], STRIP_STORED);
         lp[0] = clean;
-        fed_local_emit(s, ch, prefix, "PART", lp, 1);
+        fed_local_emit(s, ch, who, "PART", lp, 1);
     } else {
-        fed_local_emit(s, ch, prefix, "PART", NULL, 0);
+        fed_local_emit(s, ch, who, "PART", NULL, 0);
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SPART", prefix,
                                        params, nparams, tags);
@@ -2459,12 +2487,16 @@ static void fed_in_stopic(server_t *s, server_link_t *link, chan_t *ch,
     fed_obs("[observable] fed_topic: channel=%s member=%s len=%zu\n", ch->name,
            params[0], strlen(ch->topic));
     /* ch->topic, NOT params[2]: the stored value is the stripped one, and the
-     * local echo of a locally-set topic renders the same stored field. */
+     * local echo of a locally-set topic renders the same stored field. The
+     * actor is the setter: the observed hostmask, else the roster record. */
     {
+        char actor[CONN_HOSTMASK_MAX];
         const char *lp[1];
+        const char *who = fed_actor_prefix(ch, params[0], prefix, 0, actor,
+                                           sizeof actor);
 
         lp[0] = ch->topic;
-        fed_local_emit(s, ch, prefix, "TOPIC", lp, 1);
+        fed_local_emit(s, ch, who, "TOPIC", lp, 1);
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "STOPIC", prefix,
                                        params, nparams, tags);
@@ -2728,11 +2760,18 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
     /* The MODE this node's own clients see: the mode string and the optional
      * mask, stripped the way the stored values are. Both are peer-chosen, and
      * the client line is a second reader the forward path's filter does not
-     * cover -- a control byte in either would otherwise reach a terminal. */
+     * cover -- a control byte in either would otherwise reach a terminal.
+     * The actor has no nick to look up -- the subject IS the evaluating
+     * server, authority-checked above -- so a hostmask prefix renders as-is
+     * and anything else renders as the subject server itself. That is the
+     * server speaking, not a user actor, which is why a server name is
+     * renderable HERE and nowhere else on this path. */
     {
+        char actor[CONN_HOSTMASK_MAX];
         char clean_modes[CHAN_MAX_MODES + 1u];
         char clean_mask[CHAN_MAX_BAN + 1u];
         const char *lp[2];
+        const char *who;
         int nlp = 1;
 
         (void)conn_text_strip(clean_modes, sizeof clean_modes, params[2],
@@ -2744,7 +2783,9 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
             lp[1] = clean_mask;
             nlp = 2;
         }
-        fed_local_emit(s, ch, prefix, "MODE", lp, nlp);
+        who = fed_actor_prefix(ch, NULL, prefix, 1, actor, sizeof actor);
+        fed_local_emit(s, ch, (who != NULL) ? who : params[0], "MODE", lp,
+                       nlp);
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SMODES", prefix,
                                        params, nparams, tags);
@@ -2803,21 +2844,83 @@ static void fed_in_skick(server_t *s, server_link_t *link, chan_t *ch,
             ch->name, shown_by, strlen(params[0]), conn_text_bad_count(params[0]),
             shown_target, strlen(params[2]), conn_text_bad_count(params[2]));
     /* The KICK this node's own clients see: target, then the reason stripped
-     * the way the local KICK path strips it. */
-    if (nparams > 3) {
-        char clean[CHAN_MAX_KICK_REASON + 1u];
-        const char *lp[2];
+     * the way the local KICK path strips it. The actor is the kicker: the
+     * observed hostmask, else the kicker's roster record. Removal above took
+     * the TARGET, so the kicker's record is still here to render from. */
+    {
+        char actor[CONN_HOSTMASK_MAX];
+        const char *who = fed_actor_prefix(ch, params[0], prefix, 0, actor,
+                                           sizeof actor);
 
-        (void)conn_text_strip(clean, sizeof clean, params[3], STRIP_STORED);
-        lp[0] = params[2];
-        lp[1] = clean;
-        fed_local_emit(s, ch, prefix, "KICK", lp, 2);
-    } else {
-        fed_local_emit(s, ch, prefix, "KICK", &params[2], 1);
+        if (nparams > 3) {
+            char clean[CHAN_MAX_KICK_REASON + 1u];
+            const char *lp[2];
+
+            (void)conn_text_strip(clean, sizeof clean, params[3],
+                                  STRIP_STORED);
+            lp[0] = params[2];
+            lp[1] = clean;
+            fed_local_emit(s, ch, who, "KICK", lp, 2);
+        } else {
+            fed_local_emit(s, ch, who, "KICK", &params[2], 1);
+        }
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SKICK", prefix,
                                        params, nparams, tags);
     (void)chan_dispose_if_empty(s, ch);
+}
+
+/* One QUIT per local member per departed member, and it is shared because the
+ * two graceful departures end the same way. A SQUIT names a server whose
+ * every member is gone; a SHUTDOWN names the peer itself, which this node
+ * then relays onward as SQUIT -- and on a two-node mesh that relay has no
+ * audience, so without this call a graceful leave renders nothing anywhere.
+ * Call BEFORE the purge: this is the only point the names are still known,
+ * and the channels themselves may be disposed in the walk, so a line for a
+ * member of a channel about to vanish still reaches the members who stay.
+ * The prefix is the stored hostmask where the burst path described the
+ * member, else the bare nick -- the same rule 353 renders by, and for the
+ * same reason. `reason` is the peer's own and is stripped once, outside the
+ * walk: one reason for every channel, and the client line is a reader the
+ * forward path's filter does not cover. NULL reason renders a bare QUIT. */
+static void fed_emit_departure_quits(server_t *s, const char *gone,
+                                     const char *reason)
+{
+    char clean_reason[IRC_MAX_LINE];
+    const char *qp[1] = { NULL };
+    int nqp = 0;
+
+    if (s == NULL || gone == NULL) {
+        return;
+    }
+    if (reason != NULL) {
+        (void)conn_text_strip(clean_reason, sizeof clean_reason, reason,
+                              STRIP_STORED);
+        qp[0] = clean_reason;
+        nqp = 1;
+    }
+    for (size_t ci = 0, nch = server_chan_count(s); ci < nch; ci++) {
+        chan_t *qch = server_chan_at(s, ci);
+
+        if (qch == NULL) {
+            continue;
+        }
+        for (size_t r = 0; r < qch->nremotes; r++) {
+            const chan_remote_t *m = &qch->remotes[r];
+            char mask[CONN_HOSTMASK_MAX];
+
+            if (!chan_same_name(m->server, gone)) {
+                continue;
+            }
+            if (m->user[0] != '\0' && m->host[0] != '\0') {
+                (void)snprintf(mask, sizeof mask, "%s!%s@%s", m->nick,
+                               m->user, m->host);
+            } else {
+                (void)snprintf(mask, sizeof mask, "%s", m->nick);
+            }
+            fed_local_emit(s, qch, mask, "QUIT", qp, nqp);
+        }
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -2941,51 +3044,9 @@ static void fed_in_squit(server_t *s, server_link_t *link,
      * silently, and a channel that silently survives a purge is a roster the
      * operator is told is gone. chan_remote_purge() walks the same way for the
      * same reason. */
-    /* The QUIT each remaining local member sees, one per departed member of
-     * every channel it shares with the gone server. BEFORE the purge below,
-     * which is the only point the names are still known; the channels
-     * themselves are disposed in the walk, so a line for a member of a
-     * channel about to vanish still reaches the members who stay. The prefix
-     * is the stored hostmask where the burst path described the member, else
-     * the bare nick -- the same rule 353 renders by, and for the same reason. */
-    {
-        /* Stripped once, outside the walk: one reason for every channel, and
-         * the client line is a reader the forward path's filter does not
-         * cover. IRC_MAX_LINE always fits it, because the whole peer line
-         * already did. */
-        char clean_reason[IRC_MAX_LINE];
-        const char *qp[1] = { NULL };
-        int nqp = 0;
-
-        if (nparams > 1) {
-            (void)conn_text_strip(clean_reason, sizeof clean_reason, params[1],
-                                  STRIP_STORED);
-            qp[0] = clean_reason;
-            nqp = 1;
-        }
-        for (size_t ci = 0, nch = server_chan_count(s); ci < nch; ci++) {
-            chan_t *qch = server_chan_at(s, ci);
-
-            if (qch == NULL) {
-                continue;
-            }
-            for (size_t r = 0; r < qch->nremotes; r++) {
-                const chan_remote_t *m = &qch->remotes[r];
-                char mask[CONN_HOSTMASK_MAX];
-
-                if (!chan_same_name(m->server, gone)) {
-                    continue;
-                }
-                if (m->user[0] != '\0' && m->host[0] != '\0') {
-                    (void)snprintf(mask, sizeof mask, "%s!%s@%s", m->nick,
-                                   m->user, m->host);
-                } else {
-                    (void)snprintf(mask, sizeof mask, "%s", m->nick);
-                }
-                fed_local_emit(s, qch, mask, "QUIT", qp, nqp);
-            }
-        }
-    }
+    /* The QUIT each remaining local member sees: one per departed member, via
+     * the shared departure helper, BEFORE the purge below. */
+    fed_emit_departure_quits(s, gone, (nparams > 1) ? params[1] : NULL);
     while (i < server_chan_count(s)) {
         chan_t *ch = server_chan_at(s, i);
         int disposed;

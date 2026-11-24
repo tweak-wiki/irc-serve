@@ -98,6 +98,7 @@
 
 #include "core/cap.h"
 #include "core/server.h"
+#include "account_store.h"
 #include "sasl_framework.h"
 /* For struct tls_node, so the sentinel below is a well-typed pointer rather than a
  * cast: server.h forward-references it and tls_backend.h owns the definition. */
@@ -212,23 +213,24 @@ static void make_worst_case(server_t *s)
     }
     s->sts_duration = 0xFFFFFFFFu;
     /* One credential, so `sasl` is offered too. server_init() leaves
-     * `sasl_store` NULL -- a node with no --sasl-store -- and sasl_store_add()
-     * refuses a NULL store, so the store is CREATED here rather than written to.
+     * `sasl_store` NULL -- a node with no --sasl-store -- and account_store_add()
+     * refuses a NULL store, so the table is CREATED here rather than written to.
      * Five bytes of the answer, which is small, and it is here because it is the
      * one condition on availability that is neither a plain field nor TLS: a
      * capability whose availability is a property of the CONFIGURED NODE. */
     if (s->sasl_store == NULL) {
-        s->sasl_store = sasl_store_new();
+        s->sasl_store = account_store_new();
     }
-    CHECK(s->sasl_store != NULL, "sasl_store_new() failed, so `sasl` cannot be "
+    CHECK(s->sasl_store != NULL, "account_store_new() failed, so `sasl` cannot be "
                                  "offered and the worst-case list is short by a name");
-    CHECK(sasl_store_add(s->sasl_store, "bounds-probe", "not-a-real-password") == 0,
-          "sasl_store_add() refused a valid credential, so `sasl` will not be "
+    CHECK(account_store_add(s->sasl_store, "bounds-probe", "not-a-real-password",
+                            0) == 0,
+          "account_store_add() refused a valid credential, so `sasl` will not be "
           "offered and the worst-case list is short by a name");
-    CHECK(sasl_store_count(s->sasl_store) == 1u,
-          "the store took a credential but reports %zu, so `sasl_possible()` will "
+    CHECK(account_store_count(s->sasl_store) == 1u,
+          "the table took a credential but reports %zu, so `sasl_possible()` will "
           "not offer it",
-          sasl_store_count(s->sasl_store));
+          account_store_count(s->sasl_store));
 }
 
 static void sweep_cap_available_list(void)
@@ -364,7 +366,7 @@ static void sweep_cap_available_list(void)
     printf("[observable] cap_sweep: fits=%zu refusals=%zu longest=%zu cap_ls_max=%u "
            "tls=%d tls_port=%d sasl=%zu widest=[%.500s]\n",
            fits, refusals, longest, (unsigned)CAP_LS_MAX, tls_backend_available(),
-           server_tls_port(&s), sasl_store_count(s.sasl_store), widest);
+           server_tls_port(&s), account_store_count(s.sasl_store), widest);
 
     /* THE SENTINEL IS UNDONE BEFORE THE TEARDOWN, and this is not tidiness: on a
      * WITH_TLS build server_shutdown() calls tls_backend_node_free(s->tls), which

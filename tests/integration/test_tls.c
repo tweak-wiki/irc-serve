@@ -881,9 +881,8 @@ static void case_caps_vary_by_connection(const char *cert, const char *key,
  *      The pair matters: suppressing both would pass the first half and be
  *      wrong, and the `sasl=loaded` anchor below proves the omission is the
  *      gate rather than a missing store.
- *   2. AUTHENTICATE PLAIN on that plaintext connection is refused 464 with
+ *   2. AUTHENTICATE PLAIN on that plaintext connection is refused 904 with
  *      reason=TLS_REQUIRED, and registration never follows -- a client that
- *      ignored the advertisement is still not let in.
  *   3. A --peer-tls dial whose peer speaks plaintext sends no FEDERATE bytes:
  *      the handshake is started, it never completes, and the queued claim is
  *      held until the close rather than leaked. Asserted on the BYTES a
@@ -974,8 +973,8 @@ static void case_sasl_gated_by_tls(const char *dir, const char *cert,
         snprintf(line, sizeof line, "AUTHENTICATE PLAIN %s", good);
         check(tc_send(&plain, line) == 0,
               "send a correct one-shot PLAIN credential in the clear", NULL);
-        check(tc_expect(&plain, " 464 ", 10000) == 0,
-              "the cleartext credential is refused 464 rather than verified",
+        check(tc_expect(&plain, " 904 ", 10000) == 0,
+              "the cleartext credential is refused 904 rather than verified",
               tc_buffer(&plain));
         check(nf_expect(&n, "reason=TLS_REQUIRED", 5000) == 0,
               "the refusal names TLS_REQUIRED, so an operator can see the "
