@@ -1371,9 +1371,9 @@ static void notify_away(server_t *s, conn_t *c, const char *message)
      * THE NAME IS CHECKED, NOT RESOLVED. `fanout_resolve()` used to stand
      * between this walk and `t.name`, and its `fanout_name_store()` refused
      * unrenderable bytes before they could reach the struct -- and from there
-     * the observable log line. Building the target directly removes that
-     * checkpoint, so the walk keeps the property itself: one
-     * `conn_text_display_check()` pass over a bounded name (not a registry
+     * the observable log line. Building the target directly skips the resolve
+     * but keeps that checkpoint -- the store below -- so the walk keeps the
+     * property itself: that same check over a bounded name (not a registry
      * probe), and a name that fails it is skipped like a channel this node no
      * longer holds. Channel creation already refuses such names centrally;
      * this is the backstop for the federation-filled shape above. */
@@ -1396,7 +1396,9 @@ static void notify_away(server_t *s, conn_t *c, const char *message)
             t.kind = FANOUT_LOCAL_CHANNEL;
             t.vclass = FANOUT_MESSAGE;
             t.chan = ch;
-            memcpy(t.name, ch->name, sizeof t.name);
+            if (fanout_target_store_name(&t, ch->name) == 0) {
+                continue; /* store refused: nothing safe to address */
+            }
             delivered += fanout_deliver_local_gated(s, &t, prefix, "AWAY", &plain,
                                                     NULL, cap_gate_away_notify,
                                                     NULL, c);
