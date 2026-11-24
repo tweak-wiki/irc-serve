@@ -94,6 +94,11 @@ done
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$here/.." && pwd)
 
+# Sanitizer wiring comes from scripts/gate-lib.sh, the single definition shared with
+# gate-linux-cell.sh and teeth-linux.sh. A literal retyped here is a class this cell
+# watches and the others do not, the next time one of the two is edited.
+. "$here/gate-lib.sh"
+
 # Portable core count. nproc is GNU/Linux; sysctl is BSD/macOS; /proc is a third
 # fallback. Without this the script would run a 12-cell matrix one core at a time.
 if [ -z "${CTEST_JOBS_BUILD:-}" ] || [ "$CTEST_JOBS_BUILD" = "8" ]; then
@@ -811,7 +816,7 @@ if [ "$RUN_ASAN" = "1" ]; then
         # has ONE answer in this repository: the Linux cell, this cell, and
         # ci_sanitizers all call the same function, and its exit status is the verdict.
         # ---------------------------------------------------------------------
-        asan_opts="detect_leaks=0:detect_stack_use_after_return=1"
+        asan_opts="$GATE_ASAN_OPTS_DARWIN"
         cov_ok=1
         printf '  %-26s %-7s tls=%-3s coverage: ASAN_OPTIONS=%s\n' \
             "asan+ubsan $(basename "$gccbin")" Release ON "$asan_opts"
