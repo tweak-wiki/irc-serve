@@ -454,7 +454,7 @@ int nf_expect_nth(nf_node_t *n, const char *needle, size_t want, int timeout_ms)
     fprintf(stderr, "nf_expect_nth: TIMEOUT after %d ms waiting for %zu x \"%s\"; "
             "%zu seen\n", timeout_ms, want, needle, seen);
     fprintf(stderr, "nf_expect_nth: child output was:\n%s\n",
-            (n->out != NULL) ? n->out : "(nothing)");
+            (n != NULL && n->out != NULL) ? n->out : "(nothing)");
     return -1;
 }
 

@@ -1354,7 +1354,7 @@ static void test_account_tag_on_the_wire(const char *sasl, const char *registry)
      * a feature a client discovers as a bug. */
     bb = drain(&bob);
     (void)snprintf(line, sizeof line, "PRIVMSG bob direct");
-    ae = speak_and_close(&alice, line, watched, 1u, ends);
+    (void)speak_and_close(&alice, line, watched, 1u, ends);
     (void)snprintf(want, sizeof want,
                    "@account=alice :alice!alice@127.0.0.1 PRIVMSG bob direct\r\n");
     expect_in_window(&bob, bb, ends[0], "the account tag on a direct message", want);
