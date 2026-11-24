@@ -277,7 +277,7 @@ static void case_server_prefixed_verbs(void)
      * silence by showing what is absent after the resync delivers it. */
     raw_stamp(stamp, sizeof stamp, id++);
     (void)snprintf(line, sizeof line, "%s:" NAME_B " SJOIN " CHAN " "
-                   NICK_B " - *", stamp);
+                   NICK_B " - * - -", stamp);
     TF_CHECK_MSG(pf_send_line(peer_fd, line) == 0, "SJOIN send failed");
     TF_CHECK_MSG(nf_expect(&a, "fed_sjoin: channel=" CHAN " member=" NICK_B,
                            T_IO_MS) == 0,
@@ -304,7 +304,7 @@ static void case_server_prefixed_verbs(void)
     /* An unknown-mask STOPIC renders the bare setter the same way. */
     raw_stamp(stamp, sizeof stamp, id++);
     (void)snprintf(line, sizeof line, "%s:" NAME_B " SJOIN " CHAN " dave"
-                   " - *", stamp);
+                   " - * - -", stamp);
     TF_CHECK_MSG(pf_send_line(peer_fd, line) == 0, "SJOIN dave failed");
     TF_CHECK_MSG(nf_expect(&a, "fed_sjoin: channel=" CHAN " member=dave",
                            T_IO_MS) == 0,
@@ -379,7 +379,7 @@ static void case_resync_then_join(void)
     TF_CHECK_MSG(a.port > 0, "node A reported no port");
     raw_stamp(stamp, sizeof stamp, id++);
     (void)snprintf(line, sizeof line, "%s:" NAME_B " SJOIN " CHAN " carol"
-                   " - *", stamp);
+                   " - * - -", stamp);
     TF_CHECK_MSG(pf_send_line(peer_fd, line) == 0, "SJOIN send failed");
     TF_CHECK_MSG(nf_expect(&a, "fed_sjoin: channel=" CHAN " member=carol",
                            T_IO_MS) == 0,
