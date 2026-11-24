@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "core/connection.h"
+#include "core/poll_loop.h"
 /* Phase 12: the drain in fed_send_shutdown() reads through the transport, so this
  * is the third of the tree's three I/O sites to name it. See the comment on that
  * block for what happens to the node's departure if it did not. */
@@ -1528,6 +1529,10 @@ static void fed_link_established(server_t *s, server_link_t *link, conn_t *c,
      * Nothing routes by it (core/server.h is explicit that the link is the
      * authority), so a missing copy costs a diagnostic field and no routing. */
     c->kind = CONN_SERVER;
+    /* #540: the flood bucket was sized for a client when this connection's
+     * first refill ran. Promote it to the peer cap now or the burst below
+     * trips the limiter and the link flaps. */
+    conn_flood_peer_promoted(c);
     if (c->peer_name == NULL) {
         char *copy = (char *)malloc(strlen(claim) + 1u);
 
