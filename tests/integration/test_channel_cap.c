@@ -666,6 +666,20 @@ static void case_peer_creation_refused_at_cap(void)
     TF_CHECK_MSG(nf_expect(&a, "command=SJOIN", T_IO_MS) == 0,
                  "node A never reported the SJOIN for #PEERNEW: the refusal "
                  "below would be vacuous.\n  node said: %s", a.out);
+    /* AND THE REFUSAL IS LOUD AND CORRECTLY LABELLED (#542): the same
+     * chan_create_refused spelling the local JOIN path uses, with the reason
+     * named -- and NOT the fed_malformed a silent attach failure used to surface
+     * as, which mislabelled a full table as a peer protocol error. */
+    TF_CHECK_MSG(nf_expect(&a, "chan_create_refused: channel=#PEERNEW", T_IO_MS) == 0,
+                 "node A refused the peer creation with no chan_create_refused "
+                 "line: the 1025th creation names nothing.\n  node said: %s",
+                 a.out);
+    TF_CHECK_MSG(nf_expect(&a, "reason=TOO_MANY_CHANNELS", T_IO_MS) == 0,
+                 "the peer creation refusal does not name the reason.\n"
+                 "  node said: %s", a.out);
+    TF_CHECK_MSG(strstr(a.out, "field=channel channel=#PEERNEW") == NULL,
+                 "node A logged the cap refusal as fed_malformed: a full table "
+                 "is not a peer protocol error.\n  node said: %s", a.out);
     TF_CHECK_MSG(strstr(a.out, "chan_create: channel=#PEERNEW") == NULL,
                  "node A created #PEERNEW past SERVER_MAX_CHANNELS: a peer can "
                  "push this node past the cap the local JOIN path refuses.\n"

@@ -3791,6 +3791,21 @@ void fed_dispatch(server_t *s, conn_t *c, const message_t *m)
          * wrong channel, and "the wrong channel" is not a crash, it is a
          * divergence. */
         size_t at = (strcmp(m->command, "SJOIN") == 0) ? 0u : 1u;
+        /* The node-wide cap (#542): refused HERE, before fed_in_channel() fails
+         * it, because the NULL arm below reports that as fed_malformed and a
+         * capacity refusal is not a peer protocol error. No client to numeric on
+         * this path, so the observable IS the refusal, in handle_join's spelling. */
+        if (strcmp(m->command, "SJOIN") == 0 &&
+            chan_name_valid(m->params[at]) &&
+            server_chan_get(s, m->params[at]) == NULL &&
+            s->nchan_objs >= SERVER_MAX_CHANNELS) {
+            fed_obs("[observable] chan_create_refused: channel=%s peer=%s "
+                   "nchan=%zu cap=%d reason=TOO_MANY_CHANNELS "
+                   "channel_len=%zu channel_bad_bytes=%zu\n",
+                   m->params[at], link->name, s->nchan_objs, SERVER_MAX_CHANNELS,
+                   strlen(m->params[at]), conn_text_bad_count(m->params[at]));
+            return;
+        }
         chan_t *ch = fed_in_channel(s, link, m->params[at],
                                     strcmp(m->command, "SJOIN") == 0);
 
