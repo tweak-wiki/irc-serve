@@ -28,6 +28,7 @@
 #include "core/transport.h"
 #include "federation/nickreg.h"
 #include "federation/verbs.h"
+#include "account_store.h"
 #include "sasl_framework.h"
 /* Phase 12: one question -- is TLS compiled in -- and the transport, for nothing here:
  * handle_starttls() sets a flag and conn_pump() does the handoff, so this file
@@ -2082,11 +2083,11 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
          * which is the answer a client needs and the only honest one: a node with
          * no credential store has NO mechanism, and saying so is what 908's list
          * being empty means. */
-        params[0] = (sasl_store_count(s->sasl_store) > 0u) ? "PLAIN" : "";
+        params[0] = (account_store_count(s->sasl_store) > 0u) ? "PLAIN" : "";
         (void)reply(s, c, RPL_SASLMECHS, params, 1,
                     "are available SASL mechanisms");
         printf("[observable] sasl: fd=%d outcome=NO_MECHANISM store=%zu\n", c->fd,
-               sasl_store_count(s->sasl_store));
+               account_store_count(s->sasl_store));
         auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
@@ -2094,7 +2095,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
         /* A mechanism this node names but does not implement, or one it does not
          * know at all. 908 rather than a refusal: the client asked what it can
          * use, and the answer is what it can use. */
-        params[0] = (sasl_store_count(s->sasl_store) > 0u) ? "PLAIN" : "";
+        params[0] = (account_store_count(s->sasl_store) > 0u) ? "PLAIN" : "";
         (void)reply(s, c, RPL_SASLMECHS, params, 1,
                     "are available SASL mechanisms");
         /* THE MECHANISM IS MEASURED, NOT ASSUMED SAFE. It is worth saying
@@ -2206,7 +2207,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * so a client that reached here has either ignored the advertisement or
      * arrived with a hard-coded configuration. */
     if (!sasl_plain_verify(s->sasl_store, authzid, authcid, passwd)) {
-        const int no_store = (sasl_store_count(s->sasl_store) == 0u);
+        const int no_store = (account_store_count(s->sasl_store) == 0u);
 
         c->sasl = (int)SASL_FAILED;
         c->sasl_failures++;

@@ -74,19 +74,21 @@
 
 #include <stddef.h>
 
-/* Bounds on the credential store. All of them are constants rather than
- * configuration, and the reason is the one that applies to every one: this is
- * loaded from a path an operator names, and a store whose size depends on a
- * number read from the same file is a store whose bound is the file. */
+#include "account_store.h"
+
+/* Bounds on the PLAIN exchange. All of them are constants rather than
+ * configuration, and the reason is the one that applies to every one: the
+ * bounds that matter here are the client's, read off the wire, and a bound
+ * that depended on a number in the credential file would be a bound the
+ * file sets. The TABLE's bounds (record count, name and password length,
+ * line length) are account_store.h's: there is one table now, so there is
+ * one place that bounds it. */
 #define SASL_MAX_AUTHCID    63   /* conn_t::nick's bound minus one; an authcid
                                   * IS a nickname in every client that offers it */
 #define SASL_MAX_PASSWORD  128   /* RFC 4013's PLAIN has no length limit, so this
-                                  * is ours and is stated, not inherited */
-#define SASL_MAX_CREDENTIALS 64  /* a node's operator list is a small set; 64
-                                  * records at ~200 bytes is ~13 KB and one
-                                  * linear scan per AUTHENTICATE, which is not a
-                                  * search algorithm anyone should build here */
-#define SASL_MAX_LINE      512   /* one record in the file, NUL included */
+                                  * is ours and is stated, not inherited.
+                                  * ACCOUNT_MAX_PASSWORD is deliberately the
+                                  * same value, so one file serves both uses */
 #define SASL_MAX_PAYLOAD   1024  /* the DECODED PLAIN payload */
 #define SASL_MAX_RESPONSE  1024  /* the base64 text a client may send */
 
@@ -99,11 +101,16 @@ typedef enum {
     SASL_FAILED = 3
 } sasl_state_t;
 
-/* An opaque credential store. Declared here and defined in sasl_framework.c, so
- * a caller cannot build one by laying out fields -- the store has to come from
- * sasl_store_load() or sasl_store_new(), which is what keeps the bounds above
- * real. */
-typedef struct sasl_store sasl_store_t;
+/* THE TABLE IS account_store_t. There used to be a second user table here --
+ * its own record, salt, hash and compare beside account_store.c's -- so one
+ * user add was two writes in two formats and a user in one store only could
+ * SASL-auth but not log in, or the reverse, with no error logged (#538). Now
+ * the store comes from account_store_load()/account_store_new() (or from
+ * sasl_store_load() below for the legacy two-field file, which loads the
+ * same table with created=0), and sasl_plain_verify() is the one caller of
+ * account_store_verify() on the SASL path. A caller cannot build a table by
+ * laying out fields, so the bounds above -- and account_store.h's -- are
+ * the bounds rather than a suggestion. */
 
 typedef struct {
     sasl_state_t state;
@@ -113,77 +120,34 @@ typedef struct {
     int          step_count;
     int          last_error;
 
-    /* The store this context verifies against. NULL MEANS NO STORE, and the
-     * verify path treats NULL as "every credential fails" -- fail closed. It is
-     * a pointer rather than an owned copy so a node loads the file once and
-     * every connection borrows it, which is also why it must outlive every
-     * context pointing at it; server_shutdown() frees the store and the loop
-     * has stopped by then. */
-    const sasl_store_t *store;
+    /* The table this context verifies against. NULL MEANS NO TABLE, and the
+     * verify path treats NULL as "every credential fails" -- fail closed. It
+     * is a pointer rather than an owned copy so a node loads the file once
+     * and every connection borrows it, which is also why it must outlive
+     * every context pointing at it; server_shutdown() frees the table and
+     * the loop has stopped by then. */
+    const account_store_t *store;
 } sasl_ctx_t;
 
 /* ---------------------------------------------------------------------------
- * The credential store
+ * The legacy credential file
  * --------------------------------------------------------------------------- */
 
-/* Load `path`. Returns NULL on ANY failure -- unreadable, not a regular file,
- * group- or world-accessible, malformed, or with no usable record -- and prints
- * one [observable] line naming the reason. There is no partial success: a store
- * that loaded half its file would authenticate half the passwords an operator
- * believes are configured, and the half that fails is discovered by a user
- * being refused.
+/* Load `path` in the legacy two-field form (`authcid<TAB>password`, no
+ * `created` column) into the ONE table, with created=0 ("the epoch", which
+ * account_store.h documents as honestly unknown rather than false). Returns
+ * NULL on ANY failure -- unreadable, not a regular file, group- or
+ * world-accessible, malformed, or with no usable record -- and prints one
+ * [observable] `sasl_store: state=...` line naming the reason, which is the
+ * same contract the loader always had and the same lines the tests watch.
+ * There is no partial success: a store that loaded half its file would
+ * authenticate half the passwords an operator believes are configured.
  *
- * THE FILE IS A SECRET STORE and is checked as one. secret_file_open() must
- * succeed -- open() with O_NOFOLLOW, then fstat() on the DESCRIPTOR, which
- * must be a regular file -- and the group and world permission bits must be
- * CLEAR, because a credential file any other account on the host can read is
- * not a credential store -- it is a list of passwords. This is a refusal, not
- * a warning: the cost of getting it wrong is every password on the node, and
- * the cost of getting it right is an operator who has to run `chmod 600`.
- *
- * FORMAT. One record per line, `authcid<TAB>password`. Blank lines and lines
- * whose first non-blank byte is '#' are ignored. The TAB is mandatory and is
- * the only separator, because the alternative -- splitting on whitespace -- makes
- * a password with a space in it unrepresentable, and a store that cannot hold a
- * passphrase is a store that pushes operators to weak ones. A record with no
- * TAB is malformed and fails the whole load rather than being skipped.
- *
- * ATOMIC REPLACE. The file is read line by line with no lock, and only once,
- * at startup -- there is no reload that could keep a previous store, so a
- * refused load lasts until the next restart. A non-atomic rewrite
- * (`cp new.db store`) racing that read lands mid-file and reads as malformed,
- * which refuses the WHOLE store. Replace it atomically instead: write a
- * temporary file in the same directory, fsync() it, rename() it over the old
- * path. A restart then sees the old file or the new one, never half of one.
- */
-sasl_store_t *sasl_store_load(const char *path);
-
-/* An empty store, for a caller that wants to build one in memory. sasl_state_
- * machine() is that caller, and so is a future phase that loads credentials from
- * somewhere other than a file. Returns NULL on allocation failure or when no
- * kernel RNG is available -- fail closed (#305): there is no store at all and
- * the load path refuses. */
-sasl_store_t *sasl_store_new(void);
-
-/* Add or replace the record for `authcid`. Returns 0, or -1 on a NULL/empty or
- * over-long authcid, an over-long password, a full store, or when no kernel RNG
- * is available (the record is refused and left untouched). `password` is
- * HASHED (iterated salted SHA-256 under the record's own salt) and never stored. */
-int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password);
-
-/* Number of records loaded. 0 on a NULL store, which is the honest answer for
- * "this node can authenticate nobody". */
-size_t sasl_store_count(const sasl_store_t *store);
-
-/* Test support: 1 when no byte run in the store's records still equals
- * `password` -- i.e. the heap holds the salted hash and not the literal.
- * 0 on a NULL store or an empty password. */
-int sasl_store_holds_no_plaintext(const sasl_store_t *store,
-                                  const char *password);
-
-/* Release. Safe on NULL. A node calls this from server_shutdown(); LeakSanitizer
- * runs on the Linux CI job, so anything allocated here has to be freed there. */
-void sasl_store_free(sasl_store_t *store);
+ * New files should use the three-field account format and
+ * account_store_load(): one file named by both --sasl-store and
+ * --account-store is one user population for both SASL and login, which is
+ * the shape that cannot disagree with itself. */
+account_store_t *sasl_store_load(const char *path);
 
 /* ---------------------------------------------------------------------------
  * Verification
@@ -203,30 +167,17 @@ int sasl_plain_parse(const char *payload, size_t len,
                      char *authcid, size_t authcid_cap,
                      char *passwd, size_t passwd_cap);
 
-/* Verify `authcid`/`passwd` against `store`.
+/* Verify `authcid`/`passwd` against `store`, which is the ONE table.
  *
- * Returns 1 only when the store holds a record for that authcid AND the
- * password matches. Everything else is 0, including a NULL store -- so a node
- * with no credential store authenticates nobody, which is the opposite of the
- * behaviour this module used to have.
- *
- * THE COMPARISON DOES NOT LEAK THE PASSWORD'S PREFIX. Every candidate in the
- * store is compared against the offered password in constant time, so a caller
- * cannot distinguish "wrong at byte 3" from "wrong at byte 300" by how long the
- * answer took, and a caller cannot distinguish "no such authcid" from "wrong
- * password" either: the walk does not stop at the match, and a miss is followed
- * by one comparison against a fixed dummy so the two cases cost the same. That
- * is the whole reason this is a loop with an accumulator rather than a
- * strcmp() and a return.
- *
- * THE COST, stated rather than hidden: a node with N credentials spends N
- * constant-time comparisons per AUTHENTICATE, and N is capped at
- * SASL_MAX_CREDENTIALS, so the worst case is 64 short comparisons on a
- * connection that has not registered. That is noise next to the base64 decode
- * that precedes it. The password itself is never stored -- each record holds
- * iterated SHA-256(salt || password) under a per-record salt -- so the comparison is
- * hash-against-hash and a heap dump reads back digests. */
-int sasl_plain_verify(const sasl_store_t *store,
+ * The SASL-specific policy lives here and nowhere else: an authzid that names
+ * somebody ELSE than the authcid is refused (an empty authzid is RFC 4013's
+ * "the same as the authentication identity" and is not a difference), and a
+ * NULL or empty store refuses every credential -- fail closed. The password
+ * comparison itself is account_store_verify()'s: one table, one verify
+ * function, and this is the call. The walk, the dummy compare and the
+ * hash-against-hash argument are documented there and not repeated here, so
+ * the two cannot drift apart again. */
+int sasl_plain_verify(const account_store_t *store,
                       const char *authzid, const char *authcid, const char *passwd);
 
 /* base64 decode `inlen` bytes of `in` into `out`. Returns the decoded byte count,
@@ -246,9 +197,9 @@ long sasl_b64_decode(const char *in, size_t inlen, unsigned char *out, size_t ca
  * credential fails"; use sasl_set_store() to attach one. */
 void sasl_init(sasl_ctx_t *ctx, const char *mechanism);
 
-/* Attach the store a later step verifies against. NULL detaches it, which is the
- * same as never having had one. */
-void sasl_set_store(sasl_ctx_t *ctx, const sasl_store_t *store);
+/* Attach the table a later step verifies against. NULL detaches it, which is
+ * the same as never having had one. */
+void sasl_set_store(sasl_ctx_t *ctx, const account_store_t *store);
 
 /* Start the mechanism. Only valid from SASL_ABORTED, which it consumes; from any
  * other state it returns that state unchanged. */
