@@ -206,8 +206,11 @@ irc_add_integration_test(test_writer_drain test_writer_drain.c)
 irc_add_integration_test(test_writer_wakeup test_writer_wakeup.c)
 # Issue #367: targeted wakeup -- one queued conn wakes exactly its owner.
 irc_add_integration_test(test_writer_targeted test_writer_targeted.c)
-# Issue #279: one kick per emission -- quiet queue plus coalesced slot kick wakes the owner once per set.
-irc_add_integration_test(test_writer_coalesce test_writer_coalesce.c)
+# Issue #534: soak -- a busy node for a bounded T, then fd/RSS back near
+# baseline. Default T=30 s (IRC_SOAK_SECONDS overrides up to 600); TIMEOUT
+# 150 per the 6x rule.
+set(irc_timeout_test_soak 150)
+irc_add_integration_test(test_soak test_soak.c)
 # MT 4.1 (#246): per-conn FIFO under N=4 with cross-conn burst contention --
 # A-then-B pipelined on one conn, 100 in-test iterations.
 irc_add_integration_test(test_writer_order test_writer_order.c)
