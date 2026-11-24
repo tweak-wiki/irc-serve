@@ -230,7 +230,6 @@ int main(void)
 
     TF_CHECK_MSG(tc_send(&alice.c, "INVITE bob " CHAN) == 0, "tc_send failed");
     from = mark(&alice);
-    end = from;
 
     /* 341's shape is RFC 2812 3.3.6's: <channel> and <nick> are MIDDLE
      * parameters and the sentence is the trailing one, so a client reading by
