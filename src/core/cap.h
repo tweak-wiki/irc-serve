@@ -297,10 +297,10 @@
 #define ERR_SASLTOOLONG "905"
 #define RPL_SASLABORTED "906"
 
- /* 908 RPL_SASLMECHS: the mechanisms this node offers. It is sent in answer to
+/* 908 RPL_SASLMECHS: the mechanisms this node offers. It is sent in answer to
  * `AUTHENTICATE` with a mechanism this node does not implement, which is the only
  * place a client learns what to try instead. */
- #define RPL_SASLMECHS "908"
+#define RPL_SASLMECHS "908"
 
 /* Initialise `c`'s capability state. conn_new() gets this right for free because
  * it callocs, and it is here so that a caller which already has a conn_t can say

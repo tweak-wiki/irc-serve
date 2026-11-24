@@ -2312,13 +2312,13 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
     c->credential_seen = 1;
 
     /* PER-CONNECTION THROTTLE. After three failed credential verifications this
-    * connection stops verifying and refuses every further AUTHENTICATE with
-    * 904, so a single connection cannot run an unbounded online dictionary
-    * attack. The connection is deliberately NOT closed: poll_loop.c does not
-    * pump the write queue of a CLOSING connection, so closing here would
-    * discard the 904 queued above and leave the client with a bare FIN. The
-    * client is already unable to register (SASL_FAILED is terminal), so the
-    * connection is effectively dead and will be reaped on disconnect/timeout. */
+     * connection stops verifying and refuses every further AUTHENTICATE with
+     * 904, so a single connection cannot run an unbounded online dictionary
+     * attack. The connection is deliberately NOT closed: poll_loop.c does not
+     * pump the write queue of a CLOSING connection, so closing here would
+     * discard the 904 queued above and leave the client with a bare FIN. The
+     * client is already unable to register (SASL_FAILED is terminal), so the
+     * connection is effectively dead and will be reaped on disconnect/timeout. */
     if (c->sasl_failures >= 3) {
         (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", ERR_SASLFAIL,
                             NULL, 0, "SASL authentication failed: too many attempts");
