@@ -17,7 +17,7 @@
  *   2. THE WIPE IS PRESENT. src/core/commands.c contains auth_wipe_credential()
  *      calling auth_wipe() over all four locals, the wipe runs through a
  *      volatile pointer (so the compiler cannot delete it as a dead store),
- *      and all ten exits of handle_authenticate() call it. Removing any call
+ *      and all eleven exits of handle_authenticate() call it. Removing any call
  *      -- or emptying the helper -- fails this half. The source read uses
  *      tf_read_code(), the same instrument test_account.c uses to pin
  *      server_shutdown()'s account_store_free() for the same reason: some
@@ -167,15 +167,16 @@ static void expect_wipe_in_source(void)
                  "the credential wipe must cover passwd");
     TF_CHECK_MSG(strstr(code, "auth_wipe(payload, SASL_MAX_PAYLOAD)") != NULL,
                  "the credential wipe must cover payload");
-    /* All ten exits of handle_authenticate() scrub all four locals. */
+    /* All eleven exits of handle_authenticate() scrub all four locals (#539
+     * adds the RATE_LIMITED refusal, which wipes like every other exit). */
     at = code;
     while ((at = strstr(at, "auth_wipe_credential(payload, authzid, authcid, "
                             "passwd)")) != NULL) {
         calls++;
         at++;
     }
-    TF_CHECK_MSG(calls == 10,
-                 "expected auth_wipe_credential() at all 10 exits of "
+    TF_CHECK_MSG(calls == 11,
+                 "expected auth_wipe_credential() at all 11 exits of "
                  "handle_authenticate(), found %zu",
                  calls);
     free(code);
