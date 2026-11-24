@@ -787,6 +787,67 @@ int fed_mark_clean_leave(server_t *s, server_link_t *link, int set)
     return (was != link->clean_leave) ? 1 : 0;
 }
 
+/* Bounded write drain for one link's goodbye, and the local mark when the
+ * budget runs out. conn_pump_locked() moves whatever the socket takes RIGHT
+ * NOW and stops at the first RETRY; on a saturated peer that leaves the
+ * SHUTDOWN queued behind a backlog, and the close() a few lines later in
+ * the caller discards it. So the goodbye waits for writability: poll(POLLOUT)
+ * for what is left of the shared deadline, pump again, stop when the queue
+ * is empty or the budget is spent. EINTR counts as spent -- a signal during
+ * teardown is not a reason to wait longer.
+ *
+ * The caller holds c->wq_lock across the call, for the #326/#290 reason the
+ * pump's own comment gives: at N > 0 a writer's SSL_write on the same conn
+ * would otherwise race this pump's SSL_write. The deadline is one per
+ * goodbye shared by every link (FED_SHUTDOWN_FLUSH_MS), so ten slow peers
+ * cost no more than one.
+ *
+ * UNDRAINABLE MEANS MARKED, NOT RETRIED: returns 0 with link->clean_leave
+ * set and an observable printed when bytes are still queued, because a
+ * server_t that is shut down can be re-opened (see fed_close()) and a
+ * reopened node must not spend a retry budget redialling a peer it
+ * intentionally left. fed_mark_clean_leave() is not used because its line
+ * names the PEER's shutdown; here the announcer is the one leaving. 1 means
+ * the queue is on the wire. */
+int fed_drain_writes(server_t *s, server_link_t *link, conn_t *c,
+                     uint64_t flush_stop)
+{
+    if (s == NULL || link == NULL || c == NULL) {
+        return 0;
+    }
+    for (;;) {
+        uint64_t now;
+        struct pollfd pfd;
+
+        if (conn_write_pending_held(c) == 0u) {
+            return 1; /* the queue is on the wire: nothing to wait for */
+        }
+        now = server_now_ms();
+        if (now >= flush_stop) {
+            break; /* budget spent: close() carries what it carries */
+        }
+        if (c->fd < 0) {
+            break; /* no descriptor to wait on */
+        }
+        memset(&pfd, 0, sizeof pfd);
+        pfd.fd = c->fd;
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1u, (int)(flush_stop - now)) <= 0) {
+            break; /* timeout or error: no writability within budget */
+        }
+        if (conn_pump_locked(c) < 0) {
+            conn_mark_closing(c);
+            break;
+        }
+    }
+    link->clean_leave = 1;
+    printf("[observable] fed_shutdown_undrained: self=%s peer=%s "
+           "pending=%zu\n",
+           s->name, link->name,
+           conn_write_pending_held(c));
+    return 0;
+}
+
 /* Send `SHUTDOWN [:reason]` to every ESTABLISHED link. Returns how many carried
  * it.
  *
@@ -797,9 +858,10 @@ int fed_mark_clean_leave(server_t *s, server_link_t *link, int set)
  * look like a crash is how a planned restart turns into a burst of retry budgets
  * and redials on every peer on the mesh.
  *
- * AND IT IS BEST EFFORT, with the limit stated because it is a real one: the line
- * is QUEUED and the write queue is drained by a best-effort pump immediately
- * after, and on a lossy path a SHUTDOWN can fail to arrive. That degradation is
+ * AND IT IS BEST EFFORT, with the limit stated because it is a real one: the
+ * line is QUEUED and the write queue is flushed by fed_drain_writes() -- a
+ * bounded poll(WRITE) wait -- after the first pump, so a peer that stays
+ * unwritable past the budget still loses the SHUTDOWN. That degradation is
  * correct rather than a defect: the peer that does not hear it treats the closed
  * socket as a failure, applies its retry policy, and finds the node gone. The
  * cost of the message is that a clean leave occasionally reads as a failure, and
@@ -811,6 +873,7 @@ int fed_send_shutdown(server_t *s, const char *reason)
     fed_queue_why_t why = FED_QUEUE_OK;
     size_t targets = 0u;
     int sent = 0;
+    uint64_t flush_stop;
 
     if (s == NULL) {
         return 0;
@@ -824,6 +887,13 @@ int fed_send_shutdown(server_t *s, const char *reason)
     if (targets == 0u) {
         return 0;
     }
+    /* THE WRITE-DRAIN BUDGET, ONE DEADLINE FOR EVERY LINK. The per-link loop
+     * below polls a saturated socket until it turns writable, and an
+     * unbounded wait there would hang teardown on one dead peer -- while a
+     * per-link budget would let ten slow peers cost ten times the wait. So
+     * the deadline is taken once, here, and every link drains against what
+     * is left of it. */
+    flush_stop = server_now_ms() + FED_SHUTDOWN_FLUSH_MS;
     memset(&tags, 0, sizeof tags);
     memcpy(tags.origin, s->name, strlen(s->name) + 1u);
     tags.epoch = s->epoch;
@@ -862,6 +932,10 @@ int fed_send_shutdown(server_t *s, const char *reason)
             if (conn_pump_locked(c) < 0) {
                 conn_mark_closing(c);
             }
+            /* THE BOUNDED WRITE DRAIN: what makes the goodbye leave a busy
+             * socket, and the local clean_leave mark when the budget runs
+             * out. See fed_drain_writes() for the whole argument. */
+            (void)fed_drain_writes(s, &s->links[i], c, flush_stop);
             /* THE DRAIN, AND IT IS WHAT MAKES THE GOODBYE SURVIVE ITS OWN CLOSE.
              *
              * server_shutdown() closes this socket a few lines of C later, and a

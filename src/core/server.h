@@ -1413,8 +1413,9 @@ int server_init(server_t *s, const char *name);
  *               (link.c's T7 arm refuses a link with clean_leave set), purges that
  *               origin's roster, and tells its own peers onward as a SQUIT.
  *
- * IT IS BEST EFFORT and the limit is real: the line is queued and drained by one
- * conn_pump() per link, and everything after this point in the function closes the
+ * IT IS BEST EFFORT and the limit is real: the line is queued and flushed by a
+ * bounded poll(WRITE) write drain (one FED_SHUTDOWN_FLUSH_MS deadline shared by
+ * every link) plus the receive drain that follows it, and everything after this
  * descriptors it was queued on. On a lossy path a goodbye can therefore be lost,
  * and that degradation is CORRECT rather than a defect -- the peer that does not
  * hear it applies its retry policy and finds the node gone. The cost of sending it
