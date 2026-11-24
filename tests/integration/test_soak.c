@@ -370,5 +370,11 @@ int main(void)
     tc_close(&fresh);
     TF_CHECK_MSG(nf_stop(&b) == 0, "node B exited nonzero: %s", b.out);
     TF_CHECK_MSG(nf_stop(&a) == 0, "node A exited nonzero: %s", a.out);
+    /* Release the accumulated child-output buffers: nf_stop() reaps the
+     * child but keeps n->out, and a soak's chatter is hundreds of KiB --
+     * LSan reports it as a direct leak at exit (the failover test's
+     * stop-then-free tail is the convention). */
+    nf_free(&b);
+    nf_free(&a);
     return 0;
 }
