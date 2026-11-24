@@ -1060,7 +1060,7 @@ corresponding features do not exist.
 
 ## 8. Behaviours the sweep found and deliberately did not change
 
-Four, recorded because they are places where a client can be told something and a
+Five, recorded because they are places where a client can be told something and a
 reader of the code should know it is deliberate.
 
 - **No per-client channel limit.** A client can join unboundedly many channels; the
@@ -1074,6 +1074,13 @@ reader of the code should know it is deliberate.
   check it against, so 475 cannot arise.
 - **Ban masks are not validated.** §6.6. `+b` is the one channel mode this node
   evaluates, and it evaluates the mask as an opaque string.
+- **SETNAME/AWAY/INVITE notifications are node-local and say so on the wire.**
+  They are channel-scoped assertions, emitted node-local only (NOT FORWARDED):
+  on a mesh, members on other nodes keep burst-time values until the next
+  resync, and a remote WHOIS renders the cached value without claiming it is
+  live. The fix — `SSETNAME`/`SAWAY`/`SINVITE` S-verbs — needs a 4.3 wire
+  version bump, which is out of scope here. `INFO` (371) carries the same
+  sentence, so a client on any node can read the limit without joining a mesh.
 
 ## 9. `436` and the duplicate-nickname policy
 
