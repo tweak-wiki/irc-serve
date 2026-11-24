@@ -31,13 +31,19 @@
 #include "harness/tls_fixture.h"
 
 #define T_IO_MS 15000
-#define FLOOD_LINES 300
 #define FLOOD_BIG_TOKEN 400
 /* The N=4 EOF wait: the deferred close waits out the writer drain plus the
  * reaper's own ticks, so it gets the same 120 s bound test_writers_tls_417
  * uses for its deferred-close case instead of the 15 s I/O bound. A shared
  * runner can stall either side past 15 s without anything being wrong. */
 #define T_CLOSE_MS 120000
+/* Send-until-refused batches: the limiter refills 50 tokens/s against a 256
+ * burst, so one fixed burst is a race against wall time on a loaded runner.
+ * 20 batches of 150 outrun ~55 s of refill stall; the per-batch overshoot
+ * past the refusal (~61 KiB) still fits in kernel buffers. */
+#define FLOOD_BATCH 150
+#define FLOOD_BATCHES 20
+#define FLOOD_BATCH_MS 2000
 
 #define T_DIR_MAX 512
 #define T_PATH (T_DIR_MAX + 128)
@@ -131,19 +137,32 @@ static void flood_leg(int port, int big)
                  "flood USER failed");
     TF_CHECK_MSG(tc_expect(&flood, " 001 ", T_IO_MS) == 0,
                  "the flooding client never registered");
-    for (i = 0; i < FLOOD_LINES; i++) {
-        if (big) {
-            (void)snprintf(line, sizeof line, "PING :%s", tok);
-        } else {
-            (void)snprintf(line, sizeof line, "PING :flood500");
+    /* Send in batches until the 417 shows up (see FLOOD_BATCH): a send error
+     * just means the server already closed us, and tc_expect scans what is
+     * already buffered, so the poll is free once the refusal has landed. */
+    {
+        int batch, got = 0;
+        for (batch = 0; batch < FLOOD_BATCHES && !got; batch++) {
+            for (i = 0; i < FLOOD_BATCH; i++) {
+                if (big) {
+                    (void)snprintf(line, sizeof line, "PING :%s", tok);
+                } else {
+                    (void)snprintf(line, sizeof line, "PING :flood500");
+                }
+                if (tc_send(&flood, line) != 0) {
+                    break;
+                }
+            }
+            got = (tc_expect(&flood, " 417 ", FLOOD_BATCH_MS) == 0);
         }
-        if (tc_send(&flood, line) != 0) {
-            break;
+        {
+            const char *saw = tc_buffer(&flood);
+            size_t n = strlen(saw);
+            TF_CHECK_MSG(got, "the flood never saw 417 before the close: the reap left "
+                         "the reason behind.\n  saw: %s",
+                         (n > 512u) ? saw + (n - 512u) : saw);
         }
     }
-    TF_CHECK_MSG(tc_expect(&flood, " 417 ", T_IO_MS) == 0,
-                 "the flood never saw 417 before the close: the reap left "
-                 "the reason behind.\n  saw: %s", tc_buffer(&flood));
     {
         /* The close follows the drain, and at N=4 the drain is a writer
          * round-trip plus reaper ticks -- the long bound, not the I/O one

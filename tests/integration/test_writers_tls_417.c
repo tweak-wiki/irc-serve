@@ -48,6 +48,13 @@
 #define T_FLOOD_LINES 300
 #define T_TOKEN_LEN 400
 #define T_RCVBUF 4096
+/* Send-until-refused batches: the limiter refills 50 tokens/s against a 256
+ * burst, so one fixed burst is a race against wall time on a loaded runner.
+ * 20 batches of 150 outrun ~55 s of refill stall; the per-batch overshoot
+ * past the refusal (~61 KiB) still fits in kernel buffers. */
+#define T_FLOOD_BATCH 150
+#define T_FLOOD_BATCHES 20
+#define T_BATCH_MS 2000
 
 #define TF_DIR_MAX 512
 #define TF_PATH (TF_DIR_MAX + 128)
@@ -290,11 +297,22 @@ static int case_writers_short_pump(void)
                  "flood USER failed");
     TF_CHECK_MSG(tc_expect(&flood, " 001 ", T_IO_MS) == 0,
                  "the flooding client never registered");
-    for (i = 0; i < T_FLOOD_LINES; i++) {
-        snprintf(line, sizeof line, "PING :%s", tok);
-        TF_CHECK_MSG(tc_send(&flood, line) == 0,
-                     "flood PING %d of %d could not be sent", i,
-                     T_FLOOD_LINES);
+    /* Same race as the next case, proved without reading a byte: the refusal
+     * is observed node-side, so the backlog the deferral needs stays queued.
+     * Batches stay small so the overshoot past the refusal still fits in
+     * kernel buffers -- with no reader, a blocked send would hang, not fail. */
+    {
+        int batch, limited = 0;
+        for (batch = 0; batch < T_FLOOD_BATCHES && !limited; batch++) {
+            for (i = 0; i < T_FLOOD_BATCH; i++) {
+                snprintf(line, sizeof line, "PING :%s", tok);
+                if (tc_send(&flood, line) != 0) {
+                    break;
+                }
+            }
+            limited = (nf_expect(&node, "rate_limited:", T_BATCH_MS) == 0);
+        }
+        TF_CHECK_MSG(limited, "the flood never tripped the limiter");
     }
 
     /* The reaper cannot close while the backlog drains, so this line is the
@@ -349,11 +367,28 @@ static int case_417_deferred_close(void)
                  "flood USER failed");
     TF_CHECK_MSG(tc_expect(&flood, " 001 ", T_IO_MS) == 0,
                  "the flooding client never registered");
-    for (i = 0; i < T_FLOOD_LINES; i++) {
-        snprintf(line, sizeof line, "PING :%s", tok);
-        TF_CHECK_MSG(tc_send(&flood, line) == 0,
-                     "flood PING %d of %d could not be sent", i,
-                     T_FLOOD_LINES);
+    /* Send in batches until the refusal shows up (see T_FLOOD_BATCH): the
+     * long string names the whole 417 line, so the poll doubles as the
+     * delivery proof below. A send error just means the server already
+     * closed us. */
+    {
+        int batch, got = 0;
+        for (batch = 0; batch < T_FLOOD_BATCHES && !got; batch++) {
+            for (i = 0; i < T_FLOOD_BATCH; i++) {
+                snprintf(line, sizeof line, "PING :%s", tok);
+                if (tc_send(&flood, line) != 0) {
+                    break;
+                }
+            }
+            got = (tc_expect(&flood, "Input rate limit exceeded",
+                             T_BATCH_MS) == 0);
+        }
+        {
+            const char *saw = tc_buffer(&flood);
+            size_t n = strlen(saw);
+            TF_CHECK_MSG(got, "the flood was never refused with 417 at N=4:\n%s",
+                         (n > 512u) ? saw + (n - 512u) : saw);
+        }
     }
 
     /* Drain: the 417 queued behind the PONGs, then the close that only
