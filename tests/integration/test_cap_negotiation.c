@@ -556,13 +556,17 @@ static void test_sasl_plain(char *store_path, int expect_sasl_advertised)
     if (expect_sasl_advertised != 0) {
         TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
                      "a correct PLAIN credential was not accepted");
+        /* 903 is the verdict the client library parses, not the 001 burst.
+         * The target is `*`: no NICK has been sent yet. */
+        expect_line(&c, "903 after a verified SASL",
+                    ":irc.test 903 * :SASL authentication successful\r\n");
     } else {
         /* THE FAILURE MODE THIS WHOLE DELIVERABLE IS ABOUT. A node with no
          * credential store must REFUSE a syntactically perfect PLAIN payload, not
          * accept it: a client that is told it authenticated will act on it. */
         TF_CHECK_MSG(nf_expect(&node, "outcome=REJECTED", T_IO_MS) == 0,
                      "a node with no credential store accepted a SASL payload");
-        TF_CHECK_MSG(tc_expect(&c, " 464 * :SASL authentication failed: this "
+        TF_CHECK_MSG(tc_expect(&c, " 904 * :SASL authentication failed: this "
                                    "node holds no client credential store",
                                T_IO_MS) == 0,
                      "expected the refusal to name the missing store");
@@ -582,7 +586,7 @@ static void test_sasl_plain(char *store_path, int expect_sasl_advertised)
          * register as though it had -- and the connection is deliberately NOT
          * closed, because poll_loop.c refuses to pump the write queue of a
          * CLOSING connection, so closing here would discard the abort and the
-         * 464 queued in the same dispatch and leave the client with a bare FIN
+         * 904 queued in the same dispatch and leave the client with a bare FIN
          * and no explanation. See handle_authenticate(). */
         expect_absent(&c, "no registration after a refused SASL", " 001 ",
                       T_ABSENT_MS);
@@ -645,7 +649,7 @@ static void test_bad_credentials(char *store_path, const char *label,
      * substring check on purpose (this test cares that the failure says which
      * failure), and the leading-space needle makes the line-boundary assertion
      * meaningless -- the numeric does not start with a space. */
-    TF_CHECK_MSG(tc_expect(&c, " 464 * :SASL authentication failed: "
+    TF_CHECK_MSG(tc_expect(&c, " 904 * :SASL authentication failed: "
                                "the credentials did not verify", T_IO_MS) == 0,
                  "expected the refusal to name a credential failure");
 
@@ -656,6 +660,99 @@ static void test_bad_credentials(char *store_path, const char *label,
     TF_CHECK_MSG(tc_send(&c, "JOIN #nope") == 0, "tc_send failed");
     expect_line(&c, "the registration gate after a bad credential",
                 ":irc.test 451 alice :You have not registered\r\n");
+
+    nf_kill(&node);
+    nf_free(&node);
+    tc_close(&c);
+}
+
+/* --------------------------------------------------------------------------
+ * Issue #560: SASL completion is 903-908, never 464. The abort and the
+ * over-long payload are the two arms test_bad_credentials() does not cover:
+ * a client that gives up mid-exchange gets 906, and a response past
+ * SASL_MAX_RESPONSE gets 905.
+ * ------------------------------------------------------------------------ */
+static void test_sasl_abort(char *store_path)
+{
+    nf_node_t node;
+    test_client_t c;
+    char portbuf[16];
+    char *argv[6];
+
+    tc_init(&c);
+    (void)snprintf(portbuf, sizeof portbuf, "0");
+    argv[0] = (char *)"irc-serve";
+    argv[1] = portbuf;
+    argv[2] = (char *)"--sasl-store";
+    argv[3] = store_path;
+    argv[4] = NULL;
+    argv[5] = NULL;
+    TF_CHECK(nf_spawn_binary_argv(&node, argv) == 0);
+    TF_CHECK_MSG(tc_connect(&c, node.port) == 0, "tc_connect failed");
+
+    TF_CHECK_MSG(tc_send(&c, "CAP END") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE PLAIN") == 0, "tc_send failed");
+    expect_line(&c, "the initial-response request",
+                ":irc.test AUTHENTICATE * +\r\n");
+
+    /* The client gives up. 906 -- and the connection stays registerable,
+     * because declining to authenticate is not failing to. */
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE *") == 0, "tc_send failed");
+    TF_CHECK_MSG(nf_expect(&node, "outcome=ABORTED", T_IO_MS) == 0,
+                 "the abort was not observed");
+    expect_line(&c, "906 after a client abort",
+                ":irc.test 906 * :SASL authentication aborted\r\n");
+
+    TF_CHECK_MSG(tc_send(&c, "NICK alice") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "USER a 0 * :Alice") == 0, "tc_send failed");
+    expect_line(&c, "001 after an aborted SASL",
+                ":irc.test 001 alice :Welcome to the irc-serve network "
+                "alice!a@");
+
+    nf_kill(&node);
+    nf_free(&node);
+    tc_close(&c);
+}
+
+static void test_sasl_too_long(char *store_path)
+{
+    nf_node_t node;
+    test_client_t c;
+    char line[2048];
+    char portbuf[16];
+    char *argv[6];
+
+    tc_init(&c);
+    (void)snprintf(portbuf, sizeof portbuf, "0");
+    argv[0] = (char *)"irc-serve";
+    argv[1] = portbuf;
+    argv[2] = (char *)"--sasl-store";
+    argv[3] = store_path;
+    argv[4] = NULL;
+    argv[5] = NULL;
+    TF_CHECK(nf_spawn_binary_argv(&node, argv) == 0);
+    TF_CHECK_MSG(tc_connect(&c, node.port) == 0, "tc_connect failed");
+
+    TF_CHECK_MSG(tc_send(&c, "CAP END") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE PLAIN") == 0, "tc_send failed");
+    expect_line(&c, "the initial-response request",
+                ":irc.test AUTHENTICATE * +\r\n");
+
+    /* 1500 base64-alphabet bytes: past SASL_MAX_RESPONSE, inside IRC_MAX_LINE,
+     * so the handler -- not the framing -- answers. The connection is marked
+     * CLOSING on this arm (as before), whose write queue the loop drops rather
+     * than flushes, so the 905-vs-904 distinction is asserted on the node's
+     * own output: RESPONSE_TOO_LONG is the 905 arm, BAD_PAYLOAD the 904 one. */
+    {
+        char payload[1600];
+        memset(payload, 'A', 1500u);
+        payload[1500] = '\0';
+        (void)snprintf(line, sizeof line, "AUTHENTICATE %s", payload);
+    }
+    TF_CHECK_MSG(tc_send(&c, line) == 0, "tc_send failed");
+    TF_CHECK_MSG(nf_expect(&node, "outcome=REJECTED reason=RESPONSE_TOO_LONG",
+                           T_IO_MS) == 0,
+                 "an over-long response was not answered on the 905 arm");
 
     nf_kill(&node);
     nf_free(&node);
@@ -1403,6 +1500,8 @@ int main(void)
                          "correct");
     test_bad_credentials(good_store, "an unknown authcid", "mallory",
                          "correct horse");
+    test_sasl_abort(good_store);
+    test_sasl_too_long(good_store);
     test_no_credential_in_the_log(good_store);
 
     /* A node given NO --sasl-store at all: the default, and the state most

@@ -287,6 +287,16 @@
  * the same answer for ever. */
 #define RPL_INVALIDCAPSUBCOMMAND "410"
 
+/* 903 RPL_SASLSUCCESS / 904 ERR_SASLFAIL / 905 ERR_SASLTOOLONG /
+ * 906 RPL_SASLABORTED: SASL completion numerics (IRCv3 sasl-3.2). They are the
+ * only verdicts a SASL client library parses: success is 903, a rejected
+ * credential is 904, an over-long payload is 905 and a client abort
+ * (`AUTHENTICATE *`) is 906. 908 below is the fifth, the mechanism list. */
+#define RPL_SASLSUCCESS "903"
+#define ERR_SASLFAIL "904"
+#define ERR_SASLTOOLONG "905"
+#define RPL_SASLABORTED "906"
+
 /* 908 RPL_SASLMECHS: the mechanisms this node offers. It is sent in answer to
  * `AUTHENTICATE` with a mechanism this node does not implement, which is the only
  * place a client learns what to try instead. */
