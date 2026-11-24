@@ -14,7 +14,7 @@
  *      wipe did not break the path it scrubs: a wipe placed before the verify,
  *      or over the wrong length, fails here rather than in every SASL test.
  *
- *   2. THE WIPE IS PRESENT. src/core/commands.c contains auth_wipe_credential()
+ *   2. THE WIPE IS PRESENT. src/core/commands_auth.c contains auth_wipe_credential()
  *      calling auth_wipe() over all four locals, the wipe runs through a
  *      volatile pointer (so the compiler cannot delete it as a dead store),
  *      and all eleven exits of handle_authenticate() call it. Removing any call
@@ -148,11 +148,14 @@ static void run_two_step(nf_node_t *node)
  * or not. Removing a call -- or emptying the helper -- fails here. */
 static void expect_wipe_in_source(void)
 {
-    char *code = tf_read_code("src/core/commands.c", NULL);
+    /* #543: the wipe lives in src/core/commands_auth.c now (verbatim move out
+     * of commands.c); the dispatch table that calls handle_authenticate() is
+     * what stayed behind. */
+    char *code = tf_read_code("src/core/commands_auth.c", NULL);
     size_t calls = 0;
     const char *at;
 
-    TF_CHECK_MSG(code != NULL, "could not read src/core/commands.c");
+    TF_CHECK_MSG(code != NULL, "could not read src/core/commands_auth.c");
     if (code == NULL) {
         return;
     }
@@ -160,7 +163,7 @@ static void expect_wipe_in_source(void)
      * cannot delete it as a dead store -- the same shape as secret_util.c's
      * secret_wipe(). */
     TF_CHECK_MSG(strstr(code, "static void auth_wipe(void *p, size_t n)") != NULL,
-                 "auth_wipe() is missing from src/core/commands.c");
+                 "auth_wipe() is missing from src/core/commands_auth.c");
     TF_CHECK_MSG(strstr(code, "volatile unsigned char *v") != NULL,
                  "auth_wipe() must write through a volatile pointer");
     TF_CHECK_MSG(strstr(code, "auth_wipe(passwd, SASL_MAX_PASSWORD + 1u)") != NULL,
