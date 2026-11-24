@@ -378,7 +378,7 @@ static void case_sjoin_account_bound(nf_node_t *node, int *peer_fd)
 
     fill(acct, sizeof acct, ACCT_OVER_BOUND);
     stamp(block, sizeof block, 700UL, 1UL);
-    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " zaphod - %s\r\n",
+    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " zaphod - %s - -\r\n",
                    block, acct);
     TF_CHECK_MSG(send_line(*peer_fd, line) == 0, "the test could not send the line");
 
@@ -408,7 +408,7 @@ static void case_sjoin_account_bound(nf_node_t *node, int *peer_fd)
      * a node that refused every account would pass the case above. */
     fill(acct, sizeof acct, ACCT_AT_BOUND);
     stamp(block, sizeof block, 701UL, 1UL);
-    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " mallory - %s\r\n",
+    (void)snprintf(line, sizeof line, "%s:" PEER " SJOIN " CHAN " mallory - %s - -\r\n",
                    block, acct);
     TF_CHECK_MSG(send_line(*peer_fd, line) == 0, "the test could not send the line");
     TF_CHECK_MSG(nf_expect(node, "fed_sjoin: channel=" CHAN " member=mallory",

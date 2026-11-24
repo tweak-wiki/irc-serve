@@ -4,7 +4,7 @@
  * Authority: docs/SERVER_DESIGN.md 2.2, 3.1, 4.1 and 4.4.
  *
  * ---------------------------------------------------------------------------
- * THE SINGLE-WRITER RULE, AND WHY IT IS CHECKED BEFORE ANYTHING ELSE
+ * THE SINGLE-WRITER RULE, AND WHY IT IS CHECKED BEFORE ANYTHING IS TOUCHED
  * ---------------------------------------------------------------------------
  * 2.2: "A node never applies a channel state change it cannot route to the
  * channel's origin; it refuses the action (437). It does not queue and apply
@@ -22,9 +22,10 @@
  * The consequence, stated so the code below reads correctly: a refused action
  * leaves the channel EXACTLY as it was. No partial application, no half-added
  * member, no topic written before the refusal is noticed, and no clock field
- * advanced. Every handler therefore resolves authority FIRST, before it has
- * touched anything -- and the test that a refused TOPIC left topic, topic_who
- * and topic_when all untouched is a test of that ordering, not of a detail.
+ * advanced. Every handler therefore answers its local preconditions first and
+ * resolves authority before it has touched anything -- and the test that a
+ * refused TOPIC left topic, topic_who and topic_when all untouched is a test
+ * of that ordering, not of a detail.
  *
  * ---------------------------------------------------------------------------
  * WHAT "CANNOT ROUTE TO THE ORIGIN" MEANS ON ONE NODE
@@ -49,6 +50,7 @@
  * appears on, so it is measured rather than filtered. See mode_refusal_render(). */
 #include "core/connection.h"
 #include "core/fanout.h"
+#include "federation/verbs.h"
 #include "core/reply.h"
 
 /* ---------------------------------------------------------------------------
@@ -365,10 +367,12 @@ static const char *names_signs(unsigned flags, int multiprefix, char *out,
  *
  *   - a LOCAL member always has both halves. `c->host` was filled by accept()
  *     before the connection had a nickname, and `c->user` by USER.
- *   - a REMOTE member has them only if 4.3's SBURSTN announced them. A live SJOIN
- *     carries neither (4.3's SJOIN is `<server> <chan> <nick> <flags>`), so the
- *     empty host is the NORMAL state for a member learned from one -- channel.h
- *     says so at `chan_remote_t` and that note is still true.
+ *   - a REMOTE member has them only if 4.3's SBURSTN announced them or a live
+ *     SJOIN carried them. The 4.3 extension (#563) widened SJOIN to six
+ *     parameters with `<user> <host>` appended, so a member learned from one now
+ *     normally HAS both -- channel.h says so at `chan_remote_t`. An empty half
+ *     remains possible (the sender spells "not told" as `-`), and still renders
+ *     as the bare nick.
  *
  * The alternative would be to put `*` in place of a missing half, and that is
  * refused on purpose: `*` would be a byte on the wire that reads as part of a
@@ -555,9 +559,9 @@ static void send_names_list(server_t *s, conn_t *dst, const chan_t *ch)
              * `names_entry()` takes (nick, ident, host) rather than a conn_t: a
              * remote member has no conn_t, so a renderer that read one could not
              * have drawn it at all and the roster would carry two shapes by
-             * construction. The empty ident and empty host are the documented normal
-             * state for a member learned from a live SJOIN, and they render as the
-             * bare nick rather than as a half-built hostmask. */
+             * construction. An empty ident or host (a peer that sent `-` for
+             * "not told") still renders as the bare nick rather than as a
+             * half-built hostmask. */
             char entry[CONN_HOSTMASK_MAX];
 
             if (r->nick[0] == '\0' || names_group_flags(r->flags) != group) {
@@ -1347,16 +1351,34 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
     if (ch == NULL) {
         return;
     }
-    /* Asked ONCE, and the answer held, because authority_ok() reports on the
-     * observable output and a reader seeing two `chan_state_forward` lines for
-     * one TOPIC would reasonably ask what the second one was. */
-    verdict = authority_ok(s, c, ch, "TOPIC", setting);
-    if (verdict == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
+    /* A query takes the query arm: a question about a channel this node does not
+     * own is answered from the cache and never refused. */
     if (setting == 0) {
+        verdict = authority_ok(s, c, ch, "TOPIC", 0);
         send_topic(s, c, ch);
         return;
+    }
+    /* Local preconditions first, routing last (§2.2): the length bound is
+     * answerable from the parameter alone, so on an orphaned channel an
+     * over-long topic is 417 rather than 437. Asked ONCE and HELD, because
+     * authority_ok() reports on the observable output and a reader seeing two
+     * `chan_state_forward` lines for one TOPIC would reasonably ask what the
+     * second one was. */
+    if (strlen(m->params[1]) > (size_t)CHAN_MAX_TOPIC) {
+        /* NOT FORWARDED, AND SAID SO -- to the client, not just the log. The
+         * origin would refuse a topic longer than its own bound, and a node
+         * that quietly shortened its way inside that bound would be answering
+         * for a message the origin never accepted. */
+        (void)reply_refused(s, c, "TOPIC", NULL, "417", NULL, 0,
+                            "Topic is too long for this channel");
+        printf("[observable] chan_topic_refused: channel=%s nick=%s reason=too_long "
+               "len=%zu max=%d\n",
+               ch->name, c->nick, strlen(m->params[1]), CHAN_MAX_TOPIC);
+        return;
+    }
+    verdict = authority_ok(s, c, ch, "TOPIC", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
     }
     if (verdict == CHAN_VERDICT_FORWARD) {
         /* THE FORWARD PATH, and it is the clearest case of the two consequences
@@ -1405,25 +1427,11 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
         char clean[CHAN_MAX_TOPIC + 1u];
         size_t in_len = strlen(m->params[1]);
 
-        if (in_len > (size_t)CHAN_MAX_TOPIC) {
-            /* Not stripped, AND NOT FORWARDED. The origin refuses a topic longer
-             * than its own bound, and a node that quietly shortened its way inside
-             * that bound would be answering for a message the origin never
-             * accepted -- so the whole forward is skipped and the client is still
-             * answered 332/333 below with what this node holds, which is what this
-             * arm has always done.
-             *
-             * The `forwarded=0` is on THIS line and not on a shared one, and that is
-             * the point of putting the record inside each branch: a reader -- or a
-             * test -- must be able to conclude from `forwarded=1` that the value that
-             * went on the wire was the stripped one, because that is the branch that
-             * put `clean` into the parameter list. A single summary line printed
-             * after both arms could not carry that, and a test could not use it. */
-            printf("[observable] chan_topic_forward: channel=%s nick=%s in_len=%zu "
-                   "kept_len=0 forwarded=0 reason=TOO_LONG\n",
-                   ch->name, c->nick, in_len);
-        } else {
-            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1], STRIP_STORED);
+        /* The bound above guarantees this fits, so the strip cannot widen what the
+         * node accepts and `clean` is exact. */
+        {
+            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1],
+                                          STRIP_STORED);
 
             params[0] = clean;
             deliver_state_change(s, c, ch, "TOPIC", prefix, params, 1);
@@ -1435,12 +1443,12 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
         return;
     }
 
-    /* The write. Every field changes together or none does: chan_set_topic()
-     * refuses an over-long topic BEFORE touching topic_when, so a refused set
-     * cannot leave a new time beside an old topic. */
+    /* The write. chan_set_topic() still checks the bound itself, and the check
+     * above means it cannot fail on length here; the branch stays so a future
+     * bound change fails closed with the right numeric instead of 437. */
     if (chan_set_topic(ch, m->params[1], c->nick) != 0) {
-        (void)reply(s, c, "437", (const char *const[]){ ch->name }, 1,
-                    "Topic is too long for this channel");
+        (void)reply_refused(s, c, "TOPIC", NULL, "417", NULL, 0,
+                            "Topic is too long for this channel");
         return;
     }
     printf("[observable] chan_topic: channel=%s nick=%s len=%zu when=%lld\n",
@@ -1659,13 +1667,13 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
  *   442  the KICKER is not on the channel. Without this a non-member would be
  *        told 482 about a channel it is not in, which answers a question the
  *        client did not ask.
- *   437  the node may not manage this channel. Authority before privilege: a node
- *        with no standing to evaluate a channel's membership has no standing to
- *        say who may be removed from it either.
  *   482  the kicker holds no privilege -- 7/Phase 4's acceptance criterion, and
  *        meaningful only because +o is what sets it.
  *   401  the target is not a nickname this node knows.
  *   441  the target exists but is not on this channel.
+ *   437  the node may not manage this channel. Routing is asked LAST: 482/401/441
+ *        are answerable from this node's own state, so on an orphaned channel
+ *        they beat the "origin unreachable" answer, which would never clear.
  *
  * 441 is checked after 401 and the two are different facts: "they are not here"
  * is more specific than "no such nick", and a client that acted on 401 would go
@@ -1791,21 +1799,16 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * log line below is the only record of the difference. */
     kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason, STRIP_STORED);
     reason = clean_reason;
-
     ch = resolve_joined(s, c, m->params[0]);
     if (ch == NULL) {
         return;
     }
-    if (authority_ok(s, c, ch, "KICK", 1) == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
-    /* NOT A FORWARD CASE, and the reason is 2.2 rather than 3.1. A KICK is only
-     * meaningful on a channel this node ORIGINATES, because the kicker has to be
-     * an operator OF THAT CHANNEL and the operator set is the origin's record;
-     * a cache cannot decide who may remove whom. So a KICK on a non-owned but
-     * linked channel is answered 437 by the verdict path below rather than
-     * forwarded -- the privilege check that follows is the origin's rule and
-     * applying it here would be the cache pretending to enforce. */
+
+    /* Local preconditions first, routing last (§2.2): 482 (below) and 441/401
+     * are answerable from this node's own state, so on an orphaned channel
+     * they beat 437 -- whose answer ("the origin is unreachable") would be a
+     * lie about a refusal that will never clear. A well-formed KICK falls
+     * through to authority_ok() and is still refused 437 there. */
     if (!chan_has_flag(ch, c, CHAN_MEMBER_OP)) {
         /* 482, not 481. 481 is "you need to be a channel operator to do this"
          * for a mode the client may not set at all; 482 is "you are not
@@ -1835,6 +1838,17 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         }
         return;
     }
+    if (authority_ok(s, c, ch, "KICK", 1) == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
+    }
+    /* NOT A FORWARD CASE, and the reason is 2.2 rather than 3.1. A KICK is only
+     * meaningful on a channel this node ORIGINATES, because the kicker has to be
+     * an operator OF THAT CHANNEL and the operator set is the origin's record;
+     * a cache cannot decide who may remove whom. So a KICK on a non-owned but
+     * linked channel is answered 437 by the verdict path below rather than
+     * forwarded -- the privilege check above is the origin's rule only on an
+     * owned channel, and everywhere else it is the local precondition §2.2
+     * orders before routing. */
     if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
         return;
     }
@@ -1887,12 +1901,14 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
  *
  *   1. 442 first (in resolve_joined): membership is the precondition for having
  *      any standing in a channel at all.
- *   2. The single-writer check, because +b IS a state change.
- *   3. 482 for a non-operator. Privilege is asked before evaluation, so a
- *      non-operator is told it lacks privilege rather than being told what the
- *      channel's modes are.
+ *   2. 461/472 for a malformed mode string, then 482 for a non-operator.
+ *      Privilege is asked before evaluation AND before routing, so on an
+ *      orphaned channel a non-operator is told it lacks privilege (482)
+ *      rather than being told the origin is unreachable (437).
+ *   3. The single-writer check, because +b IS a state change. 437 is reserved
+ *      for the case the checks above all passed and the origin is unreachable.
  *   4. chan_mode_is_origin_only() -- and it is checked as a SEPARATE question
- *      from step 2, because they are different questions. Step 2 asks whether
+ *      from step 3, because they are different questions. Step 3 asks whether
  *      this node may MANAGE the channel; this asks whether it may EVALUATE this
  *      particular mode. 2.2's list is exactly {b, e, I}, and the two only come
  *      apart once Phase 6's forward path exists.
@@ -2269,14 +2285,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         send_creation_time(s, c, ch);
         return;
     }
-    /* A mode change is a state change, so the single-writer rule applies before
-     * anything else is examined. The verdict is ASKED HERE AND HELD, because the
-     * 482 and 472 refusals below come first in the RFC order and a caller that
-     * re-asked would report `chan_state_forward` once per refused attempt. */
-    verdict = authority_ok(s, c, ch, "MODE", 1);
-    if (verdict == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
+    /* Local preconditions first, routing last (§2.2): 461/472/482 are answerable
+     * from this node's own state, so on an orphaned channel they beat 437. The
+     * verdict is ASKED HERE AND HELD, because the forward arm below needs it and
+     * a caller that re-asked would report `chan_state_forward` twice. */
     if (m->params[1][0] == '\0' ||
         ((m->params[1][0] == '+' || m->params[1][0] == '-') &&
          m->params[1][1] == '\0')) {
@@ -2339,6 +2351,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=not_op\n",
                ch->name, c->nick);
         return;
+    }
+    verdict = authority_ok(s, c, ch, "MODE", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
     }
 
     if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
@@ -2834,8 +2850,7 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
                "reason=INVITE_NEEDS_ORIGIN\n",
                ch->name, c->nick);
         (void)reply(s, c, "437", (const char *const[]){ ch->name }, 1,
-                    "Cannot invite to %s: there is no SINVITE to send its origin "
-                    "(%s)",
+                    "Cannot invite to %s: this server is not its origin (%s)",
                     ch->name, ch->origin);
         return;
     }
@@ -2889,6 +2904,9 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
     (void)reply(s, c, "341", (const char *const[]){ ch->name, t.user->nick }, 2,
                 "%s has invited you to channel %s", c->nick, ch->name);
     notify_invite(s, c, ch, prefix, t.user->nick);
+    /* Originated SINVITE: the mesh half of this invite. The inviter's hostmask
+     * rides as the prefix because the inbound half delivers from it. */
+    { const char *sip[2]; sip[0] = ch->name; sip[1] = t.user->nick; (void)fed_forward_all(s, "SINVITE", prefix, sip, 2); }
     printf("[observable] chan_invite: channel=%s by=%s target=%s\n", ch->name,
            c->nick, t.user->nick);
 }
@@ -2914,12 +2932,11 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
  * -- and the specification's own phrase is "a standard way that allows clients to learn
  * when ANOTHER client does an /INVITE". One line per event, to the audience it is for.
  *
- * NOT FORWARDED, for the reason `notify_away()` is not forwarded: this is an originating
- * emission and the local-only entry point has no forward arm. The cost is stated at
- * `away-notify`'s §3.1.1 note and applies verbatim -- away STATE federates through 4.3's
- * SBURST and a notification is not state; the same is true of an invitation, which 4.3's
- * frozen verb table has no S-verb for at all, so a mesh member's clients learn of an
- * invitation to a channel they can see by being in it and by nothing else.
+ * MESH-REACHABLE THROUGH SINVITE, while the notify itself stays local-only: this
+ * is an originating emission through the local-only entry point, and the
+ * `handle_invite()` line above carries it across the mesh as
+ * `:inviter SINVITE <channel> <target>`. A mesh member's clients learn of an
+ * invitation two ways -- by sharing the channel, and by the SINVITE relay.
  *
  * PER CHANNEL, NOT OVER A UNION, and the reason is the shape: the line's own grammar is
  * `:<inviter> INVITE <target> <channel>` and it NAMES its channel, so a member of three

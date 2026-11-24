@@ -26,12 +26,14 @@ root=$(cd -- "$here/.." && pwd)
 #   documented in CONTRIBUTING.md, automatic runs nowhere by design.
 # teeth.sh: manual mutation runner; its Linux counterpart teeth-linux.sh runs
 #   nightly in CI.
+# gate-lib.sh: library sourced by gate.sh, gate-linux-cell.sh and teeth-linux.sh,
+#   never run standalone; its single-definition rule is enforced below.
 # setup-self-hosted-runner.sh: one-off runner provisioning; documented in
 #   docs/DEVELOPMENT.md, never runs in CI by design.
 is_allowlisted() {
     case "$1" in
         strip-c-comments.awk|gen-rollback-table.py|build-debian-package.sh|\
-        merge-train.sh|teeth.sh|setup-self-hosted-runner.sh) return 0 ;;
+        merge-train.sh|teeth.sh|setup-self-hosted-runner.sh|gate-lib.sh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -52,6 +54,28 @@ for f in "$root"/scripts/*.py "$root"/scripts/*.sh "$root"/scripts/*.awk; do
         fail=1
     fi
 done
+
+# SINGLE DEFINITION (#544). The sanitizer option strings live in gate-lib.sh and
+# nowhere else in code: every other surface takes them from there. A literal
+# retyped in a second file is a class one cell watches and another does not, the
+# next time one of the two is edited. Full-line comments are filtered first, for
+# the reason gate.sh --asan-selftest gives at length: prose about a call is not
+# the call.
+for _wired in gate.sh gate-linux-cell.sh teeth-linux.sh; do
+    _code=$(grep -v '^[[:space:]]*#' "$root/scripts/$_wired")
+    case "$_code" in
+        *detect_stack_use_after_return=1*)
+            echo "check-wired.sh: FAIL -- $_wired repeats the sanitizer-options literal; it lives in gate-lib.sh (#544)" >&2
+            fail=1 ;;
+    esac
+    case "$_code" in
+        *gate-lib.sh*) ;;
+        *)
+            echo "check-wired.sh: FAIL -- $_wired does not source gate-lib.sh (#544)" >&2
+            fail=1 ;;
+    esac
+done
+
 if [ "$fail" -ne 0 ]; then
     echo "check-wired.sh: FAIL -- unwired scripts present" >&2
     exit 1

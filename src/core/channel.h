@@ -832,8 +832,10 @@ int chan_remote_set_host(chan_t *ch, const char *server, const char *nick,
 
 /* As chan_remote_set_host(), for the member's IDENT. Added with the field, in
  * Phase 10.5, and for the same reason: the bounded copy belongs in the module that
- * owns the struct, and the only caller is `federation/burst.c` translating a
- * shadow record into a roster entry.
+ * owns the struct. The callers are `federation/burst.c` translating a shadow
+ * record into a roster entry, and -- since the 4.3 extension (#563) -- the live
+ * SJOIN path in `federation/verbs.c` installing `<user>` the same way it
+ * installs `<host>`.
  *
  * THE REFUSAL IS THE SAME SHAPE AS THE HOST'S AND FOR THE SAME REASON -- an over
  * long ident is REFUSED, not truncated, because a truncated ident renders a

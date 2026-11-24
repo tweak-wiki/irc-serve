@@ -287,6 +287,16 @@
  * the same answer for ever. */
 #define RPL_INVALIDCAPSUBCOMMAND "410"
 
+/* 903 RPL_SASLSUCCESS / 904 ERR_SASLFAIL / 905 ERR_SASLTOOLONG /
+ * 906 RPL_SASLABORTED: SASL completion numerics (IRCv3 sasl-3.2). They are the
+ * only verdicts a SASL client library parses: success is 903, a rejected
+ * credential is 904, an over-long payload is 905 and a client abort
+ * (`AUTHENTICATE *`) is 906. 908 below is the fifth, the mechanism list. */
+#define RPL_SASLSUCCESS "903"
+#define ERR_SASLFAIL "904"
+#define ERR_SASLTOOLONG "905"
+#define RPL_SASLABORTED "906"
+
 /* 908 RPL_SASLMECHS: the mechanisms this node offers. It is sent in answer to
  * `AUTHENTICATE` with a mechanism this node does not implement, which is the only
  * place a client learns what to try instead. */
@@ -471,13 +481,5 @@ int cap_gate_invite_notify(const conn_t *dst, void *ctx);
 /* Handle one `CAP` line. Returns 1 if it was handled, 0 if it was not a CAP at
  * all (which cannot happen: the caller has already dispatched on the verb). */
 void cap_handle(server_t *s, conn_t *c, const message_t *m);
-
-/* Release negotiation state. Called when a connection is torn down, so a
- * conn_t that is freed and re-used at the same descriptor cannot inherit a
- * capability it negotiated in a previous life. conn_t is calloc'd by conn_new()
- * and freed by conn_free(), so this is belt to those braces -- and it is on the
- * same list as "there is no per-connection message id" for the same reason: the
- * state must not outlive the connection that owns it. */
-void cap_reset(conn_t *c);
 
 #endif /* IRC_CORE_CAP_H */

@@ -241,13 +241,13 @@ int fed_queue_line(server_t *s, conn_t *peer, const irc_serve_tags_t *tags,
  *   SNOTICE   <target> <text>
  *             `:alice!u@example S@1 SNOTICE #T :hello there`
  *
- *   SJOIN     <channel> <member> <flags> <account>
- *             `:alice!u@example S@1 SJOIN #T alice +o *`
+ *   SJOIN     <channel> <member> <flags> <account> <user> <host>
+ *             `:alice!u@example S@1 SJOIN #T alice +o * u example`
  *             The flags are the member's prefix flags as a `+` run, and the
  *             EMPTY CASE IS THE LITERAL `-`. That is not a mode convention: an
  *             empty middle parameter is not representable on this wire at all
  *             (3.2: a value needing ':' is only representable last, and
- *             message_parse() drops an empty uncolonned token), so a shape that
+ *             message_parse() drops an uncolonned token), so a shape that
  *             said "nothing if there are no flags" would parse as a two-
  *             parameter SJOIN and the flags would be read as absent on one node
  *             and as an empty token on another. `-` is one byte, never needs a
@@ -259,6 +259,18 @@ int fed_queue_line(server_t *s, conn_t *peer, const irc_serve_tags_t *tags,
  *             `-`, and it is translated to "" on receipt so that the roster holds an
  *             ABSENCE rather than an account named "*". It is derived from the
  *             MEMBERSHIP, exactly as the flags are -- see fed_member_account().
+ *
+ *             <user> and <host> are the 4.3 extension (#563, wire 0.2.0): the
+ *             member's ident and visible host, derived from the member's own
+ *             connection the same way the flags and the account are. Before
+ *             them a live SJOIN carried neither, so a member learned from one
+ *             rendered as a bare nick in 353 until the next SBURST filled the
+ *             fields in -- the first join did not render truthfully. `-` is the
+ *             empty spelling for both (translated to "" on receipt, as with the
+ *             account), because an unregistered-at-send connection may have no
+ *             ident to report and the middle slot cannot be empty. A 0.1.x node
+ *             never sends six parameters and refuses one that arrives (arity),
+ *             and the version bump is what keeps the two from linking at all.
  *
  *   SPART     <member> <channel> [<reason>]
  *             `:alice!u@example S@1 SPART alice #T :bye`
@@ -291,12 +303,54 @@ int fed_queue_line(server_t *s, conn_t *peer, const irc_serve_tags_t *tags,
  *             different users and a shape that carried one would make every
  *             KICK self-inflicted.
  *
- * WHAT IS NOT IN ANY ROW, and why. No account, no realname and no gecos: 4.3
- * names those for the SBURST vocabulary, not for a single state change, and
- * carrying a realname on every JOIN would make each join a few dozen bytes for
- * a field only the burst needs. No timestamp either -- 333's time is the
- * origin's clock, and a relayed clock is worse than no clock, so the receiver
- * reads topic_when from the origin's own record and a re-burst corrects it.
+ * ---------------------------------------------------------------------------
+ * THE 4.3 EXTENSION (#563, wire 0.2.0): SSETNAME, SAWAY, SINVITE
+ * ---------------------------------------------------------------------------
+ * SETNAME, AWAY and INVITE notifications never crossed a peer link: 4.3's table
+ * had no S-verb for any of them, so members on other nodes showed stale
+ * realnames and missed away transitions and invites. These three close that,
+ * and they are ORIGINATED lines, not relayed ones -- the table above maps
+ * client verbs a node RELAYS, and a node announcing its own client's change
+ * relays nothing. They are built at their one emission site each (the local
+ * SETNAME/AWAY/INVITE handler) and queued through fed_queue_line() like every
+ * other peer line, the way SQUIT and the T3 keepalive are. They are NOT in
+ * S_VERBS, for the same reason SQUIT is not: the column on the left is a
+ * client verb and these carry the origin's own state outward.
+ *
+ *   SSETNAME  <nick> :<realname>
+ *             `:alice!u@example S@1 SSETNAME alice :Alice Liddell`
+ *             The realname is last and always present, because a SETNAME names
+ *             a value and an empty one is not a value this node stores (the
+ *             client path refuses it before anything is emitted).
+ *
+ *   SAWAY     <nick> [:<message>]
+ *             `:alice!u@example S@1 SAWAY alice :out to lunch`
+ *             The message is OPTIONAL and its absence is an absent parameter,
+ *             not an empty one -- which is why it is last: a line that stops
+ *             after the nick is a one-parameter SAWAY and the receiver reads
+ *             it as "back", which is what the sender meant. Same wire grammar
+ *             as the client's own AWAY notify (`AWAY [#chan]` with nothing
+ *             after it), applied to a nick instead of a channel.
+ *
+ *   SINVITE   <channel> <target>
+ *             `:alice!u@example S@1 SINVITE #T bob`
+ *             The channel first, then the invitee: the receiver delivers an
+ *             INVITE to a local invitee of that name and notifies the channel's
+ *             local members, the same two audiences the local INVITE handler
+ *             serves. The prefix is the INVITER's hostmask and it is PRESERVED
+ *             on relay (unlike SNICK's, which the relay replaces with the link
+ *             name): the delivered client line is prefixed with it, so a relay
+ *             that rewrote it would deliver a lie about who invited. The
+ *             inviter's server is the ARRIVAL LINK, exactly as SNICK's member
+ *             server is -- a rename does not move anybody between servers, and
+ *             neither does an invitation.
+ *
+ * WHAT IS NOT IN ANY ROW, and why. No account, no gecos: 4.3 names those for
+ * the SBURST vocabulary, not for a single state change. No timestamp either --
+ * 333's time is the origin's clock, and a relayed clock is worse than no clock.
+ * Realname is the exception that proves the rule: SSETNAME carries one because
+ * no burst record does (frozen SBURSTN has no realname field), so without it
+ * a mesh member's clients would never learn a peer's realname changed.
  *
  * ---------------------------------------------------------------------------
  * SQUIT, WHICH IS NOT ONE OF THOSE ROWS, AND WHY
@@ -357,13 +411,14 @@ int fed_send_sverb(server_t *s, conn_t *peer, const irc_serve_tags_t *tags,
 /* How many parameters the S-verb for `client_verb` carries at most. The frozen
  * shapes above are what this is the length of, and it exists so that a caller
  * sizing an array has one number to ask for rather than a copy of the table. */
-/* RAISED FROM 4 TO 5 IN PHASE 10.3, and the bound is the SJOIN's four parameters
- * plus nothing else -- so the largest shape the S-verb family has is now FIVE, not
- * four, and a caller that sized an array by the old number would have been one slot
- * short for exactly one verb. Derived from the shapes above rather than picked:
- * SJOIN is <channel> <member> <flags> <account>, SMODES is <server> <chan> <modes>
- * [<arg>], and SKICK is <member> <chan> <target> [:reason]. */
-#define FED_SVERB_MAX_PARAMS 5
+/* RAISED FROM 5 TO 6 IN THE 4.3 EXTENSION (#563, wire 0.2.0): SJOIN gained
+ * <user> and <host>, so the largest shape the S-verb family has is now SIX, not
+ * five, and a caller that sized an array by the old number would have been one
+ * slot short for exactly one verb. Derived from the shapes above rather than
+ * picked: SJOIN is <channel> <member> <flags> <account> <user> <host>, SMODES is
+ * <server> <chan> <modes> [<arg>], and SKICK is <member> <chan> <target>
+ * [:reason]. */
+#define FED_SVERB_MAX_PARAMS 6
 
 /* ---------------------------------------------------------------------------
  * WHY THE SCRATCH BUFFER IS THE CALLER'S
@@ -390,6 +445,13 @@ typedef struct {
      * that means "not logged in to an account". See fed_member_account() for why
      * it is read out of the MEMBERSHIP rather than out of a nick record. */
     char account[CONN_MAX_ACCOUNT + 2];
+    /* 4.3's SJOIN <user> and <host>, added in the 4.3 extension (#563): the
+     * member's ident and visible host, read out of the member's own connection
+     * the same way the flags and the account are. Sized for the widest value
+     * the fields can hold plus the `-`-for-empty rendering (see
+     * burst_mid_or_dash()'s contract in burst.c, which this mirrors). */
+    char user[CONN_USER_MAX + 2];
+    char host[CHAN_MAX_REMOTE_HOST + 2];
 } fed_sverb_scratch_t;
 
 /* Build the S-verb's parameter list for `client_verb` from a CLIENT emission.
@@ -468,6 +530,13 @@ void fed_obs(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)))
 #endif
     ;
+
+/* The local half of an inbound state verb: resolve the channel and write the
+ * client-shaped line to local members, with NO forward. Called from the
+ * S-verb handlers in verbs.c and from burst.c's apply_end(), which emits a
+ * held JOIN when a resync completes a member's hostmask record. */
+void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
+                    const char *verb, const char *const *params, int nparams);
 
 /* ---------------------------------------------------------------------------
  * The DECODE side

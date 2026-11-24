@@ -67,14 +67,17 @@ void secret_sha256_final(secret_sha256_t *ctx,
  * delete. Shared by both stores' scrubs and by the salt fallback below. */
 void secret_wipe(void *p, size_t n);
 
-/* One salt per store, generated in the store's constructor: every *_load()
- * builds its store there, so every boot hashes under a fresh salt, and the
- * in-memory *_add() path hashes under the same one -- which is what makes the
- * two agree. Salt per boot is enough because the stores are per node. */
-void secret_gen_salt(unsigned char salt[SECRET_SALT_LEN]);
+/* One salt per RECORD, drawn fresh in *_add(): two records with the same
+ * password hash differently, so neither store reveals who shares a password.
+ * Returns 0 when no kernel RNG is available; the caller refuses the record
+ * rather than hashing under a predictable salt. */
+int secret_gen_salt(unsigned char salt[SECRET_SALT_LEN]);
 
-/* SHA-256(salt || password). The heap's only copy of the secret is this
- * digest; the password bytes themselves are never stored. */
+/* Iterated SHA-256(salt || password): one fast round is GPU-brute-forceable,
+ * so the hash stretches over SECRET_HASH_ROUNDS rounds. The heap's only copy
+ * of the secret is this digest; the password bytes themselves are never
+ * stored. */
+#define SECRET_HASH_ROUNDS 8192u
 void secret_hash_password(const unsigned char salt[SECRET_SALT_LEN],
                           const char *password,
                           unsigned char out[SECRET_HASH_LEN]);
