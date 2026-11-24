@@ -4,7 +4,7 @@
  * Authority: docs/SERVER_DESIGN.md 2.2, 3.1, 4.1 and 4.4.
  *
  * ---------------------------------------------------------------------------
- * THE SINGLE-WRITER RULE, AND WHY IT IS CHECKED BEFORE ANYTHING ELSE
+ * THE SINGLE-WRITER RULE, AND WHY IT IS CHECKED BEFORE ANYTHING IS TOUCHED
  * ---------------------------------------------------------------------------
  * 2.2: "A node never applies a channel state change it cannot route to the
  * channel's origin; it refuses the action (437). It does not queue and apply
@@ -22,9 +22,10 @@
  * The consequence, stated so the code below reads correctly: a refused action
  * leaves the channel EXACTLY as it was. No partial application, no half-added
  * member, no topic written before the refusal is noticed, and no clock field
- * advanced. Every handler therefore resolves authority FIRST, before it has
- * touched anything -- and the test that a refused TOPIC left topic, topic_who
- * and topic_when all untouched is a test of that ordering, not of a detail.
+ * advanced. Every handler therefore answers its local preconditions first and
+ * resolves authority before it has touched anything -- and the test that a
+ * refused TOPIC left topic, topic_who and topic_when all untouched is a test
+ * of that ordering, not of a detail.
  *
  * ---------------------------------------------------------------------------
  * WHAT "CANNOT ROUTE TO THE ORIGIN" MEANS ON ONE NODE
@@ -1350,16 +1351,34 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
     if (ch == NULL) {
         return;
     }
-    /* Asked ONCE, and the answer held, because authority_ok() reports on the
-     * observable output and a reader seeing two `chan_state_forward` lines for
-     * one TOPIC would reasonably ask what the second one was. */
-    verdict = authority_ok(s, c, ch, "TOPIC", setting);
-    if (verdict == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
+    /* A query takes the query arm: a question about a channel this node does not
+     * own is answered from the cache and never refused. */
     if (setting == 0) {
+        verdict = authority_ok(s, c, ch, "TOPIC", 0);
         send_topic(s, c, ch);
         return;
+    }
+    /* Local preconditions first, routing last (§2.2): the length bound is
+     * answerable from the parameter alone, so on an orphaned channel an
+     * over-long topic is 417 rather than 437. Asked ONCE and HELD, because
+     * authority_ok() reports on the observable output and a reader seeing two
+     * `chan_state_forward` lines for one TOPIC would reasonably ask what the
+     * second one was. */
+    if (strlen(m->params[1]) > (size_t)CHAN_MAX_TOPIC) {
+        /* NOT FORWARDED, AND SAID SO -- to the client, not just the log. The
+         * origin would refuse a topic longer than its own bound, and a node
+         * that quietly shortened its way inside that bound would be answering
+         * for a message the origin never accepted. */
+        (void)reply_refused(s, c, "TOPIC", NULL, "417", NULL, 0,
+                            "Topic is too long for this channel");
+        printf("[observable] chan_topic_refused: channel=%s nick=%s reason=too_long "
+               "len=%zu max=%d\n",
+               ch->name, c->nick, strlen(m->params[1]), CHAN_MAX_TOPIC);
+        return;
+    }
+    verdict = authority_ok(s, c, ch, "TOPIC", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
     }
     if (verdict == CHAN_VERDICT_FORWARD) {
         /* THE FORWARD PATH, and it is the clearest case of the two consequences
@@ -1408,25 +1427,11 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
         char clean[CHAN_MAX_TOPIC + 1u];
         size_t in_len = strlen(m->params[1]);
 
-        if (in_len > (size_t)CHAN_MAX_TOPIC) {
-            /* Not stripped, AND NOT FORWARDED. The origin refuses a topic longer
-             * than its own bound, and a node that quietly shortened its way inside
-             * that bound would be answering for a message the origin never
-             * accepted -- so the whole forward is skipped and the client is still
-             * answered 332/333 below with what this node holds, which is what this
-             * arm has always done.
-             *
-             * The `forwarded=0` is on THIS line and not on a shared one, and that is
-             * the point of putting the record inside each branch: a reader -- or a
-             * test -- must be able to conclude from `forwarded=1` that the value that
-             * went on the wire was the stripped one, because that is the branch that
-             * put `clean` into the parameter list. A single summary line printed
-             * after both arms could not carry that, and a test could not use it. */
-            printf("[observable] chan_topic_forward: channel=%s nick=%s in_len=%zu "
-                   "kept_len=0 forwarded=0 reason=TOO_LONG\n",
-                   ch->name, c->nick, in_len);
-        } else {
-            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1], STRIP_STORED);
+        /* The bound above guarantees this fits, so the strip cannot widen what the
+         * node accepts and `clean` is exact. */
+        {
+            size_t kept = conn_text_strip(clean, sizeof clean, m->params[1],
+                                          STRIP_STORED);
 
             params[0] = clean;
             deliver_state_change(s, c, ch, "TOPIC", prefix, params, 1);
@@ -1438,12 +1443,12 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
         return;
     }
 
-    /* The write. Every field changes together or none does: chan_set_topic()
-     * refuses an over-long topic BEFORE touching topic_when, so a refused set
-     * cannot leave a new time beside an old topic. */
+    /* The write. chan_set_topic() still checks the bound itself, and the check
+     * above means it cannot fail on length here; the branch stays so a future
+     * bound change fails closed with the right numeric instead of 437. */
     if (chan_set_topic(ch, m->params[1], c->nick) != 0) {
-        (void)reply(s, c, "437", (const char *const[]){ ch->name }, 1,
-                    "Topic is too long for this channel");
+        (void)reply_refused(s, c, "TOPIC", NULL, "417", NULL, 0,
+                            "Topic is too long for this channel");
         return;
     }
     printf("[observable] chan_topic: channel=%s nick=%s len=%zu when=%lld\n",
@@ -1662,13 +1667,13 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
  *   442  the KICKER is not on the channel. Without this a non-member would be
  *        told 482 about a channel it is not in, which answers a question the
  *        client did not ask.
- *   437  the node may not manage this channel. Authority before privilege: a node
- *        with no standing to evaluate a channel's membership has no standing to
- *        say who may be removed from it either.
  *   482  the kicker holds no privilege -- 7/Phase 4's acceptance criterion, and
  *        meaningful only because +o is what sets it.
  *   401  the target is not a nickname this node knows.
  *   441  the target exists but is not on this channel.
+ *   437  the node may not manage this channel. Routing is asked LAST: 482/401/441
+ *        are answerable from this node's own state, so on an orphaned channel
+ *        they beat the "origin unreachable" answer, which would never clear.
  *
  * 441 is checked after 401 and the two are different facts: "they are not here"
  * is more specific than "no such nick", and a client that acted on 401 would go
@@ -1794,21 +1799,16 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * log line below is the only record of the difference. */
     kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason, STRIP_STORED);
     reason = clean_reason;
-
     ch = resolve_joined(s, c, m->params[0]);
     if (ch == NULL) {
         return;
     }
-    if (authority_ok(s, c, ch, "KICK", 1) == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
-    /* NOT A FORWARD CASE, and the reason is 2.2 rather than 3.1. A KICK is only
-     * meaningful on a channel this node ORIGINATES, because the kicker has to be
-     * an operator OF THAT CHANNEL and the operator set is the origin's record;
-     * a cache cannot decide who may remove whom. So a KICK on a non-owned but
-     * linked channel is answered 437 by the verdict path below rather than
-     * forwarded -- the privilege check that follows is the origin's rule and
-     * applying it here would be the cache pretending to enforce. */
+
+    /* Local preconditions first, routing last (§2.2): 482 (below) and 441/401
+     * are answerable from this node's own state, so on an orphaned channel
+     * they beat 437 -- whose answer ("the origin is unreachable") would be a
+     * lie about a refusal that will never clear. A well-formed KICK falls
+     * through to authority_ok() and is still refused 437 there. */
     if (!chan_has_flag(ch, c, CHAN_MEMBER_OP)) {
         /* 482, not 481. 481 is "you need to be a channel operator to do this"
          * for a mode the client may not set at all; 482 is "you are not
@@ -1838,6 +1838,17 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         }
         return;
     }
+    if (authority_ok(s, c, ch, "KICK", 1) == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
+    }
+    /* NOT A FORWARD CASE, and the reason is 2.2 rather than 3.1. A KICK is only
+     * meaningful on a channel this node ORIGINATES, because the kicker has to be
+     * an operator OF THAT CHANNEL and the operator set is the origin's record;
+     * a cache cannot decide who may remove whom. So a KICK on a non-owned but
+     * linked channel is answered 437 by the verdict path below rather than
+     * forwarded -- the privilege check above is the origin's rule only on an
+     * owned channel, and everywhere else it is the local precondition §2.2
+     * orders before routing. */
     if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
         return;
     }
@@ -1890,12 +1901,14 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
  *
  *   1. 442 first (in resolve_joined): membership is the precondition for having
  *      any standing in a channel at all.
- *   2. The single-writer check, because +b IS a state change.
- *   3. 482 for a non-operator. Privilege is asked before evaluation, so a
- *      non-operator is told it lacks privilege rather than being told what the
- *      channel's modes are.
+ *   2. 461/472 for a malformed mode string, then 482 for a non-operator.
+ *      Privilege is asked before evaluation AND before routing, so on an
+ *      orphaned channel a non-operator is told it lacks privilege (482)
+ *      rather than being told the origin is unreachable (437).
+ *   3. The single-writer check, because +b IS a state change. 437 is reserved
+ *      for the case the checks above all passed and the origin is unreachable.
  *   4. chan_mode_is_origin_only() -- and it is checked as a SEPARATE question
- *      from step 2, because they are different questions. Step 2 asks whether
+ *      from step 3, because they are different questions. Step 3 asks whether
  *      this node may MANAGE the channel; this asks whether it may EVALUATE this
  *      particular mode. 2.2's list is exactly {b, e, I}, and the two only come
  *      apart once Phase 6's forward path exists.
@@ -2272,14 +2285,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         send_creation_time(s, c, ch);
         return;
     }
-    /* A mode change is a state change, so the single-writer rule applies before
-     * anything else is examined. The verdict is ASKED HERE AND HELD, because the
-     * 482 and 472 refusals below come first in the RFC order and a caller that
-     * re-asked would report `chan_state_forward` once per refused attempt. */
-    verdict = authority_ok(s, c, ch, "MODE", 1);
-    if (verdict == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
+    /* Local preconditions first, routing last (§2.2): 461/472/482 are answerable
+     * from this node's own state, so on an orphaned channel they beat 437. The
+     * verdict is ASKED HERE AND HELD, because the forward arm below needs it and
+     * a caller that re-asked would report `chan_state_forward` twice. */
     if (m->params[1][0] == '\0' ||
         ((m->params[1][0] == '+' || m->params[1][0] == '-') &&
          m->params[1][1] == '\0')) {
@@ -2342,6 +2351,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=not_op\n",
                ch->name, c->nick);
         return;
+    }
+    verdict = authority_ok(s, c, ch, "MODE", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
     }
 
     if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
