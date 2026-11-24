@@ -133,6 +133,9 @@ add_library(irc_core STATIC
   core/resume.c
   core/fanout.c
   core/commands.c
+  # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
+  # The dispatch table stays there; this file holds the verbs and their helpers.
+  core/commands_info.c
   # Phase 10.1: the account IDENTITY on a connection. It is a module of its own
   # for the reason core/cap.c is -- the predicate every consumer asks must have
   # one home, or two callers will each write `c->logged_in && c->account[0]` and
