@@ -181,11 +181,14 @@ COVERAGE_CLASSES="heap-use-after-free stack-use-after-scope heap-buffer-overflow
 #
 # BUILD_TYPE is reported, not just configured, and the reason is in the file header: a
 # Release sanitizer number is a claim about -O3, and -O3 can delete an allocation.
-# ASAN_RUN_OPTS is written out in full rather than inherited, because every option in
-# it is a DEFAULT THAT DIFFERS BETWEEN TOOLCHAINS -- measured across five, and the one
-# that differs in this image is detect_stack_use_after_return.
+# ASAN_RUN_OPTS comes from scripts/gate-lib.sh -- the single definition shared with
+# gate.sh's ASan cell and teeth-linux.sh -- because every option in it is a DEFAULT
+# THAT DIFFERS BETWEEN TOOLCHAINS: measured across five, and the one that differs in
+# this image is detect_stack_use_after_return. A word added here and not there is a
+# class one cell watches and another does not.
+. "$here/gate-lib.sh"
 BUILD_TYPE=Release
-ASAN_RUN_OPTS="detect_leaks=1:detect_stack_use_after_return=1"
+ASAN_RUN_OPTS="$GATE_ASAN_OPTS_LINUX"
 
 # coverage_complete <ledger> -- returns 0 when EVERY class in COVERAGE_CLASSES appears
 # in the ledger as PROVED, and 1 otherwise.

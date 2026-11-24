@@ -531,6 +531,13 @@ void fed_obs(const char *fmt, ...)
 #endif
     ;
 
+/* The local half of an inbound state verb: resolve the channel and write the
+ * client-shaped line to local members, with NO forward. Called from the
+ * S-verb handlers in verbs.c and from burst.c's apply_end(), which emits a
+ * held JOIN when a resync completes a member's hostmask record. */
+void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
+                    const char *verb, const char *const *params, int nparams);
+
 /* ---------------------------------------------------------------------------
  * The DECODE side
  * ---------------------------------------------------------------------------

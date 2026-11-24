@@ -1,4 +1,4 @@
-/* Real heartbeat liveness test, exercising federation_handshake.c: heartbeat
+/* Real heartbeat liveness test, exercising federation/handshake.c: heartbeat
  * reports live only once the handshake reaches ESTABLISHED, and otherwise
  * reports not-linked. NULL context reports not-linked. */
 #include <assert.h>

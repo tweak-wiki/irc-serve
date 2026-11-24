@@ -18,7 +18,9 @@ Participation is also governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Branching and review
 
-`main` is protected. Work on a branch and open a pull request.
+`main` is protected. Work on a branch and open a pull request. All work is
+tracked on the board — see [openspec/specs/workflow/spec.md](openspec/specs/workflow/spec.md)
+for the no-hidden-work rule, the daily reconcile, and `omp`-only routing.
 
 - Phase work: `phase/N-short-description`
 - Fixes: `fix/short-description`

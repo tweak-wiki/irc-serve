@@ -54,6 +54,7 @@ jobs:
     runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: irc-serve-release
@@ -66,14 +67,10 @@ jobs:
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-staging"
           sudo systemctl enable --now irc-serve-staging
           sleep 3
-          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STAGING_PORT }}) 2>/dev/null; then
-            echo "STAGING listening on port ${{ env.STAGING_PORT }}"
-            sudo journalctl -u irc-serve-staging --no-pager -n 20
-          else
-            echo "staging server did not come up:"
-            sudo journalctl -u irc-serve-staging --no-pager -n 40
-            exit 1
-          fi
+          # Protocol-level, not a bare connect: a wedged binary that still
+          # listens must fail (#531).
+          ./scripts/irc-health-check.sh 127.0.0.1 "${{ env.STAGING_PORT }}"
+          sudo journalctl -u irc-serve-staging --no-pager -n 20
 
   deploy-stable:
     needs: build
@@ -83,6 +80,7 @@ jobs:
     environment:
       name: stable
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: irc-serve-release
@@ -95,14 +93,10 @@ jobs:
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
           sudo systemctl enable --now irc-serve-stable
           sleep 3
-          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
-            echo "STABLE listening on port ${{ env.STABLE_PORT }}"
-            sudo journalctl -u irc-serve-stable --no-pager -n 20
-          else
-            echo "stable server did not come up:"
-            sudo journalctl -u irc-serve-stable --no-pager -n 40
-            exit 1
-          fi
+          # Protocol-level, not a bare connect: a wedged binary that still
+          # listens must fail (#531).
+          ./scripts/irc-health-check.sh 127.0.0.1 "${{ env.STABLE_PORT }}"
+          sudo journalctl -u irc-serve-stable --no-pager -n 20
 
   promote:
     needs: build
@@ -112,6 +106,7 @@ jobs:
     environment:
       name: stable
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: irc-serve-release
@@ -120,22 +115,17 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x /tmp/irc-deploy/irc-serve
-          if ! (exec 3<>/dev/tcp/127.0.0.1/${{ env.STAGING_PORT }}) 2>/dev/null; then
-            echo "staging is not up on ${{ env.STAGING_PORT }} -- deploy it first"
-            exit 1
-          fi
+          ./scripts/irc-health-check.sh 127.0.0.1 "${{ env.STAGING_PORT }}" \
+            || { echo "staging is not up on ${{ env.STAGING_PORT }} -- deploy it first"; exit 1; }
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
           sudo systemctl restart irc-serve-stable
           sleep 3
-          if (exec 3<>/dev/tcp/127.0.0.1/${{ env.STABLE_PORT }}) 2>/dev/null; then
-            echo "PROMOTED to stable on port ${{ env.STABLE_PORT }}"
-            sudo journalctl -u irc-serve-stable --no-pager -n 20
-          else
-            echo "promoted server did not come up:"
-            sudo journalctl -u irc-serve-stable --no-pager -n 40
-            exit 1
-          fi
+          # Protocol-level, not a bare connect: a wedged binary that still
+          # listens must fail (#531).
+          ./scripts/irc-health-check.sh 127.0.0.1 "${{ env.STABLE_PORT }}"
+          echo "PROMOTED to stable on port ${{ env.STABLE_PORT }}"
+          sudo journalctl -u irc-serve-stable --no-pager -n 20
 
   fed-staging:
     needs: build
@@ -143,6 +133,7 @@ jobs:
     runs-on: [self-hosted, tweak-deploy]
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: irc-serve-release
@@ -156,13 +147,9 @@ jobs:
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
           sudo systemctl enable --now irc-serve-fed-a irc-serve-fed-b
           sleep 5
+          # Protocol-level per node, not bare connects (#531).
           for port in 6668 6669; do
-            if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-              echo "node listening on port $port"
-            else
-              echo "node on $port did not come up"
-              exit 1
-            fi
+            ./scripts/irc-health-check.sh 127.0.0.1 "$port"
           done
           sleep 5
           echo "--- link status A ---"
