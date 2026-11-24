@@ -400,13 +400,11 @@ int message_parse_n(const char *line, size_t len, message_t *out)
             const char *const v = (*p == ':') ? p + 1 : p;
             params[nparams] = field_put(&f, v, (size_t)(end - v));
             nparams++;
-            p = end;
             break;
         }
         if (*p == ':') {
             params[nparams] = field_put(&f, p + 1, (size_t)(end - p) - 1);
             nparams++;
-            p = end;
             break;
         }
         const char *const value = p;
