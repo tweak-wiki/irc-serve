@@ -2212,6 +2212,26 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
             (void)chan_dispose_if_empty(s, ch);
             continue;
         }
+        /* THE HELD-JOIN BASELINE: nicks this channel already announced with a
+         * complete hostmask, taken BEFORE the purge below forgets them. The
+         * install re-adds every staged member fresh, so a bare
+         * was-complete-now-complete check would re-emit a JOIN for a member
+         * every burst announced -- the snapshot is what keeps an
+         * already-announced member silent. Bounded: one nick per remote
+         * slot, and the install below only ever asks about staged nicks. */
+        char announced[CHAN_MAX_REMOTE_MEMBERS][IRC_MAX_NICK + 1];
+        size_t nannounced = 0u;
+
+        for (size_t r = 0; r < ch->nremotes &&
+             nannounced < CHAN_MAX_REMOTE_MEMBERS; r++) {
+            if (ch->remotes[r].user[0] != '\0' &&
+                ch->remotes[r].host[0] != '\0') {
+                (void)snprintf(announced[nannounced],
+                               sizeof announced[nannounced], "%s",
+                               ch->remotes[r].nick);
+                nannounced++;
+            }
+        }
         /* THE REPLACEMENT. Everything the origin contributed to this channel
          * goes, and only then does the new roster arrive. Without the purge a
          * member who left at the origin would stay in this node's 353 for ever,
@@ -2297,45 +2317,79 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 
         for (size_t k = 0; k < sc->nmembers; k++) {
             const burst_nick_t *rec;
-
-            if (member_known(s, ch, sc->members[k].nick) != 0) {
-                continue;
-            }
-            if (chan_remote_add(ch, origin, sc->members[k].server,
-                                sc->members[k].nick, sc->members[k].account,
-                                sc->members[k].flags) != 0) {
-                if (chan_remote_count(ch) >= (size_t)CHAN_MAX_REMOTE_MEMBERS) {
-                    s->n_remote_roster_full++;
+            chan_remote_t *entry;
+            int known;
+            int was_announced;
+            size_t a;
+            known = (member_known(s, ch, sc->members[k].nick) != 0);
+            if (!known) {
+                if (chan_remote_add(ch, origin, sc->members[k].server,
+                                    sc->members[k].nick,
+                                    sc->members[k].account,
+                                    sc->members[k].flags) != 0) {
+                    if (chan_remote_count(ch) >=
+                        (size_t)CHAN_MAX_REMOTE_MEMBERS) {
+                        s->n_remote_roster_full++;
+                    }
+                    dropped++;
+                    continue;
                 }
-                dropped++;
-                continue;
+                /* THE MEMBER'S HOLDER, into 2.1's registry. This is the one place a
+                 * nick can be attributed to a server that is NOT the burst origin --
+                 * 4.3.1's SBURSTM <server> field exists for exactly that -- and it is
+                 * the correction to the entry apply_nick's loop wrote above, which
+                 * attributed every nick record to the origin because that is what a
+                 * nick record is about. A member living on a third node is reachable
+                 * through THAT node, and a registry that answered `bob@<origin>` for
+                 * it would forward the message to a server that does not hold bob. */
+                fed_nickreg_learn_member(s, sc->members[k].nick, origin,
+                                         sc->members[k].server, applied_ms);
+                installed++;
             }
-            /* THE MEMBER'S HOLDER, into 2.1's registry. This is the one place a
-             * nick can be attributed to a server that is NOT the burst origin --
-             * 4.3.1's SBURSTM <server> field exists for exactly that -- and it is
-             * the correction to the entry apply_nick's loop wrote above, which
-             * attributed every nick record to the origin because that is what a
-             * nick record is about. A member living on a third node is reachable
-             * through THAT node, and a registry that answered `bob@<origin>` for
-             * it would forward the message to a server that does not hold bob. */
-            fed_nickreg_learn_member(s, sc->members[k].nick, origin,
-                                     sc->members[k].server, applied_ms);
             /* THE HOST AND THE IDENT, from the one staged record for this nick
-             * and by the one search shadow_find() documents. They are SET
-             * SEPARATELY rather than as one call because the two have different
-             * failure modes on the wire -- 4.3's SJOIN carries neither, and a
-             * burst may announce a member line for a nick whose nick record
-             * arrived in a different order or not at all -- so one of them being
-             * absent must not cost the other. The setters take the absence
-             * independently for the same reason. */
+             * and by the one search shadow_find() documents. They run for a
+             * KNOWN member too, which the old shape skipped: a member learned
+             * from a live SJOIN has an entry with no host, and the burst is
+             * the moment that entry is completed. Only non-empty values are
+             * written, so an empty field in this burst never wipes a value an
+             * earlier one established -- the setters take the absence, and
+             * the entry keeps waiting for a record that has it. */
             rec = shadow_find(sh, nick_order, sc->members[k].nick);
-            if (rec != NULL) {
+            if (rec == NULL) {
+                continue; /* still no nick record: keep waiting */
+            }
+            entry = chan_remote_find(ch, origin, sc->members[k].nick);
+            if (entry == NULL) {
+                continue; /* local member, or another origin's entry */
+            }
+            was_announced = 0;
+            for (a = 0; a < nannounced; a++) {
+                if (chan_same_name(announced[a], sc->members[k].nick) != 0) {
+                    was_announced = 1;
+                    break;
+                }
+            }
+            if (rec->host[0] != '\0') {
                 (void)chan_remote_set_host(ch, origin, sc->members[k].nick,
                                            rec->host);
+            }
+            if (rec->user[0] != '\0') {
                 (void)chan_remote_set_user(ch, origin, sc->members[k].nick,
                                            rec->user);
             }
-            installed++;
+            /* THE HELD JOIN. Gap 1 withholds a JOIN whose member has no burst
+             * record yet rather than guessing a hostmask; this is where the
+             * wait ends. A member in the pre-purge snapshot -- announced live
+             * with a full record, or by an earlier burst -- stays silent, and
+             * a member still without one keeps waiting. */
+            if (was_announced == 0 && entry->user[0] != '\0' &&
+                entry->host[0] != '\0') {
+                char mask[CONN_HOSTMASK_MAX];
+
+                (void)snprintf(mask, sizeof mask, "%s!%s@%s", entry->nick,
+                               entry->user, entry->host);
+                fed_local_emit(s, ch, mask, "JOIN", NULL, 0);
+            }
         }
     }
 
