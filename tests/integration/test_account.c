@@ -1171,25 +1171,36 @@ static void test_login_rate_limited(const char *sasl, const char *registry)
     TF_CHECK_MSG(nf_expect(&node, "accounts=loaded", T_READY_MS) == 0,
                  "the registry did not load");
     /* One bad password per fresh connection: no connection ever trips its own
-     * 3-failure throttle, so only the process-wide budget can refuse. 80
-     * exceeds the burst of 64 with margin for the trickle refilled mid-loop. */
-    for (i = 0; i < 80; i++) {
-        char nick[32];
+     * 3-failure throttle, so only the process-wide budget can refuse. Attempts
+     * keep coming until the node says RATE_LIMITED (send-until-refused): each
+     * attempt costs a KDF on the loop thread, and under a sanitizer that KDF
+     * is slow enough that the 2/sec trickle refills a meaningful number of
+     * tokens mid-loop, so no fixed count both fits the fast builds and
+     * exhausts the slow ones. The cap is a hang-guard, not a budget: on a
+     * live node the loop always exits through the refusal. */
+    {
+        int limited = 0;
 
-        (void)snprintf(nick, sizeof nick, "flooder%d", i);
-        client_connect(&cl, &node, nick);
-        CUR_CLIENT = &cl;
-        authenticate("alice", "wrong password");
-        /* Wait for the refusal BEFORE closing: a close with the request still
-         * unread lets the kernel discard it, and a login the loop never
-         * dispatched spends no token. */
-        TF_CHECK_MSG(tc_expect(&cl.c, " 464 ", T_IO_MS) == 0,
-                     "no 464 for flood attempt %d", i);
-        tc_close(&cl.c);
+        for (i = 0; i < 300 && !limited; i++) {
+            char nick[32];
+
+            (void)snprintf(nick, sizeof nick, "flooder%d", i);
+            client_connect(&cl, &node, nick);
+            CUR_CLIENT = &cl;
+            authenticate("alice", "wrong password");
+            /* Wait for the refusal BEFORE closing: a close with the request still
+             * unread lets the kernel discard it, and a login the loop never
+             * dispatched spends no token. */
+            TF_CHECK_MSG(tc_expect(&cl.c, " 464 ", T_IO_MS) == 0,
+                         "no 464 for flood attempt %d", i);
+            /* The 464's text names the refusal: the budget's is "too many
+             * attempts", a bad password's is "did not verify". */
+            limited = (strstr(tc_buffer(&cl.c), "too many attempts") != NULL);
+            tc_close(&cl.c);
+        }
+        TF_CHECK_MSG(limited, "300 rapid logins across fresh connections never "
+                     "hit the verification budget");
     }
-    TF_CHECK_MSG(nf_expect(&node, "reason=RATE_LIMITED", T_IO_MS) == 0,
-                 "eighty rapid logins across fresh connections never hit the "
-                 "verification budget");
 
     /* ...and the budget refills: after 5s (2/sec against a burst of 64) a
      * correct credential verifies and establishes the account. */
