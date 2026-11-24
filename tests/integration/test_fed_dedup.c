@@ -708,7 +708,6 @@ int main(void)
      * invariance: a relay that restamped would have to take a new id, and taking
      * a new id is the loop. */
     s.msg_id = 500;
-    marked = peer.len;
     tag_of(&carry, "irc.z", 1756464000123ULL, 777u, 0u);
     TF_CHECK_MSG(fed_fwd(&s, &tgt, "PRIVMSG", TEXT, &carry) == 1,
                  "relaying a message with hops=0 was refused");

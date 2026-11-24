@@ -285,7 +285,6 @@ int main(void)
     /* --- peer one, playing irc.b ---------------------------------------- */
     p1_fd = pf_accept_deadline(p1_listen, T_IO_MS);
     close(p1_listen);
-    p1_listen = -1;
     TF_CHECK_MSG(p1_fd >= 0, "node A never dialled peer one: %s", a.out);
 
     claim[0] = ":" NAME_A " FEDERATE " NAME_A " ";
@@ -357,7 +356,6 @@ int main(void)
                                    3 * T_IO_MS) == 0,
                  "no live peer-two attempt carried a burst: %s", a.out);
     close(p2_listen);
-    p2_listen = -1;
 
     /* The channel the burst is about. */
     TF_CHECK_MSG(count_lines_with(burst, " SBURSTC ", CHAN_T) == 1u,

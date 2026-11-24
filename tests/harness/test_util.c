@@ -260,7 +260,11 @@ static long strip_into(char *out, size_t cap, FILE *f, size_t *len_out)
         }
         if (quote != 0) {
             if (ch == '\\') {
-                (void)fgetc(f); /* skip the escaped character */
+                /* An escape at end-of-file ends the input: discarding EOF and
+                 * looping would re-read a dead stream. */
+                if (fgetc(f) == EOF) {
+                    break;
+                }
                 prev = 0;
                 continue;
             }
