@@ -188,6 +188,11 @@ typedef struct {
 int fanout_resolve(server_t *s, conn_t *from, const char *arg,
                    fanout_class_t vclass, fanout_target_t *out);
 
+/* Store `src` into `out->name` through the same predicate fanout_resolve()
+ * uses: 1 stored, 0 refused. The only way bytes reach the field from outside
+ * fanout.c. */
+int fanout_target_store_name(fanout_target_t *out, const char *src);
+
 /* Is `c` a member of the channel `t` names? 1 for either channel kind with `c`
  * on the member list, 0 otherwise (including for a user target, which has no
  * membership). */
