@@ -2,7 +2,7 @@
 
 # Project status
 
-Generated `2026-11-24T16:11:59Z` from commit `ea59f02` by
+Generated `2026-11-24T18:17:41Z` from commit `dff4106` by
 [stats.yml](../../blob/main/.github/workflows/stats.yml).
 
 ## Test suite
@@ -27,7 +27,7 @@ Generated `2026-11-24T16:11:59Z` from commit `ea59f02` by
 
 | | lines |
 |---|---|
-| `src/` | 50780 |
+| `src/` | 50302 |
 | `tests/` | 81023 |
 
 ## Build phases
