@@ -236,10 +236,11 @@ int main(void)
                  " (UTC)\r\n"
                  ":%s 004 alice %s %s i b,k,l,imnpst "
                  ":are supported by this server\r\n"
-                 ":%s 005 alice NETWORK=irc-serve CHANTYPES=#& PREFIX=(ov)@+ "
-                 "CASEMAPPING=ascii AWAYLEN=255 CHANNELLEN=63 KICKLEN=255 "
-                 "LINELEN=8192 MAXTARGETS=1 NAMELEN=255 NICKLEN=63 TOPICLEN=255 "
-                 ":are supported by this server\r\n"
+                ":%s 005 alice NETWORK=irc-serve CHANTYPES=#& PREFIX=(ov)@+ "
+                "CASEMAPPING=ascii AWAYLEN=255 CHANNELLEN=63 KICKLEN=255 "
+                "LINELEN=8192 MAXTARGETS=1 NAMELEN=255 NICKLEN=63 TOPICLEN=255 "
+                "NOTIFYLOCAL=SETNAME,AWAY,INVITE "
+                ":are supported by this server\r\n"
                  ":%s 372 alice :- irc-serve: a federation-native IRC node.\r\n"
                    ":%s 372 alice :- registration, channels, messaging and peer "
                    "federation are implemented.\r\n"
@@ -289,6 +290,7 @@ int main(void)
             " NAMELEN=255 ",
             " NICKLEN=63 ",
             " TOPICLEN=255 ",
+            " NOTIFYLOCAL=SETNAME,AWAY,INVITE ",
             " CASEMAPPING=ascii "
         };
 
