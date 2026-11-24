@@ -49,6 +49,7 @@
  * appears on, so it is measured rather than filtered. See mode_refusal_render(). */
 #include "core/connection.h"
 #include "core/fanout.h"
+#include "federation/verbs.h"
 #include "core/reply.h"
 
 /* ---------------------------------------------------------------------------

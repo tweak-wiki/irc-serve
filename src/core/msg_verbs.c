@@ -19,6 +19,7 @@
 #include "core/connection.h"
 #include "core/fanout.h"
 #include "core/reply.h"
+#include "federation/verbs.h"
 
 /* ---------------------------------------------------------------------------
  * PRIVMSG and NOTICE
@@ -1279,6 +1280,36 @@ void handle_ison(server_t *s, conn_t *c, const message_t *m)
  * there is no audience, and the 305/306 above are the whole answer. There is no
  * loop over the connection registry here and there never will be one -- that walk
  * is `fanout.c`'s. */
+/* The mesh half of an away transition: queue SAWAY to every established peer.
+ * Runs UNCONDITIONALLY -- unlike notify_away() above, which notifies only when
+ * this node holds a local audience. A transition with no local audience is
+ * still a fact the mesh must carry: a peer's members may share a channel with
+ * this user on a channel this node does not hold, and the line has to reach
+ * them through the relay. The stored value goes on the wire (c->away, post-
+ * strip), because that is what the local members were just told.
+ *
+ * The shape mirrors the client's own AWAY grammar: one parameter when the user
+ * is back, two when away with a message. The receiver reads it the same
+ * way. */
+static void away_federate(server_t *s, conn_t *c)
+{
+    char prefix[CONN_HOSTMASK_MAX];
+    const char *ap[2];
+
+    if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
+        printf("[observable] away_federate: nick=%s reason=UNRENDERABLE\n",
+               c->nick);
+        return;
+    }
+    ap[0] = c->nick;
+    if (c->away[0] != '\0') {
+        ap[1] = c->away;
+        (void)fed_forward_all(s, "SAWAY", prefix, ap, 2);
+    } else {
+        (void)fed_forward_all(s, "SAWAY", prefix, ap, 1);
+    }
+}
+
 static void notify_away(server_t *s, conn_t *c, const char *message)
 {
     const char *params[1];
