@@ -1311,6 +1311,14 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
                                                        m->params, 2)) != 0) {
         return -1;
     }
+    /* The open is the event the teardown arm reports, so it is printed the way
+     * the commit and the close are: a test that stops a node mid-burst must be
+     * able to tell "the transaction arrived" from "nothing arrived yet" without
+     * guessing at scheduling, and an operator watching a burst stall wants the
+     * same fact. One line per BEGIN, next to fed_burst_sent/applied/close. */
+    printf("[observable] fed_burst_open: peer=%s origin=%s epoch=%llu nnicks=%llu\n",
+           link->name, sh->origin, (unsigned long long)epoch,
+           (unsigned long long)nnicks);
     return 0;
 }
 
