@@ -1851,14 +1851,6 @@ static struct fed_advert *advert_table(server_t *s)
     return s->advs;
 }
 
-/* The advertised fields of one peer, FOR A LOG OR A COUNTER. This is the whole
- * read surface of the store, and its return type is the enforcement of the SSRF
- * property as much as the comment is: it hands out two bounded strings and two
- * numbers, and there is no function in this file that returns a sockaddr, a
- * server_link_t or anything the dial path could be built from. */
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out);
 
 /* ADVERTISE <load%> [<name> <host> <port>].
  *
@@ -2121,48 +2113,6 @@ static void fed_in_advertise(server_t *s, server_link_t *link, const char *prefi
         fed_obs("[observable] fed_advertise: peer=%s load=%u%% dialed=NO\n",
                link->name, slot->load_pct);
     }
-}
-
-const char *fed_advertised(const server_t *s, const char *peer, char *name,
-                           size_t name_cap, char *host, size_t host_cap,
-                           unsigned *port_out, unsigned *load_out)
-{
-    size_t i;
-
-    if (name != NULL && name_cap > 0u) {
-        name[0] = '\0';
-    }
-    if (host != NULL && host_cap > 0u) {
-        host[0] = '\0';
-    }
-    if (port_out != NULL) {
-        *port_out = 0u;
-    }
-    if (load_out != NULL) {
-        *load_out = 0u;
-    }
-    if (s == NULL || s->advs == NULL || peer == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < s->nadv; i++) {
-        if (!chan_same_name(s->advs[i].peer, peer)) {
-            continue;
-        }
-        if (name != NULL) {
-            (void)bounded_copy(name, name_cap, s->advs[i].name);
-        }
-        if (host != NULL) {
-            (void)bounded_copy(host, host_cap, s->advs[i].host);
-        }
-        if (port_out != NULL) {
-            *port_out = s->advs[i].port;
-        }
-        if (load_out != NULL) {
-            *load_out = s->advs[i].load_pct;
-        }
-        return s->advs[i].name;
-    }
-    return NULL;
 }
 
 size_t fed_advertised_count(const server_t *s)
