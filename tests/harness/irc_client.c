@@ -377,6 +377,12 @@ int tc_expect(test_client_t *c, const char *needle, int timeout_ms)
         size_t i;
         size_t show = (c->len < 512u) ? c->len : 512u;
 
+        /* `buf` starts NULL and stays NULL when nothing arrived: the wait loop
+         * above guards every read, and so must this dump. */
+        if (c->buf == NULL) {
+            show = 0;
+        }
+
         for (i = 0; i < show; i++) {
             unsigned char ch = (unsigned char)c->buf[i];
 

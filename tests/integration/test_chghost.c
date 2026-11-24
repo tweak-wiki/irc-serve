@@ -299,7 +299,6 @@ static void case_the_event(void)
     /* ---- THE HOST. `USER`'s third parameter is how a client tries to move it,
      * and it is ignored: §2.1 records what accept() observed. So the host in a
      * 311 is the loopback address however the client spelled it. ---- */
-    mark_b = tc_received(&bob);
     TF_CHECK_MSG(tc_send(&bob, "WHOIS alice") == 0, "bob WHOIS send failed");
     TF_CHECK_MSG(tc_expect(&bob, ":" SRV " 311 bob alice alice " OBSERVED_HOST
                            " * :Real alice\r\n",
