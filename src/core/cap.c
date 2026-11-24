@@ -142,7 +142,7 @@ static int conn_plaintext(const conn_t *c);
  * client that carries on, a wrong one is a client that acts on a lie. */
 static int sasl_possible(const server_t *s, const conn_t *c)
 {
-    if (s == NULL || sasl_store_count(s->sasl_store) == 0u) {
+    if (s == NULL || account_store_count(s->sasl_store) == 0u) {
         return 0;
     }
     if (tls_node_possible(s) != 0 && conn_plaintext(c) != 0) {

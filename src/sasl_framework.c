@@ -22,163 +22,35 @@
 #include "core/secret_util.h"
 
 /* --------------------------------------------------------------------------
- * The store
+ * The table is account_store_t (#538): one user table, one add, one verify.
+ * This file keeps only its legacy two-field FILE FORMAT below and the
+ * SASL-specific verify policy; the records, salt, hash, compare and the
+ * registry's three-field format are account_store.c's.
  * ------------------------------------------------------------------------ */
 
-/* SHA-256, salt, salted hash and wipe live in core/secret_util.h now: this
- * file's copies were behavior-identical to account_store.c's and
- * secret_util.c's apart from their prefixes (#537). The SASL_* names stay as
- * aliases so the record layout and call sites below read unchanged. */
-#define SASL_HASH_LEN SECRET_HASH_LEN
-#define SASL_SALT_LEN SECRET_SALT_LEN
-#define SASL_HASH_ROUNDS SECRET_HASH_ROUNDS
-#define sasl_wipe secret_wipe
-#define sasl_gen_salt secret_gen_salt
-#define sasl_hash_password secret_hash_password
 
-/* shortcut: the FILE stays plaintext-on-disk (0600 enforced at load); what is
- * hashed is the HEAP copy. When the operator threat model needs the disk copy
- * gone too, upgrade to a salted file format. */
-struct sasl_record {
-    char authcid[SASL_MAX_AUTHCID + 1];
-    unsigned char salt[SASL_SALT_LEN]; /* fresh per record, so identical
-                                        * passwords hash differently */
-    unsigned char phash[SASL_HASH_LEN]; /* iterated SHA-256(salt || password) */
-};
-
-struct sasl_store {
-    struct sasl_record rec[SASL_MAX_CREDENTIALS];
-    size_t n;
-    unsigned char salt[SASL_SALT_LEN];
-};
-
-sasl_store_t *sasl_store_new(void)
+/* Overwrite `n` bytes at `p`. Written through a volatile pointer for the same
+ * reason account_store_free()'s scrub is: a memset() to memory about to be reused
+ * is a store the compiler may prove dead and delete. */
+static void sasl_wipe(void *p, size_t n)
 {
-    sasl_store_t *store = (sasl_store_t *)calloc(1, sizeof(sasl_store_t));
+    volatile unsigned char *v = (volatile unsigned char *)p;
 
-    /* No RNG, no store: a zeroed or predictable salt would hash every boot
-     * alike, so the load path refuses instead (reason=no_rng below). */
-    if (store != NULL && sasl_gen_salt(store->salt) == 0) {
-        sasl_store_free(store);
-        return NULL;
+    for (size_t i = 0; i < n; i++) {
+        v[i] = 0u;
     }
-    return store;
-}
-
-void sasl_store_free(sasl_store_t *store)
-{
-    if (store == NULL) {
-        return;
-    }
-    /* The passwords are overwritten before the memory is released. Not because
-     * free() does not do it -- it does -- but because the buffer this allocation
-     * came from is reused by the allocator for the next node of the same size,
-     * and a credential that is still legible there outlives the record that
-     * named it. The cost is one pass over ~13 KB, on a path that runs once. */
-    {
-        volatile char *p = (volatile char *)store->rec;
-        size_t n = sizeof store->rec;
-        size_t i = 0;
-
-        /* Written through a volatile pointer so the compiler cannot elide the
-         * stores as dead. This is the one place in the tree that says so, and
-         * the reason it says so is that the obvious `memset` version gets
-         * optimised away. */
-        while (i < n) {
-            p[i] = 0;
-            i++;
-        }
-    }
-    free(store);
-}
-
-size_t sasl_store_count(const sasl_store_t *store)
-{
-    return (store != NULL) ? store->n : 0u;
-}
-
-/* ASCII-folded compare, which is how an authcid is matched: an authentication
- * identity is a nickname in every client that offers one, and RFC 2812 2.3.1
- * says nicknames compare case-insensitively. Comparing case-sensitively would
- * let two different records for `Bob` and `bob` both exist and would make the
- * outcome depend on which one the client happened to type. */
-static int authcid_eq(const char *a, const char *b)
-{
-    size_t la = (a != NULL) ? strlen(a) : 0u;
-    size_t lb = (b != NULL) ? strlen(b) : 0u;
-    size_t n = (la > lb) ? la : lb;
-    size_t i;
-    unsigned diff = (la != lb) ? 1u : 0u;
-
-    /* Constant-time: a fixed walk over the longer input, no early return, so
-     * the comparison cost does not reveal the matching prefix or the length. */
-    for (i = 0u; i < n; i++) {
-        char ca = (i < la) ? a[i] : (char)0;
-        char cb = (i < lb) ? b[i] : (char)0;
-
-        if (ca >= 'A' && ca <= 'Z') {
-            ca = (char)(ca - 'A' + 'a');
-        }
-        if (cb >= 'A' && cb <= 'Z') {
-            cb = (char)(cb - 'A' + 'a');
-        }
-        diff |= (unsigned)(ca ^ cb);
-    }
-    return diff == 0u;
-}
-
-int sasl_store_add(sasl_store_t *store, const char *authcid, const char *password)
-{
-    size_t alen;
-    size_t plen;
-    size_t at = 0;
-    unsigned char salt[SASL_SALT_LEN];
-
-    if (store == NULL || authcid == NULL || password == NULL ||
-        authcid[0] == '\0' || password[0] == '\0') {
-        return -1;
-    }
-    alen = strlen(authcid);
-    plen = strlen(password);
-    if (alen > (size_t)SASL_MAX_AUTHCID || plen > (size_t)SASL_MAX_PASSWORD) {
-        return -1;
-    }
-    /* A TAB or a NUL cannot appear in either field: the first is the separator,
-     * the second would end the C string and take the rest of the record with it. */
-    if (strchr(authcid, '\t') != NULL || strchr(password, '\t') != NULL) {
-        return -1;
-    }
-    /* The salt is drawn before the record is touched, so an RNG failure
-     * refuses the add with the previous record (or none) intact rather
-     * than hashing under a predictable salt (#305). */
-    if (sasl_gen_salt(salt) == 0) {
-        return -1;
-    }
-
-    for (size_t i = 0; i < store->n; i++) {
-        if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
-            at = i;
-            break;
-        }
-        at = store->n;
-    }
-    if (at == store->n) {
-        if (store->n >= (size_t)SASL_MAX_CREDENTIALS) {
-            return -1;
-        }
-        store->n++;
-    }
-    memcpy(store->rec[at].authcid, authcid, alen + 1u);
-    memcpy(store->rec[at].salt, salt, SASL_SALT_LEN);
-    sasl_hash_password(store->rec[at].salt, password, store->rec[at].phash);
-    sasl_wipe(salt, sizeof salt);
-    return 0;
 }
 
 /* One record per line: `authcid<TAB>password`. Returns 0 on success, -1 on a
  * malformed line. The line is modified in place, so the caller hands it a buffer
- * it owns. */
-static int store_parse_line(sasl_store_t *store, char *line)
+ * it owns.
+ *
+ * The record lands in the ONE table via account_store_add() with created=0 --
+ * the epoch, honestly unknown rather than false -- so a name the registry
+ * admits is a name SASL verifies, with no second table to disagree. Admission
+ * is the registry's: over-long fields, TABs and names no wire could carry are
+ * refused there, not here. */
+static int store_parse_line(account_store_t *store, char *line)
 {
     char *tab = strchr(line, '\t');
     char *value;
@@ -202,16 +74,16 @@ static int store_parse_line(sasl_store_t *store, char *line)
     if (line[0] == '\0') {
         return -1; /* "TAB password": a record with no authcid */
     }
-    return sasl_store_add(store, line, value);
+    return account_store_add(store, line, value, 0);
 }
 
-sasl_store_t *sasl_store_load(const char *path)
+account_store_t *sasl_store_load(const char *path)
 {
     FILE *f;
     secret_open_status_t open_status = SECRET_OPEN_FAIL_OPEN;
     unsigned open_mode = 0u;
-    sasl_store_t *store;
-    char line[SASL_MAX_LINE];
+    account_store_t *store;
+    char line[ACCOUNT_MAX_LINE];
 
     if (path == NULL || path[0] == '\0') {
         return NULL;
@@ -234,10 +106,10 @@ sasl_store_t *sasl_store_load(const char *path)
         }
         return NULL;
     }
-    store = sasl_store_new();
+    store = account_store_new();
     if (store == NULL) {
-        /* Only secret_gen_salt() fails this path short of a failed calloc, and
-         * either way there is no salted store to load into. */
+        /* Only account_gen_salt() fails this path short of a failed calloc, and
+         * either way there is no salted table to load into. */
         printf("[observable] sasl_store: state=REFUSED path=%s reason=no_rng\n", path);
         (void)fclose(f);
         return NULL;
@@ -254,7 +126,7 @@ sasl_store_t *sasl_store_load(const char *path)
             printf("[observable] sasl_store: state=REFUSED path=%s "
                    "reason=line_too_long remedy=write-tmp+fsync+rename\n", path);
             sasl_wipe(line, sizeof line);
-            sasl_store_free(store);
+            account_store_free(store);
             (void)fclose(f);
             return NULL;
         }
@@ -268,7 +140,7 @@ sasl_store_t *sasl_store_load(const char *path)
             printf("[observable] sasl_store: state=REFUSED path=%s "
                    "reason=malformed_record remedy=write-tmp+fsync+rename\n", path);
             sasl_wipe(line, sizeof line);
-            sasl_store_free(store);
+            account_store_free(store);
             (void)fclose(f);
             return NULL;
         }
@@ -277,7 +149,7 @@ sasl_store_t *sasl_store_load(const char *path)
         printf("[observable] sasl_store: state=REFUSED path=%s reason=read_error "
                "remedy=write-tmp+fsync+rename\n", path);
         sasl_wipe(line, sizeof line);
-        sasl_store_free(store);
+        account_store_free(store);
         (void)fclose(f);
         return NULL;
     }
@@ -285,18 +157,18 @@ sasl_store_t *sasl_store_load(const char *path)
     sasl_wipe(line, sizeof line);
     (void)fclose(f);
 
-    if (store->n == 0u) {
+    if (account_store_count(store) == 0u) {
         /* A store with no records authenticates nobody, and reporting it as
          * loaded would make `CAP LS` advertise `sasl` on a node that cannot
          * authenticate a single client -- the exact thing "advertise only what
          * you have" exists to prevent. */
         printf("[observable] sasl_store: state=REFUSED path=%s reason=no_records\n",
                path);
-        sasl_store_free(store);
+        account_store_free(store);
         return NULL;
     }
     printf("[observable] sasl_store: state=LOADED path=%s records=%zu\n", path,
-           store->n);
+           account_store_count(store));
     return store;
 }
 
@@ -479,106 +351,35 @@ int sasl_plain_parse(const char *payload, size_t len,
 }
 
 /* --------------------------------------------------------------------------
- * Password verification, against the shared constant-time compare
+ * Password verification, against the ONE table
  * ------------------------------------------------------------------------ */
 
-/* A fixed dummy compared against when no record matched, so that "no such
- * authcid" and "wrong password" cost the same. It is a constant, not a derived
- * value, so it cannot leak anything by being computable. */
-static const char k_dummy_pass[] = "irc-serve-no-such-credential";
-
-int sasl_plain_verify(const sasl_store_t *store,
+int sasl_plain_verify(const account_store_t *store,
                       const char *authzid, const char *authcid, const char *passwd)
 {
-    unsigned char want[SASL_HASH_LEN];
-    unsigned char dummy[SASL_HASH_LEN];
-    unsigned saw_match = 0u;
-    unsigned dummy_used = 0u;
-    /* #487: a miss never writes `want`, but the dummy compare below reads it
-     * unconditionally -- zero it so the read is defined either way. */
-    memset(want, 0, sizeof want);
-
     if (authcid == NULL || authcid[0] == '\0' || passwd == NULL) {
         return 0;
     }
-    /* NO STORE, NO AUTHENTICATION. This is the line the previous implementation of
-     * this function did not have, and its absence is the defect: a node with
-     * nothing to check a password against must refuse every one of them, not
-     * accept them. */
-    if (store == NULL || store->n == 0u) {
+    /* NO TABLE, NO AUTHENTICATION. A node with nothing to check a password
+     * against must refuse every one of them, not accept them. */
+    if (store == NULL || account_store_count(store) == 0u) {
         return 0;
     }
     /* A proxying authzid is refused rather than honoured. `authcid` is what the
-     * store is keyed by and `authzid` is what the client asked to act as; when
+     * table is keyed by and `authzid` is what the client asked to act as; when
      * they differ, this node has no policy to allow it and the fail-closed
      * direction is the one that does not require one. An EMPTY authzid is
      * RFC 4013's "same as the authentication identity" and is not a difference. */
     if (authzid != NULL && authzid[0] != '\0' && strcmp(authzid, authcid) != 0) {
         return 0;
     }
-
-    /* Each record carries its own salt, so the offered password is hashed under
-     * the candidate record's salt; every comparison is still hash-against-hash.
-     * The dummy keeps the store salt so a miss still pays a hash and a compare.
-     * Names are unique (add overwrites), so at most one record hashes per call.
-     */
-    sasl_hash_password(store->salt, k_dummy_pass, dummy);
-
-    /* The walk does not stop at a match. Two reasons, and both are timing: a
-     * walk that returned at the match would make the answer's latency a function
-     * of WHICH record matched, and a client that can time its way down the
-     * operator list has turned a credential store into an index. */
-    for (size_t i = 0; i < store->n; i++) {
-        if (authcid_eq(store->rec[i].authcid, authcid) != 0) {
-            sasl_hash_password(store->rec[i].salt, passwd, want);
-            saw_match |=
-                (unsigned)secret_const_time_eq(store->rec[i].phash, want, SASL_HASH_LEN);
-        }
-    }
-    /* And a miss still pays one comparison, so an authcid that is not in the
-     * store is not distinguishable from one whose password is wrong. The
-     * compare runs UNCONDITIONALLY -- a hit must cost the same as a miss, so
-     * the guard that skipped it on a hit is gone and the result stays ignored. */
-    dummy_used =
-        (unsigned)secret_const_time_eq(dummy, want, SASL_HASH_LEN);
-    (void)dummy_used;
-    sasl_wipe(want, sizeof want);
-    sasl_wipe(dummy, sizeof dummy);
-    return (int)(saw_match & 1u);
+    /* The password comparison is the table's: one table, one verify function,
+     * and this is the SASL path's call. The walk, the dummy compare and the
+     * hash-against-hash argument are account_store_verify()'s, documented
+     * there and not repeated here, so the two cannot drift apart again. */
+    return account_store_verify(store, authcid, passwd);
 }
 
-/* --------------------------------------------------------------------------
- * Test support
- * ------------------------------------------------------------------------ */
-
-/* 1 when no byte run in the store's records still equals `password` -- i.e.
- * the heap holds the salted hash and not the literal. A test cannot read the
- * layout (the type is opaque), so this is the predicate that says it. 0 on a
- * NULL store or an empty password, which is the fail-closed answer for a
- * predicate whose whole job is to refuse. */
-int sasl_store_holds_no_plaintext(const sasl_store_t *store,
-                                  const char *password)
-{
-    const unsigned char *bytes;
-    size_t total;
-    size_t plen;
-
-    if (store == NULL || password == NULL || password[0] == '\0') {
-        return 0;
-    }
-    plen = strlen(password);
-    bytes = (const unsigned char *)store->rec;
-    total = sizeof store->rec;
-    if (plen > total) {
-        return 1;
-    }
-    for (size_t i = 0; i + plen <= total; i++) {
-        if (memcmp(bytes + i, password, plen) == 0) {
-            return 0;
-        }
-    }
-    return 1;
-}
 
 /* --------------------------------------------------------------------------
  * The observable state machine
@@ -608,7 +409,7 @@ void sasl_init(sasl_ctx_t *ctx, const char *mechanism)
     }
 }
 
-void sasl_set_store(sasl_ctx_t *ctx, const sasl_store_t *store)
+void sasl_set_store(sasl_ctx_t *ctx, const account_store_t *store)
 {
     if (ctx == NULL) {
         return;
@@ -718,7 +519,7 @@ sasl_state_t sasl_step(sasl_ctx_t *ctx, const char *server_data, size_t len,
 
     if (!sasl_plain_verify(ctx->store, authzid, authcid, passwd)) {
         ctx->last_error =
-            (ctx->store == NULL || sasl_store_count(ctx->store) == 0u)
+            (ctx->store == NULL || account_store_count(ctx->store) == 0u)
                 ? SASL_ERR_NO_STORE
                 : SASL_ERR_CREDENTIAL;
         ctx->state = SASL_FAILED;
@@ -830,7 +631,7 @@ static size_t plain_build(char *buf, size_t cap, const char *authzid,
 
 int sasl_state_machine(void)
 {
-    sasl_store_t *store = sasl_store_new();
+    account_store_t *store = account_store_new();
     sasl_ctx_t ctx;
     char payload[512];
     char encoded[700];
@@ -841,10 +642,10 @@ int sasl_state_machine(void)
     if (store == NULL) {
         return 0;
     }
-    if (sasl_store_add(store, "alice", "correct horse") != 0 ||
-        sasl_store_add(store, "bob", "s3cret") != 0 ||
-        sasl_store_count(store) != 2u) {
-        sasl_store_free(store);
+    if (account_store_add(store, "alice", "correct horse", 0) != 0 ||
+        account_store_add(store, "bob", "s3cret", 0) != 0 ||
+        account_store_count(store) != 2u) {
+        account_store_free(store);
         return 0;
     }
 
@@ -975,6 +776,6 @@ int sasl_state_machine(void)
         ok &= (sasl_b64_decode("YR==", 4, out, sizeof out) == -1);
     }
 
-    sasl_store_free(store);
+    account_store_free(store);
     return ok;
 }
