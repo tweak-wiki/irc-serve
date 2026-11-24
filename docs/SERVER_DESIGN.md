@@ -1348,20 +1348,26 @@ what "graceful leave" exists to prevent. Presence detection remains T4's job;
 neither verb replaces it.
 
 **`SBURST` is the resync verb.** On **every** link establishment the initiator
-sends full state:
+sends full state -- unless the peer already holds it (#541), in which case it
+sends nothing at all:
 
 - server name + `epoch`
 - all nicks: `user` / `host` / `modes` / `away`
 - all channels: `origin`, `topic`, topic-set-time, `modes`, and a per-member list
 
 A resync **replaces** state for that origin; it never merges. There is no
-partial burst and no delta. `SBURST` is **Phase 6**, not Phase 9 — it defines the
+partial burst and no delta: a resync whose content the peer already holds is
+SKIPPED ENTIRELY rather than trimmed, because a trimmed transaction would
+still purge (replace means replace). The skip needs a fingerprint match under
+the same pair of epochs plus the peer's `SBURSTACK` for the burst that carried
+the fingerprint -- an ackless skip would trust a burst that was queued but
+never applied. `SBURST` is **Phase 6**, not Phase 9 — it defines the
 wire format, and a wire format cannot be invented later.
 
 #### 4.3.1 The wire format, frozen in Phase 6
 
 One line per record, and one line per **member** rather than a packed member
-list. Five verbs:
+list. Five record verbs plus the ack:
 
 ```
 :<origin> SBURST  <epoch> <nnicks>
@@ -1370,6 +1376,11 @@ list. Five verbs:
 :<origin> SBURSTM <chan> <server> <nick> <flags> <account>
 :<origin> SBURSTE <epoch> <nnicks> <nchans> <nmembers>
 ```
+
+`SBURSTACK <sender-epoch> <begin-id>` (#541) is link-local control, not a
+record: the receiver queues one when a burst commits, and the sender skips
+its next resync when the ack covers what it would send. It rides the burst
+dispatch so it gets the same guards, and it never touches the shadow.
 
 Every line carries §2.4's internal tag block with `hops=0`, and the id is
 **different per line** — a burst is O(n) lines, and one id for the transaction

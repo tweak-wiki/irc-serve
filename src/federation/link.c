@@ -1324,6 +1324,13 @@ void fed_link_reset(server_t *s, server_link_t *link)
      * next tick -- which is the correct reading of "reset this link and tell me
      * again", as opposed to forgetting what the peer said. */
     link->shed_reported = 0;
+    /* #541: the resync fingerprint goes with the reset. The operator is saying
+     * "start over with this peer", and a skip would be the opposite of that:
+     * the next establishment bursts in full and re-earns its ack. (The
+     * ordinary link-down path deliberately does NOT clear this -- surviving
+     * the drop is what makes a flap cheap.) */
+    link->burst_valid = 0;
+    link->burst_ack_id = 0u;
     /* AND THE CLEAN LEAVE IS UNDONE, which is the ONLY thing that undoes it, and
      * the reason is the OPERATOR. A peer that said goodbye is not dialled again,
      * so an operator who resets the link is the only way back -- and that is the

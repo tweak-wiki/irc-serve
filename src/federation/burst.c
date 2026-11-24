@@ -28,8 +28,12 @@
  * is "this node does not implement 4.3's resync", which is a version fact an
  * operator would act on. A typo in a table entry is a word that never matches,
  * which is visibly wrong on the wire. */
+/* #541: SBURSTACK is the sixth word but not a sixth record. It is link-local
+ * control -- "I applied your burst through this BEGIN id" -- riding the same
+ * dispatch so it gets the same guards (tagged, hop-checked, deduped) as the
+ * transaction it answers. It never touches the shadow. */
 static const char *const BURST_VERBS[] = { "SBURST", "SBURSTN", "SBURSTC",
-                                            "SBURSTM", "SBURSTE" };
+                                           "SBURSTM", "SBURSTE", "SBURSTACK" };
 
 int fed_burst_verb(const char *verb)
 {
@@ -175,6 +179,7 @@ typedef struct burst_shadow {
     uint64_t        epoch; /* what the BEGIN claimed                          */
     uint64_t        expect_nnicks;
     size_t          nnicks;
+    uint64_t        begin_id; /* tag id of the BEGIN line, echoed in the ack */
     size_t          nchans;
     size_t          nmembers;
     size_t          bytes; /* volume charged against IRC_BURST_MAX_BYTES       */
@@ -593,7 +598,113 @@ static int burst_member_reportable(const chan_t *ch, size_t i)
  * against what arrived, so a sender that got them wrong would have every burst it
  * sent discarded by a node running this very code.
  */
-int fed_burst_send(server_t *s, server_link_t *link)
+/* ---------------------------------------------------------------------------
+ * #541: THE FINGERPRINT A RESYNC IS COMPARED AGAINST
+ * ---------------------------------------------------------------------------
+ * This walks the same enumerations in the same order as fed_burst_send() below
+ * and folds the same fields into one FNV-1a 64-bit digest. federation_resync()
+ * compares it against the fingerprint the link's peer last acknowledged and
+ * skips a burst whose content would be identical.
+ *
+ * THE RULE IS THAT EVERY FIELD THE RENDER EMITS IS MIXED HERE, and the reason
+ * is the direction a mistake points: a field mixed here but constant on the
+ * wire only ever forces a redundant full burst, while a field on the wire but
+ * missing here makes two different states compare equal and the peer keeps a
+ * stale one. So nick modes -- a constant "-" on this build -- are NOT mixed,
+ * and everything else SBURSTN/SBURSTC/SBURSTM carries IS, through the same
+ * predicates (burst_member_reportable) and the same fallbacks
+ * (burst_mid_or_dash, burst_account_token, burst_member_server) the render
+ * uses. The ids stage_line() stamps are deliberately NOT mixed: they come
+ * from the per-server counter and advance on every line, so mixing them would
+ * make every digest differ from the last and the skip would never fire.
+ * shortcut: a 64-bit digest can collide in theory, and a collision skips a
+ * burst the peer needed. FNV-1a over the full rendered content makes that a
+ * hash-break rather than a logic bug, and the next state change heals it with
+ * a full burst. */
+static void burst_digest_str(uint64_t *h, const char *v)
+{
+    if (v == NULL) {
+        v = "-";
+    }
+    for (; *v != '\0'; v++) {
+        *h ^= (uint64_t)(unsigned char)*v;
+        *h *= 1099511628211ULL;
+    }
+    /* The separator, so ("ab", "c") and ("a", "bc") do not mix alike. */
+    *h ^= 0xffu;
+    *h *= 1099511628211ULL;
+}
+
+static void burst_digest_u64(uint64_t *h, uint64_t v)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        *h ^= (uint64_t)((v >> (unsigned)(i * 8)) & 0xffu);
+        *h *= 1099511628211ULL;
+    }
+    *h ^= 0xffu;
+    *h *= 1099511628211ULL;
+}
+
+/* The fingerprint of what fed_burst_send() would render right now. Pure: it
+ * reads the registries and consumes no ids, so calling it before a send does
+ * not move the counter the send's own stamps come from. */
+static uint64_t burst_state_digest(const server_t *s)
+{
+    uint64_t h = 1469598103934665603ULL;
+    size_t nnicks = server_nick_count(s);
+    size_t i;
+
+    for (i = 0; i < nnicks; i++) {
+        const conn_t *c = server_nick_at(s, i);
+
+        if (c == NULL) {
+            continue;
+        }
+        burst_digest_str(&h, c->nick);
+        burst_digest_str(&h, burst_mid_or_dash(c->user));
+        burst_digest_str(&h, burst_mid_or_dash(c->host));
+        burst_digest_u64(&h, (uint64_t)c->signon_at);
+        burst_digest_str(&h, c->away);
+    }
+    for (i = 0; i < server_chan_count(s); i++) {
+        const chan_t *ch = server_chan_at(s, i);
+        size_t k;
+
+        if (ch == NULL) {
+            continue;
+        }
+        burst_digest_str(&h, ch->name);
+        burst_digest_str(&h, ch->origin);
+        burst_digest_str(&h, burst_modes_token(ch->topic_who));
+        burst_digest_u64(&h, (uint64_t)ch->topic_when);
+        burst_digest_str(&h, burst_modes_token(ch->modes));
+        burst_digest_str(&h, ch->topic);
+        for (k = 0; k < ch->nmembers; k++) {
+            if (burst_member_reportable(ch, k) == 0) {
+                continue;
+            }
+            burst_digest_str(&h, ch->members[k].c->nick);
+            burst_digest_u64(&h, (uint64_t)ch->members[k].flags);
+            burst_digest_str(&h, burst_account_token(ch->members[k].c, NULL));
+        }
+        for (k = 0; k < ch->nremotes; k++) {
+            const chan_remote_t *r = chan_remote_at(ch, k);
+
+            if (r == NULL || r->nick[0] == '\0') {
+                continue;
+            }
+            burst_digest_str(&h, burst_member_server(r, s->name));
+            burst_digest_str(&h, r->nick);
+            burst_digest_u64(&h, (uint64_t)r->flags);
+            burst_digest_str(&h, burst_account_token(NULL, r->account));
+        }
+    }
+    return h;
+}
+
+int fed_burst_send(server_t *s, server_link_t *link, uint64_t *begin_id_out)
 {
     burst_stage_t st;
     conn_t *peer;
@@ -641,6 +752,16 @@ int fed_burst_send(server_t *s, server_link_t *link)
     }
 
     memset(&st, 0, sizeof st);
+    /* #541: the BEGIN line is staged first and takes the next id off the
+     * per-server counter (server_next_msg_id() returns-then-bumps), so the
+     * counter's value here IS the BEGIN's tag id. federation_resync() stores
+     * it with the fingerprint, and the peer echoes it in its SBURSTACK, which
+     * is how the sender knows WHICH burst was applied. Nothing between here
+     * and the BEGIN's stage_line() may consume an id, or the echo names the
+     * wrong line. */
+    if (begin_id_out != NULL) {
+        *begin_id_out = s->msg_id;
+    }
 
     /* --- the BEGIN ------------------------------------------------------ */
     {
@@ -840,6 +961,9 @@ refused:
 
 int federation_resync(server_t *s, server_link_t *link)
 {
+    uint64_t digest;
+    uint64_t begin_id = 0u;
+
     if (s == NULL || link == NULL) {
         return -1;
     }
@@ -850,7 +974,46 @@ int federation_resync(server_t *s, server_link_t *link)
     if (link->state != (int)ESTABLISHED) {
         return -1;
     }
-    return fed_burst_send(s, link);
+    /* #541: THE SKIPPED RESYNC. The fingerprint below is what a full burst
+     * would render right now, and the link remembers the fingerprint of the
+     * last burst it sent, the BEGIN id of that burst, and whether the peer
+     * acknowledged applying it (SBURSTACK, at the commit path in apply_end).
+     * All three agreeing means the peer already holds exactly this state, so
+     * re-sending would put thousands of lines onto its loop thread to converge
+     * it to what it has. The resync is then a counter and a log line instead
+     * of a transaction. It returns 0, not -1: the peer IS in sync, and -1 is
+     * the shape a refusal takes.
+     *
+     * The ack is what makes the skip more than optimism. A burst that was
+     * queued but never applied -- the link died between the queue and the
+     * peer's read -- leaves no ack behind, so the next resync still sends in
+     * full and heals the peer. Only an acked burst is ever skipped, and a
+     * restarted peer says a new epoch in its handshake, which stops matching
+     * burst_peer_epoch and forces the full burst a restart needs. */
+    digest = burst_state_digest(s);
+    if (link->burst_valid != 0 && link->burst_peer_epoch == link->epoch &&
+        link->burst_digest == digest && link->burst_ack_id == link->burst_begin_id) {
+        s->n_burst_skipped++;
+        printf("[observable] fed_burst_skipped: peer=%s epoch=%llu nicks=%zu "
+               "chans=%zu\n",
+               link->name, (unsigned long long)s->epoch,
+               server_nick_count(s), server_chan_count(s));
+        return 0;
+    }
+    if (fed_burst_send(s, link, &begin_id) != 0) {
+        return -1;
+    }
+    /* A burst that went out is a burst the peer is about to apply, so what it
+     * carries -- this digest under these epochs with this BEGIN id -- is what
+     * the peer holds once its ack arrives. The ack arm (apply_ack) completes
+     * the record; until then burst_ack_id still names an older burst and no
+     * resync is skipped. */
+    link->burst_valid = 1;
+    link->burst_our_epoch = s->epoch;
+    link->burst_peer_epoch = link->epoch;
+    link->burst_digest = digest;
+    link->burst_begin_id = begin_id;
+    return 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1135,6 +1298,7 @@ static int apply_begin(server_t *s, server_link_t *link, const message_t *m)
     }
     sh->epoch = epoch;
     sh->expect_nnicks = nnicks;
+    sh->begin_id = tags.id;
     sh->open = 1;
     sh->open_at_ms = server_now_ms();
     /* A peer that restarts and says so is the one case the epoch is FOR: the
@@ -2023,6 +2187,135 @@ static int burst_roster_fits(const server_t *s, const chan_t *ch,
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * #541: THE ACK. SBURSTACK <sender-epoch> <begin-id> says "I applied your
+ * burst", and the sender skips its next resync when the ack covers what it
+ * would have sent. Two halves, both here because both are the burst's wire
+ * format: burst_send_ack() renders one at the commit below, and apply_ack()
+ * records an inbound one on the link it arrived on.
+ *
+ * THE ACK IS ADVISORY, and the direction that matters is which side a loss
+ * hurts. A lost ack only ever costs a redundant full burst: the sender never
+ * got proof, so its next resync sends everything. A forged or replayed ack
+ * can only blind the PEER TO ITSELF -- the skip also needs the current digest
+ * to match the last-sent one, so the most a liar buys is not receiving state
+ * it already holds. The two guards below (link-local origin, issued ids only)
+ * keep even that to bursts this node actually rendered.
+ * ------------------------------------------------------------------------- */
+
+/* Queue one ack line to the peer whose burst just committed. Silent on every
+ * failure: the burst is applied regardless, and an ack that never left only
+ * costs the next resync its skip. */
+static void burst_send_ack(server_t *s, server_link_t *link, uint64_t epoch,
+                           uint64_t begin_id)
+{
+    conn_t *peer = server_link_conn(s, link);
+    char line[IRC_MAX_LINE + 2];
+    char block[IRC_MAX_TAG_OVERHEAD];
+    irc_serve_tags_t tags;
+    message_t m;
+    const char *params[2];
+    char epoch_s[24];
+    char id_s[24];
+    size_t blen;
+    size_t len;
+
+    if (peer == NULL) {
+        /* The link died under the commit. Nothing is owed: with no ack the
+         * sender's next resync sends in full. */
+        return;
+    }
+    memset(&tags, 0, sizeof tags);
+    if (!bounded_copy(tags.origin, sizeof tags.origin, s->name)) {
+        return;
+    }
+    tags.epoch = s->epoch;
+    tags.id = server_next_msg_id(s);
+    tags.hops = 0u;
+    if (!irc_serve_tags_valid(&tags)) {
+        return;
+    }
+    blen = irc_serve_tags_format(&tags, block, sizeof block);
+    if (blen == 0u) {
+        return;
+    }
+    irc_format_u64(epoch_s, sizeof epoch_s, epoch);
+    irc_format_u64(id_s, sizeof id_s, begin_id);
+    params[0] = epoch_s;
+    params[1] = id_s;
+    if (message_build(&m, block, s->name, "SBURSTACK", params, 2) != 0) {
+        return;
+    }
+    len = message_format(&m, line, sizeof line - 2u);
+    message_free(&m);
+    if (len == 0u) {
+        return;
+    }
+    line[len] = '\r';
+    line[len + 1u] = '\n';
+    if (server_queue(s, peer, line, len + 2u) != 0) {
+        /* Queued onto a dying link is a line nobody reads, and
+         * server_queue() already marked it CLOSING and counted the
+         * overflow: a second report here would count one event twice. */
+        return;
+    }
+    printf("[observable] fed_burstack_sent: peer=%s epoch=%llu begin=%llu\n",
+           link->name, (unsigned long long)epoch,
+           (unsigned long long)begin_id);
+}
+
+/* SBURSTACK <sender-epoch> <begin-id>, on the link it arrived on. */
+static int apply_ack(server_t *s, server_link_t *link, const message_t *m)
+{
+    irc_serve_tags_t tags;
+    uint64_t epoch = 0u;
+    uint64_t begin = 0u;
+
+    /* Link-local, like the burst: the link is resolved from the connection,
+     * not the prefix, so a relayed ack would be recorded against the wrong
+     * peer. Third-party acks are refused, not re-homed. */
+    if (irc_serve_tags_parse(m, &tags) != 0) {
+        s->n_fed_malformed++;
+        printf("[observable] fed_malformed: fd=%d command=SBURSTACK field=tags\n",
+               link->fd);
+        return -1;
+    }
+    if (!chan_same_name(tags.origin, link->name)) {
+        s->n_fed_malformed++;
+        printf("[observable] fed_malformed: fd=%d command=SBURSTACK "
+               "reason=RELAYED_ACK\n",
+               link->fd);
+        return -1;
+    }
+    if (m->nparams != 2 || burst_parse_u64(m->params[0], &epoch) != 0 ||
+        burst_parse_u64(m->params[1], &begin) != 0) {
+        s->n_fed_malformed++;
+        printf("[observable] fed_malformed: fd=%d command=SBURSTACK field=arity\n",
+               link->fd);
+        return -1;
+    }
+    if (epoch != s->epoch) {
+        /* For another boot of this node -- a replay from before a restart, or
+         * a forgery. Ignored rather than counted: it asks for nothing and
+         * changes nothing, and a counter on it would be a number about the
+         * peer's confusion rather than about this node. */
+        return 0;
+    }
+    if (begin == 0u || begin >= s->msg_id) {
+        /* Never issued: 0 means unset and the counter only grows, so anything
+         * past it is from a future this node has not sent. Same silent
+         * treatment: self-blinding a peer at most, and not ours to count. */
+        return 0;
+    }
+    if (begin > link->burst_ack_id) {
+        link->burst_ack_id = begin;
+    }
+    printf("[observable] fed_burstack_applied: peer=%s epoch=%llu begin=%llu\n",
+           link->name, (unsigned long long)epoch,
+           (unsigned long long)begin);
+    return 0;
+}
+
 /* SBURSTE <epoch> <nnicks> <nchans> <nmembers>. */
 static int apply_end(server_t *s, server_link_t *link, const message_t *m)
 {
@@ -2374,6 +2667,12 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
     }
 
     link->burst_done = 1;
+    /* #541: the burst is installed, so the sender may stop re-sending it.
+     * The ack names the BEGIN's tag id, which is the one id in the
+     * transaction the sender knows before sending -- every record id after
+     * it is assigned during staging. Queued on the link the burst arrived
+     * on; a dead link here just costs the sender its skip. */
+    burst_send_ack(s, link, sh->epoch, sh->begin_id);
     printf("[observable] fed_burst_applied: peer=%s epoch=%llu nicks=%zu chans=%zu "
            "members=%zu installed=%zu purged=%zu dropped=%zu bytes=%zu\n",
            origin, (unsigned long long)sh->epoch, sh->nnicks,
@@ -2390,12 +2689,18 @@ int fed_burst_apply(server_t *s, server_link_t *link, const message_t *m)
     if (s == NULL || link == NULL || m == NULL || m->command == NULL) {
         return -1;
     }
-    /* THE FIVE ARMS, and none of them is reached for a transaction this node is
-     * not already in: a record that arrives with nothing open is a peer out of
-     * order with itself, and the alternative -- creating a shadow on a stray
-     * SBURSTN -- would let a peer build this node's state without ever sending a
-     * BEGIN. The count assertion cannot catch that, because a transaction that
-     * never started has nothing whose counts could disagree. */
+    /* THE FIVE RECORD ARMS PLUS THE ACK. None of the five is reached for a
+     * transaction this node is not already in: a record that arrives with
+     * nothing open is a peer out of order with itself, and the alternative --
+     * creating a shadow on a stray SBURSTN -- would let a peer build this
+     * node's state without ever sending a BEGIN. The count assertion cannot
+     * catch that, because a transaction that never started has nothing whose
+     * counts could disagree. The ack below is outside that rule on purpose --
+     * it answers a burst rather than belonging to one -- so it takes no
+     * shadow and needs none open. */
+    if (strcmp(m->command, "SBURSTACK") == 0) {
+        return apply_ack(s, link, m);
+    }
     if (strcmp(m->command, "SBURST") == 0) {
         return apply_begin(s, link, m);
     }
