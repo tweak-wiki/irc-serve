@@ -2557,6 +2557,21 @@ static void case_open_transaction_released_at_shutdown(void)
                  "teardown arm below would be finding nothing and this case would "
                  "be measuring a transaction that was never open: %s",
                  b.out);
+    /* THE RECEIPT GATE. Stopping B here without it is a race against B's own
+     * loop: everything above is already in B's output buffer (the link line
+     * was printed at establishment), so a loaded machine can SIGTERM B before
+     * it reads the SBURST off its socket -- and the close below then reports
+     * NONE for a transaction that was in flight rather than absent. The open
+     * below is the SECOND of its line: the first is A's establishment burst,
+     * which committed, and only the second can be the transaction this case
+     * left open. Waiting for it means B was scheduled, read the line, and
+     * holds the shadow, which is the arrangement the rest of the case asserts
+     * about. */
+    TF_CHECK_MSG(nf_expect_nth(&b, "fed_burst_open: peer=" NAME_A, 2, T_IO_MS) == 0,
+                 "node B never opened the transaction node A sent, so stopping "
+                 "it now would measure delivery timing rather than the teardown "
+                 "arm: %s",
+                 b.out);
 
     /* B FIRST, A SECOND. See the header: this is what keeps fed_burst_abandon()
      * out of the picture. */

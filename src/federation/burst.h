@@ -323,15 +323,19 @@
  * into the implementation. */
 void fed_burst_set_max_bytes(server_t *s, size_t max_bytes);
 
-/* Is `verb` one of the five burst words? The guard chain asks this before its
- * own verb table, because a burst is a TRANSACTION and its five shapes have
- * nothing in common with the seven S-verbs' frozen shapes -- SBURSTC names the
- * channel FIRST and carries six parameters, and SBURSTM names it first and
- * carries three. Squeezing them into the same arity table would be a table whose
- * ranges are individually correct and collectively a lie.
+/* Is `verb` one of the burst words? The guard chain asks this before its
+ * own verb table, because a burst is a TRANSACTION and its five record shapes
+ * have nothing in common with the seven S-verbs' frozen shapes -- SBURSTC
+ * names the channel FIRST and carries six parameters, and SBURSTM names it
+ * first and carries three. Squeezing them into the same arity table would be
+ * a table whose ranges are individually correct and collectively a lie.
+ * SBURSTACK is the sixth word and the exception: link-local control answering
+ * a transaction rather than a record in one, and riding this dispatch so it
+ * gets the same guards.
  *
- * 1 for the five, 0 for anything else. Never -1: this is a membership question,
- * not a validation one, and the verb itself has already been checked to exist. */
+ * 1 for the family, 0 for anything else. Never -1: this is a membership
+ * question, not a validation one, and the verb itself has already been checked
+ * to exist. */
 int fed_burst_verb(const char *verb);
 
 /* Send this node's full state to one peer. 0 on success, -1 on a refusal.
@@ -348,8 +352,13 @@ int fed_burst_verb(const char *verb);
  *
  * `link` must be ESTABLISHED with a live connection; anything else is refused
  * and counted, because a burst onto a link that is not a route is a caller's
- * bug rather than a protocol event. */
-int fed_burst_send(server_t *s, server_link_t *link);
+ * bug rather than a protocol event.
+ *
+ * `begin_id_out` takes the tag id of the staged BEGIN line, so the caller can
+ * match the peer's SBURSTACK against the burst it answers (#541). NULL is
+ * allowed and means the caller is not matching; nothing else about the send
+ * changes. */
+int fed_burst_send(server_t *s, server_link_t *link, uint64_t *begin_id_out);
 
 /* Apply one inbound SBURST* line.
  *
@@ -455,7 +464,14 @@ void fed_burst_close(server_t *s);
  *
  * `link` must be ESTABLISHED. Anything else is a no-op rather than a refusal,
  * because the two callers are both legitimate reasons to be there and neither
- * is a bug. Returns what fed_burst_send() returned. */
+ * is a bug. Returns what fed_burst_send() returned.
+ *
+ * #541: a resync whose content the peer already holds sends nothing. The link
+ * remembers the last burst's fingerprint, BEGIN id and ack; when the current
+ * fingerprint matches under the same epochs and the ack covers that BEGIN,
+ * the call counts n_burst_skipped, prints fed_burst_skipped and returns 0 --
+ * the peer converges by doing nothing. Anything else sends in full, and a
+ * successful send refreshes the link's record for the next comparison. */
 int federation_resync(server_t *s, server_link_t *link);
 
 #endif /* IRC_FEDERATION_BURST_H */

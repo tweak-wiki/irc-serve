@@ -379,6 +379,26 @@ typedef struct server_link {
      * on a timer: a link that reconnects needs a fresh burst even if its peer
      * never went away. */
     int      burst_done;
+    /* #541: WHAT THIS LINK'S PEER ALREADY HOLDS. federation_resync() stores
+     * the fingerprint of every burst it sends here, with both epochs, and a
+     * later resync whose fingerprint still matches sends nothing: the peer's
+     * copy is already identical, so the wire and the receiving loop thread get
+     * zero lines instead of thousands. A flap with an idle node is the case
+     * this exists for. `burst_valid` is 0 until the first successful send and
+     * is cleared by fed_link_reset() (the operator's door starts over); it is
+     * NOT cleared when the link drops, because surviving the drop is the point.
+     * A peer that restarted says a new epoch in its handshake, which stops
+     * matching `burst_peer_epoch` and forces the full burst the restart needs.
+     * `burst_begin_id` is the tag id of that burst's BEGIN line and
+     * `burst_ack_id` the newest BEGIN id the peer confirmed (SBURSTACK); the
+     * skip needs both equal, so a burst that was queued but never applied --
+     * no ack -- is always re-sent in full. */
+    int      burst_valid;
+    uint64_t burst_our_epoch;
+    uint64_t burst_peer_epoch;
+    uint64_t burst_digest;
+    uint64_t burst_begin_id;
+    uint64_t burst_ack_id;
 
     /* ------------------------------------------------------------------------
      * THE RECONNECT SCHEDULE -- Phase 9. Three fields, one policy, and the
@@ -903,6 +923,14 @@ struct server {
     uint64_t  n_burst_refused;
     uint64_t  n_burst_abandoned;
     uint64_t  n_burst_truncated;
+    /* #541: a resync that sent NOTHING because the peer already holds it. The
+     * fingerprint on the link matched the current burst-visible state under
+     * the same pair of epochs, so the burst the establishment path would have
+     * sent is byte-identical in content to the one the peer applied last time.
+     * Skipping it is not a refusal (n_burst_refused) and not a loss (the two
+     * abandon counters): the peer converges by doing nothing, which is the
+     * cheapest correct resync there is. */
+    uint64_t  n_burst_skipped;
 
     /* ------------------------------------------------------------------------
      * Phase 7: the topic cache, and the one event it can have.
