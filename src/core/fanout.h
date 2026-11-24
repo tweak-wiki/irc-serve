@@ -150,6 +150,11 @@ typedef struct {
  * ---------------------------------------------------------------------------
  */
 
+/* THE ONE WAY A BYTE GETS INTO `out->name`: bounds-checked (fits
+ * FANOUT_NAME_MAX) and display-checked, refusing rather than truncating.
+ * Returns 1 on store, 0 on refusal (`out->name` untouched past the NUL). */
+int fanout_name_store(fanout_target_t *out, const char *src);
+
 /* Resolve `arg` -- a <msgtarget>, exactly as it arrived -- into `*out`.
  *
  * Returns 1 when the target was resolved, 0 when it was not. On 0 `*out->kind`

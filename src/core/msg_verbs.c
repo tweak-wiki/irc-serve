@@ -1364,7 +1364,9 @@ static void notify_away(server_t *s, conn_t *c, const char *message)
             t.kind = FANOUT_LOCAL_CHANNEL;
             t.vclass = FANOUT_MESSAGE;
             t.chan = ch;
-            memcpy(t.name, ch->name, sizeof t.name);
+            if (fanout_name_store(&t, ch->name) == 0) {
+                continue; /* checked above, so unreachable; skip rather than address garbage */
+            }
             delivered += fanout_deliver_local_gated(s, &t, prefix, "AWAY", &plain,
                                                     NULL, cap_gate_away_notify,
                                                     NULL, c);

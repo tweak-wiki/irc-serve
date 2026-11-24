@@ -212,7 +212,7 @@ conn_t *fanout_find_nick(server_t *s, const char *nick)
  * path, once per resolution. The walk is the same one `valid_nick()` runs on
  * every NICK, so it is not a new class of work for this node.
  */
-static int fanout_name_store(fanout_target_t *out, const char *src)
+int fanout_name_store(fanout_target_t *out, const char *src)
 {
     size_t n;
 

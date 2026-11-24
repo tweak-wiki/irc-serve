@@ -463,7 +463,7 @@ static void check_target_is_validated_at_the_struct(void)
      * this file should not make twice -- what is asserted is that the store asks
      * SOMETHING before it copies, and that the something is the display walk the
      * two other stored identity fields use. */
-    TF_CHECK_MSG(has(code, "static int fanout_name_store("),
+    TF_CHECK_MSG(has(code, "int fanout_name_store("),
                  "fanout.c no longer defines fanout_name_store(). It is the one "
                  "place a byte gets into fanout_target_t::name, and without it the "
                  "safety of that field is back to whichever guard chain a reader "
