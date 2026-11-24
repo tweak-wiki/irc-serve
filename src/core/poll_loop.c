@@ -132,6 +132,22 @@ static void rate_refill(conn_t *c, uint64_t now_ms)
         c->rate_last_ms = now_ms;
     }
 }
+/* #540: a peer link is born a CLIENT connection and is promoted to
+ * CONN_SERVER at handshake completion -- after its first refill already
+ * granted the client-sized bucket. Top the bucket up to the peer cap now,
+ * or a legitimate establishment-plus-resync burst trips the limiter and
+ * the link flaps (rate_limited, close, redial) instead of bursting. A
+ * rogue peer is unaffected once the topped-up bucket is spent: from then
+ * on it earns only the 50/sec trickle, exactly like a dial-side peer whose
+ * 16384 bucket was granted at conn_new(). */
+void conn_flood_peer_promoted(conn_t *c)
+{
+    if (c == NULL || c->kind != CONN_SERVER) {
+        return;
+    }
+    c->rate_tokens = rate_cap(c);
+    c->rate_last_ms = server_now_ms();
+}
 
 /* The readable half of the message path (3.3):
  *
