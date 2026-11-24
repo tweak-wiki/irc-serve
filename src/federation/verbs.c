@@ -1137,6 +1137,27 @@ static void fed_in_message(server_t *s, fanout_target_t *t, const char *prefix,
            strlen((prefix != NULL) ? prefix : "?"),
            conn_text_bad_count((prefix != NULL) ? prefix : "?"));
 }
+/* The local half of an inbound state verb: resolve the channel and write the
+ * CLIENT-shaped line to local members, with NO forward. The forward is the
+ * handler's existing fanout_forward_channel_sverb() call, which is untouched:
+ * this only adds the local emission fed_in_message() has always had. One
+ * helper rather than inline code in seven handlers, so the resolve class
+ * cannot drift between them: every state verb resolves FANOUT_STATE_CHANGE,
+ * and deliver_local writes to members of either channel kind without
+ * forwarding, which is exactly the half that was missing. */
+static void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
+                           const char *verb, const char *const *params, int nparams)
+{
+    fanout_target_t t;
+
+    if (ch == NULL || verb == NULL) {
+        return;
+    }
+    if (fanout_resolve(s, NULL, ch->name, FANOUT_STATE_CHANGE, &t) == 0) {
+        return;
+    }
+    (void)fanout_deliver_local(s, &t, prefix, verb, params, nparams, NULL);
+}
 
 /* SJOIN: <channel> <member> <flags>. */
 static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
@@ -1203,6 +1224,11 @@ static void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
            "local=%zu remote=%zu origin=%s owned=%d member_len=%zu member_bad_bytes=%zu\n",
            ch->name, params[1], link->name, flags, ch->nmembers, ch->nremotes,
            ch->origin, chan_origin_is_self(s, ch), strlen(params[1]), conn_text_bad_count(params[1]));
+    /* The JOIN this node's own clients see. The prefix is the observed one --
+     * the joiner's hostmask on a well-formed mesh -- passed through for the
+     * reason fed_in_message() gives: a client is never sent an S-verb, and the
+     * only hostmask this node has for the joiner is the one on the line. */
+    fed_local_emit(s, ch, prefix, "JOIN", NULL, 0);
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SJOIN", prefix,
                                        params, nparams, tags);
 }
@@ -1281,6 +1307,15 @@ static void fed_in_snick(server_t *s, server_link_t *link, const char *prefix,
              * fanout is the only path to a client that exists. */
             (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SNICK",
                                                link->name, params, nparams, tags);
+            /* The NICK the channel's own clients see: old nick as the prefix
+             * with the new nick as the parameter, exactly the shape nickreg.c
+             * renders for a local rename. */
+            {
+                const char *lp[1];
+
+                lp[0] = params[1];
+                fed_local_emit(s, ch, params[0], "NICK", lp, 1);
+            }
         }
     }
     if (renamed == 0) {
@@ -1849,6 +1884,18 @@ static void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
     fed_touch_server(ch, link->name, 0);
     fed_obs("[observable] fed_spart: channel=%s member=%s server=%s remote=%zu\n",
            ch->name, params[0], link->name, ch->nremotes);
+    /* The PART this node's own clients see, with the reason stripped the way
+     * the local PART path strips it -- announced nowhere else, stored nowhere. */
+    if (nparams > 2) {
+        char clean[CHAN_MAX_PART_REASON + 1u];
+        const char *lp[1];
+
+        (void)conn_text_strip(clean, sizeof clean, params[2], STRIP_STORED);
+        lp[0] = clean;
+        fed_local_emit(s, ch, prefix, "PART", lp, 1);
+    } else {
+        fed_local_emit(s, ch, prefix, "PART", NULL, 0);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SPART", prefix,
                                        params, nparams, tags);
     (void)chan_dispose_if_empty(s, ch);
@@ -1964,6 +2011,14 @@ static void fed_in_stopic(server_t *s, server_link_t *link, chan_t *ch,
     }
     fed_obs("[observable] fed_topic: channel=%s member=%s len=%zu\n", ch->name,
            params[0], strlen(ch->topic));
+    /* ch->topic, NOT params[2]: the stored value is the stripped one, and the
+     * local echo of a locally-set topic renders the same stored field. */
+    {
+        const char *lp[1];
+
+        lp[0] = ch->topic;
+        fed_local_emit(s, ch, prefix, "TOPIC", lp, 1);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "STOPIC", prefix,
                                        params, nparams, tags);
 }
@@ -2223,6 +2278,27 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
                (applied[0] != '\0') ? applied : "-",
                (refused[0] != '\0') ? refused : "-", ch->modes, strlen(ch->modes), conn_text_bad_count(ch->modes));
     }
+    /* The MODE this node's own clients see: the mode string and the optional
+     * mask, stripped the way the stored values are. Both are peer-chosen, and
+     * the client line is a second reader the forward path's filter does not
+     * cover -- a control byte in either would otherwise reach a terminal. */
+    {
+        char clean_modes[CHAN_MAX_MODES + 1u];
+        char clean_mask[CHAN_MAX_BAN + 1u];
+        const char *lp[2];
+        int nlp = 1;
+
+        (void)conn_text_strip(clean_modes, sizeof clean_modes, params[2],
+                              STRIP_STORED);
+        lp[0] = clean_modes;
+        if (nparams > 3) {
+            (void)conn_text_strip(clean_mask, sizeof clean_mask, params[3],
+                                  STRIP_STORED);
+            lp[1] = clean_mask;
+            nlp = 2;
+        }
+        fed_local_emit(s, ch, prefix, "MODE", lp, nlp);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SMODES", prefix,
                                        params, nparams, tags);
 }
@@ -2279,6 +2355,19 @@ static void fed_in_skick(server_t *s, server_link_t *link, chan_t *ch,
             "target=%s target_len=%zu target_bad_bytes=%zu\n",
             ch->name, shown_by, strlen(params[0]), conn_text_bad_count(params[0]),
             shown_target, strlen(params[2]), conn_text_bad_count(params[2]));
+    /* The KICK this node's own clients see: target, then the reason stripped
+     * the way the local KICK path strips it. */
+    if (nparams > 3) {
+        char clean[CHAN_MAX_KICK_REASON + 1u];
+        const char *lp[2];
+
+        (void)conn_text_strip(clean, sizeof clean, params[3], STRIP_STORED);
+        lp[0] = params[2];
+        lp[1] = clean;
+        fed_local_emit(s, ch, prefix, "KICK", lp, 2);
+    } else {
+        fed_local_emit(s, ch, prefix, "KICK", &params[2], 1);
+    }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SKICK", prefix,
                                        params, nparams, tags);
     (void)chan_dispose_if_empty(s, ch);
@@ -2405,6 +2494,51 @@ static void fed_in_squit(server_t *s, server_link_t *link,
      * silently, and a channel that silently survives a purge is a roster the
      * operator is told is gone. chan_remote_purge() walks the same way for the
      * same reason. */
+    /* The QUIT each remaining local member sees, one per departed member of
+     * every channel it shares with the gone server. BEFORE the purge below,
+     * which is the only point the names are still known; the channels
+     * themselves are disposed in the walk, so a line for a member of a
+     * channel about to vanish still reaches the members who stay. The prefix
+     * is the stored hostmask where the burst path described the member, else
+     * the bare nick -- the same rule 353 renders by, and for the same reason. */
+    {
+        /* Stripped once, outside the walk: one reason for every channel, and
+         * the client line is a reader the forward path's filter does not
+         * cover. IRC_MAX_LINE always fits it, because the whole peer line
+         * already did. */
+        char clean_reason[IRC_MAX_LINE];
+        const char *qp[1] = { NULL };
+        int nqp = 0;
+
+        if (nparams > 1) {
+            (void)conn_text_strip(clean_reason, sizeof clean_reason, params[1],
+                                  STRIP_STORED);
+            qp[0] = clean_reason;
+            nqp = 1;
+        }
+        for (size_t ci = 0, nch = server_chan_count(s); ci < nch; ci++) {
+            chan_t *qch = server_chan_at(s, ci);
+
+            if (qch == NULL) {
+                continue;
+            }
+            for (size_t r = 0; r < qch->nremotes; r++) {
+                const chan_remote_t *m = &qch->remotes[r];
+                char mask[CONN_HOSTMASK_MAX];
+
+                if (!chan_same_name(m->server, gone)) {
+                    continue;
+                }
+                if (m->user[0] != '\0' && m->host[0] != '\0') {
+                    (void)snprintf(mask, sizeof mask, "%s!%s@%s", m->nick,
+                                   m->user, m->host);
+                } else {
+                    (void)snprintf(mask, sizeof mask, "%s", m->nick);
+                }
+                fed_local_emit(s, qch, mask, "QUIT", qp, nqp);
+            }
+        }
+    }
     while (i < server_chan_count(s)) {
         chan_t *ch = server_chan_at(s, i);
         int disposed;

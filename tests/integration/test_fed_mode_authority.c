@@ -493,7 +493,10 @@ static void case_member_server_ban_applied(void)
                  "the origin still answers a ban-list query with 367 after the mask was "
                  "removed, so `-b` set the letter and left the list alone.\n"
                  "  alice saw: %s", tc_buffer(&alice) + mark);
-    TF_CHECK_MSG(strstr(tc_buffer(&alice) + mark, MASK) == NULL,
+    /* No 367 after the mark is the list reading empty. The mask itself DOES
+     * appear -- in the `-b` MODE line #559 renders to the channel's members,
+     * which is the event stream doing its job, not the list retaining the ban. */
+    TF_CHECK_MSG(strstr(tc_buffer(&alice) + mark, " 367 ") == NULL,
                  "the removed mask is still in the origin's ban list.\n"
                  "  alice saw: %s", tc_buffer(&alice) + mark);
 
