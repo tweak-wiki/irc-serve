@@ -230,6 +230,14 @@ static int fanout_name_store(fanout_target_t *out, const char *src)
     return 1;
 }
 
+/* The one store, for callers outside this file. `notify_away` builds its target
+ * directly from the chan_t in hand instead of resolving, so it stores the name
+ * through the same predicate rather than a bare memcpy(). */
+int fanout_target_store_name(fanout_target_t *out, const char *src)
+{
+    return fanout_name_store(out, src);
+}
+
 int fanout_resolve(server_t *s, conn_t *from, const char *arg,
                    fanout_class_t vclass, fanout_target_t *out)
 {
