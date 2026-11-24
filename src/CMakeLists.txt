@@ -171,6 +171,10 @@ add_library(irc_core STATIC
   # the outbound side of the wire -- which is the first time anything in this
   # tree has had a reason to depend on more than one module under federation/.
   federation/link.c
+  # The handshake FSM: the caller-owned-context transition rules, split out of
+  # link.c (issue #543). It is listed here, beside its only production caller,
+  # because that is where a reader looking for the rules will look first.
+  federation/handshake.c
   # The resync: 4.3's SBURST, the wire format it froze, and the transaction that
   # replaces rather than merges. It is listed LAST because it is the one module
   # here that depends on both of the others -- link.c calls federation_resync()
