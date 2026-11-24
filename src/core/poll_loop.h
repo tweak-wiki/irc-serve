@@ -58,5 +58,8 @@ int poll_loop_step(server_t *s, int timeout_ms);
 /* Run until poll_loop_request_stop() is called, then shut the node down and
  * return 0. Never returns on a signal: an interrupted poll is retried. */
 int poll_loop_run(server_t *s);
+/* #540: top a freshly promoted peer link's flood bucket up to the peer cap.
+ * Called once, where the link layer promotes the connection to CONN_SERVER. */
+void conn_flood_peer_promoted(conn_t *c);
 
 #endif /* IRC_CORE_POLL_LOOP_H */
