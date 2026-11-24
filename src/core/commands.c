@@ -399,7 +399,7 @@ void commands_state_update(server_t *s, conn_t *c)
      * authenticate, and it is the second of those two that a server must be
      * able to tell apart from the first. Only the malformed-payload arm of
      * handle_authenticate() marks the connection CLOSING; the bad-credential
-     * arm leaves it open so the 464 is actually written (poll_loop.c does not
+     * arm leaves it open so the 904 is actually written (poll_loop.c does not
      * pump the write queue of a CLOSING connection). This arm therefore holds
      * for the credential-failure path, which is the one that reaches here. */
     if (state == CONN_REG_READY && c->sasl == (int)SASL_FAILED) {
@@ -1818,11 +1818,10 @@ static void handle_choper(server_t *s, conn_t *c, const message_t *m)
         return;
     }
 
-    /* 464, WHICH THE SAME NUMBER ALSO ANSWERS FOR A FAILED SASL EXCHANGE. For a
+    /* 464, WHICH ANSWERS ONLY THIS: a failed SASL exchange is 904, never 464,
+     * so the number alone tells a client this was an operator refusal. For a
      * client that negotiated `standard-replies` this is
-     * `FAIL CHOPER ERR_NOPRIVILEGES`, which says "you are not an operator" rather
-     * than leaving the client to work out that an operator request and a
-     * credential failure share a number. */
+     * `FAIL CHOPER ERR_NOPRIVILEGES`, which says "you are not an operator" outright. */
     (void)reply_refused(s, c, "CHOPER", NULL, "464", NULL, 0,
                         "%s cannot become an operator: this server holds no "
                         "operator flags and no operator credentials",
@@ -2228,14 +2227,14 @@ static void handle_unregister(server_t *s, conn_t *c, const message_t *m)
  *   1. `AUTHENTICATE *` -- RFC 4422's server-chosen abort. It tells the client the
  *      exchange is over, so a client that is waiting for a verdict gets one and
  *      does not wait for a deadline.
- *   2. `464 ERR_PASSWDMISMATCH` -- the RFC numeric for credentials that did not
+ *   2. `904 ERR_SASLFAIL` -- SASL's own numeric for credentials that did not
  *      take. NOT 908 (RPL_SASLMECHS, which would offer the client a second try at
  *      a credential it just got wrong, turning one failure into an unlimited
  *      guessing loop) and NOT 451.
  * The connection is NOT closed here, and the reason is a property of the loop
  * rather than a judgement about the client: poll_loop.c refuses to pump the write
  * queue of a CONN_CLOSING connection, and the reaper frees that queue with the
- * conn_t. Marking CLOSING in the same dispatch that queues the abort and the 464
+ * conn_t. Marking CLOSING in the same dispatch that queues the abort and the 904
  * would DISCARD BOTH, so a client whose credential failed would see a bare FIN
  * with no explanation -- strictly worse than telling it. So the connection is
  * left open and unusable: commands_state_update() refuses the transition while
@@ -2313,15 +2312,15 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
     c->credential_seen = 1;
 
     /* PER-CONNECTION THROTTLE. After three failed credential verifications this
-     * connection stops verifying and refuses every further AUTHENTICATE with
-     * 464, so a single connection cannot run an unbounded online dictionary
-     * attack. The connection is deliberately NOT closed: poll_loop.c does not
-     * pump the write queue of a CLOSING connection, so closing here would
-     * discard the 464 queued above and leave the client with a bare FIN. The
-     * client is already unable to register (SASL_FAILED is terminal), so the
-     * connection is effectively dead and will be reaped on disconnect/timeout. */
+    * connection stops verifying and refuses every further AUTHENTICATE with
+    * 904, so a single connection cannot run an unbounded online dictionary
+    * attack. The connection is deliberately NOT closed: poll_loop.c does not
+    * pump the write queue of a CLOSING connection, so closing here would
+    * discard the 904 queued above and leave the client with a bare FIN. The
+    * client is already unable to register (SASL_FAILED is terminal), so the
+    * connection is effectively dead and will be reaped on disconnect/timeout. */
     if (c->sasl_failures >= 3) {
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "464",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
                             NULL, 0, "SASL authentication failed: too many attempts");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TOO_MANY_ATTEMPTS\n",
                c->fd);
@@ -2333,7 +2332,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * AUTHENTICATE * (below) or a fresh AUTHENTICATE PLAIN would clear the
      * failure and let NICK+USER register anonymously. */
     if (c->sasl == (int)SASL_FAILED) {
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "464",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
                             NULL, 0, "SASL authentication failed");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=ALREADY_FAILED\n",
                c->fd);
@@ -2347,6 +2346,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * registerable, because declining to authenticate is not failing to. */
     if (m->nparams >= 1 && strcmp(m->params[0], "*") == 0) {
         c->sasl = (int)SASL_ABORTED;
+        (void)reply(s, c, RPL_SASLABORTED, NULL, 0, "SASL authentication aborted");
         printf("[observable] sasl: fd=%d outcome=ABORTED\n", c->fd);
         auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
@@ -2439,7 +2439,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
         params[0] = "*";
         (void)send_line(s, c, NULL, "AUTHENTICATE", params, 1);
         (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED",
-                            "464", NULL, 0,
+                            "904", NULL, 0,
                             "SASL authentication failed: TLS is required on "
                             "this node for SASL PLAIN");
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=TLS_REQUIRED\n",
@@ -2475,18 +2475,30 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
          * with a byte comparison, so it is written as the RFC writes it. */
         params[0] = "*";
         (void)send_line(s, c, NULL, "AUTHENTICATE", params, 1);
-        /* `INVALID_AUTHENTICATE` is the code the SASL specification defines for
-         * exactly this -- an AUTHENTICATE whose payload this node cannot read --
-         * and standard-replies says an existing code MUST be used where one is
-         * defined. The other two 464 sites are NOT this, which is why they carry
-         * different codes. */
-        (void)reply_refused(s, c, "AUTHENTICATE", "INVALID_AUTHENTICATE", "464",
-                            NULL, 0,
-                            "SASL PLAIN payload was not base64 or not three "
-                            "NUL-separated fields");
+        /* 905 is the payload that does not FIT, 904 the one that does not READ.
+         * sasl_b64_decode() answers -1 for both, so the length decides:
+         * anything past SASL_MAX_RESPONSE -- the base64 text a client may send --
+         * never fit the decode buffer and is too long; anything shorter is
+         * malformed. (shortcut: a short blob whose FIELDS overflow is answered
+         * 904 rather than 905; upgrade by threading a reason out of
+         * sasl_plain_parse() if a client ever needs the distinction.) */
+        if (strlen(arg) > (size_t)SASL_MAX_RESPONSE) {
+            (void)reply(s, c, ERR_SASLTOOLONG, NULL, 0,
+                        "SASL authentication failed: response too long");
+        } else {
+            /* `INVALID_AUTHENTICATE` is the code the SASL specification defines for
+             * exactly this -- an AUTHENTICATE whose payload this node cannot read --
+             * and standard-replies says an existing code MUST be used where one is
+             * defined. */
+            (void)reply_refused(s, c, "AUTHENTICATE", "INVALID_AUTHENTICATE", "904",
+                                NULL, 0,
+                                "SASL PLAIN payload was not base64 or not three "
+                                "NUL-separated fields");
+        }
         conn_mark_closing(c);
-        printf("[observable] sasl: fd=%d outcome=REJECTED reason=BAD_PAYLOAD\n",
-               c->fd);
+        printf("[observable] sasl: fd=%d outcome=REJECTED reason=%s\n", c->fd,
+               strlen(arg) > (size_t)SASL_MAX_RESPONSE ? "RESPONSE_TOO_LONG"
+                                                       : "BAD_PAYLOAD");
         auth_wipe_credential(payload, authzid, authcid, passwd);
         return;
     }
@@ -2512,7 +2524,7 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
          * client reading `SAASL_FAIL` would offer the user to wait and retry a
          * password that will never verify. The registry has no code for "the
          * credentials did not verify", so this one is `ERR_`-prefixed as ours. */
-        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "464",
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", "904",
                             NULL, 0, "SASL authentication failed: %s",
                             no_store ? "this node holds no client credential store"
                             : "the credentials did not verify");
@@ -2629,6 +2641,9 @@ static void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
      * its AUTHENTICATE has already satisfied the state machine, and if it was
      * held for CAP it is still held -- so the gate is re-evaluated rather than
      * bypassed. */
+    /* 903 is SASL's own success verdict, and it goes out unconditionally: a
+     * client that authenticates before registering watches for exactly this. */
+    (void)reply(s, c, RPL_SASLSUCCESS, NULL, 0, "SASL authentication successful");
     auth_wipe_credential(payload, authzid, authcid, passwd);
     commands_state_update(s, c);
 }
