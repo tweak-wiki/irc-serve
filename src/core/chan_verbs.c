@@ -1142,6 +1142,14 @@ int chan_admit(server_t *s, conn_t *c, chan_t *ch, unsigned flags)
     extended.params = extended_params;
     extended.nparams = 2;
     deliver_state_change_forms(s, c, ch, "JOIN", prefix, &plain, &extended);
+    if (chan_origin_is_self(s, ch) == 0) {
+        /* The actor's own echo is not a local write (3.1): the non-owned row
+         * forwarded without addressing anyone local, so say it to the joiner. */
+        const char *echo[1];
+
+        echo[0] = ch->name;
+        (void)send_line(s, c, prefix, "JOIN", echo, 1);
+    }
 
     announce_join_away(s, c, ch, prefix);
     send_topic(s, c, ch);
@@ -1435,6 +1443,14 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
 
             params[0] = clean;
             deliver_state_change(s, c, ch, "TOPIC", prefix, params, 1);
+            /* The actor's own echo (3.1): the forward reached no local member. */
+            {
+                const char *echo[2];
+
+                echo[0] = ch->name;
+                echo[1] = clean;
+                (void)send_line(s, c, prefix, "TOPIC", echo, 2);
+            }
             printf("[observable] chan_topic_forward: channel=%s nick=%s in_len=%zu "
                    "kept_len=%zu forwarded=1 reason=CONTROL_BYTES\n",
                    ch->name, c->nick, in_len, kept);
@@ -1689,6 +1705,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
     size_t raw_reason_len;
     char prefix[CONN_HOSTMASK_MAX];
     const char *params[4];
+    chan_verdict_t verdict;
 
     if (m->nparams < 2) {
         (void)reply_refused(s, c, "KICK", NULL, "461", NULL, 0,
@@ -1838,7 +1855,8 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         }
         return;
     }
-    if (authority_ok(s, c, ch, "KICK", 1) == CHAN_VERDICT_REFUSED) {
+    verdict = authority_ok(s, c, ch, "KICK", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
         return; /* 437 already sent */
     }
     /* NOT A FORWARD CASE, and the reason is 2.2 rather than 3.1. A KICK is only
@@ -1865,6 +1883,15 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
     params[0] = target->c->nick;
     params[1] = reason;
     deliver_state_change(s, c, ch, "KICK", prefix, params, 2);
+    if (verdict == CHAN_VERDICT_FORWARD) {
+        /* The actor's own echo (3.1): the forward reached no local member. */
+        const char *echo[3];
+
+        echo[0] = ch->name;
+        echo[1] = target->c->nick;
+        echo[2] = reason;
+        (void)send_line(s, c, prefix, "KICK", echo, 3);
+    }
     /* ANNOUNCED, on the same rule as the away message and the topic: silent
      * mutation is its own defect, and the member who sees a shortened reason has no
      * way to know the kicker wrote something longer. The count is what separates
@@ -2450,6 +2477,17 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             nfwd++;
         }
         deliver_state_change(s, c, ch, "MODE", prefix, fwd, nfwd);
+        /* The actor's own echo (3.1): the forward reached no local member. */
+        {
+            const char *echo[2 + IRC_MAX_PARAMS];
+            int necho = 0;
+
+            echo[necho++] = ch->name;
+            for (int k = 0; k < nfwd; k++) {
+                echo[necho++] = fwd[k];
+            }
+            (void)send_line(s, c, prefix, "MODE", echo, necho);
+        }
         printf("[observable] chan_mode_forward: channel=%s nick=%s modes=%s "
                "in_len=%zu kept_len=%zu forwarded=1 reason=CONTROL_BYTES\n",
                ch->name, c->nick, m->params[1], in_len, kept);
