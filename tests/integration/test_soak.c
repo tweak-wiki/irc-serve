@@ -14,7 +14,10 @@
  * PORTABILITY: fd/RSS sampling reads /proc/<pid> and exists only on Linux
  * (__linux__). Elsewhere both samplers return -1 and the growth asserts are
  * skipped; the functional tail (a fresh client still registers and chats
- * after the load) runs everywhere, so the test still earns its place.
+ * after the load) runs everywhere, so the test still earns its place. Under
+ * ASan/TSan the RSS half is additionally skipped (their runtimes retain
+ * freed memory by design; LSan, which runs in the same jobs, is the leak
+ * oracle there) while the fd half still runs.
  *
  * NO FIXED sleep(): the load loop paces itself off CLOCK_MONOTONIC and the
  * link re-establishment after the flap is an nf_expect() deadline wait.
@@ -332,6 +335,26 @@ int main(void)
                      "fd growth: baseline %ld, after soak %ld", base_fds,
                      end_fds);
     }
+    /* No RSS assert under a sanitizer runtime: ASan's quarantine and TSan's
+     * shadow deliberately retain freed memory, so resident size grows with
+     * churn there even when nothing leaks (measured +4.4 MiB on a clean
+     * run). The leak oracle in those jobs is LSan, which fails the run at
+     * child exit before this line is reached. The fd assert above -- the
+     * sharper signal, since fds are never quarantined -- runs everywhere. */
+    /* Apple Clang predefines neither __SANITIZE_*__ macro, so both spellings
+     * are asked: __has_feature where it exists, the GCC macros elsewhere. */
+#ifdef __has_feature
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define SOAK_SANITIZER_RSS_SKIP 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define SOAK_SANITIZER_RSS_SKIP 1
+#endif
+#ifdef SOAK_SANITIZER_RSS_SKIP
+    (void)base_rss;
+    (void)end_rss;
+#else
     if (base_rss > 0 && end_rss > 0) {
         long slack = base_rss / 10;
 
@@ -342,6 +365,7 @@ int main(void)
                      "RSS growth: baseline %ld KiB, after soak %ld KiB",
                      base_rss, end_rss);
     }
+#endif
 
     tc_close(&fresh);
     TF_CHECK_MSG(nf_stop(&b) == 0, "node B exited nonzero: %s", b.out);
