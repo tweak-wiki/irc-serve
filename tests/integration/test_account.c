@@ -1155,6 +1155,71 @@ static void test_registry_without_credentials(const char *registry)
 }
 
 /* ==========================================================================
+ * CASE 6b (#539): LOGIN ATTEMPTS ARE CAPPED PROCESS-WIDE
+ * ==========================================================================
+ * The per-connection throttle (3 failures) dies with the connection, so a
+ * reconnect+login loop used to buy 3 fresh KDFs per reconnect on the loop
+ * thread. The node-wide verification budget refuses with RATE_LIMITED once
+ * the burst is spent -- without hashing -- and a legitimate login retries
+ * cleanly once the bucket refills. */
+static void test_login_rate_limited(const char *sasl, const char *registry)
+{
+    nf_node_t node;
+    client_t cl;
+    int i;
+
+    spawn_node(&node, sasl, registry, "login attempt cap");
+    TF_CHECK_MSG(nf_expect(&node, "accounts=loaded", T_READY_MS) == 0,
+                 "the registry did not load");
+    /* One bad password per fresh connection: no connection ever trips its own
+     * 3-failure throttle, so only the process-wide budget can refuse. Attempts
+     * keep coming until the node says RATE_LIMITED (send-until-refused): each
+     * attempt costs a KDF on the loop thread, and under a sanitizer that KDF
+     * is slow enough that the 2/sec trickle refills a meaningful number of
+     * tokens mid-loop, so no fixed count both fits the fast builds and
+     * exhausts the slow ones. The cap is a hang-guard, not a budget: on a
+     * live node the loop always exits through the refusal. */
+    {
+        int limited = 0;
+
+        for (i = 0; i < 300 && !limited; i++) {
+            char nick[32];
+
+            (void)snprintf(nick, sizeof nick, "flooder%d", i);
+            client_connect(&cl, &node, nick);
+            CUR_CLIENT = &cl;
+            authenticate("alice", "wrong password");
+            /* Wait for the refusal BEFORE closing: a close with the request still
+             * unread lets the kernel discard it, and a login the loop never
+             * dispatched spends no token. */
+            TF_CHECK_MSG(tc_expect(&cl.c, " 904 ", T_IO_MS) == 0,
+                         "no 904 for flood attempt %d", i);
+            /* The 904's text names the refusal: the budget's is "too many
+             * attempts", a bad password's is "did not verify". */
+            limited = (strstr(tc_buffer(&cl.c), "too many attempts") != NULL);
+            tc_close(&cl.c);
+        }
+        TF_CHECK_MSG(limited, "300 rapid logins across fresh connections never "
+                     "hit the verification budget");
+    }
+
+    /* ...and the budget refills: after 5s (2/sec against a burst of 64) a
+     * correct credential verifies and establishes the account. */
+    sleep(5);
+    client_connect(&cl, &node, "alice");
+    CUR_CLIENT = &cl;
+    authenticate("alice", "correct horse");
+    TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
+                 "a correct credential after the refill was not accepted");
+    TF_CHECK_MSG(nf_expect(&node, "account=alice verified=1", T_IO_MS) == 0,
+                 "the retried login did not establish the account identity");
+
+    nf_stop(&node);
+    nf_free(&node);
+    tc_close(&cl.c);
+}
+
+/* ==========================================================================
  * CASE 7: THE `account` TAG, PER DESTINATION
  * ==========================================================================
  * Five clients on one node with a registry, chosen so that each row of the
@@ -2565,6 +2630,8 @@ int main(void)
 
     /* ---- accounts without logins ---- */
     test_registry_without_credentials(acct_good);
+    /* ---- #539: the process-wide login attempt cap ---- */
+    test_login_rate_limited(sasl_good, acct_good);
 
     (void)unlink(sasl_good);
     (void)unlink(sasl_only);

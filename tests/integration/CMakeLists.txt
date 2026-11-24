@@ -617,6 +617,11 @@ irc_add_integration_test(test_fed_skick_log test_fed_skick_log.c)
 # removed the member first, and the test says so and pokes deliberately.
 irc_add_integration_test(test_fed_burst test_fed_burst.c)
 
+# #541: an acknowledged resync is not re-sent. A resync after a change sends
+# in full, an unchanged one is skipped (fed_burst_skipped, nothing on the
+# wire), and a later change resyncs in full again.
+irc_add_integration_test(test_fed_incr_resync test_fed_incr_resync.c)
+
 # 2.4: the inbound guard chain, driven by a peer that is trying to get past it.
 # Every guard is a refusal of a line a well-behaved node would never send, so the
 # far end of the link has to be a raw socket rather than a second node.
