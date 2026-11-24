@@ -44,8 +44,14 @@
 /* #168: per-connection flood token bucket. Burst 256 covers the existing
  * per-iteration line budget (128) plus pipelined registration churn, so an
  * honest client burst is unaffected; the 50 lines/sec trickle is what a
- * flooder cannot outrun. CONN_SERVER links are exempt. */
+ * flooder cannot outrun. #540: peer links get a larger bucket instead of an
+ * exemption, so one rogue peer cannot aim unlimited parse work at the loop
+ * thread. 16384 is 128 per-tick lines times 128 ticks: it holds the largest
+ * single burst transaction the protocol allows (1 MiB, ~5k minimal records)
+ * with room to spare, while a rogue peer still earns only the 50/sec
+ * trickle once it is spent. */
 #define RATE_BURST 256.0
+#define RATE_BURST_SERVER 16384.0
 #define RATE_REFILL_PER_SEC 50.0
 
 /* The PROCESS stop latch. sig_atomic_t because it is written from a signal
@@ -103,18 +109,25 @@ void poll_loop_clear_stop_for(server_t *s)
 /* #168: refill one connection's bucket toward the burst. A stamp of 0 means
  * "never refilled" (conn_new() zeroes the struct), so the first call grants
  * the full burst and the constant lives here alone. */
+/* #540: the one condition that sizes a link's bucket: peers carry aggregate
+ * traffic, so theirs is larger, but it is still a bucket. */
+static double rate_cap(const conn_t *c)
+{
+    return (c->kind == CONN_SERVER) ? RATE_BURST_SERVER : RATE_BURST;
+}
 static void rate_refill(conn_t *c, uint64_t now_ms)
 {
+    double cap = rate_cap(c);
     if (c->rate_last_ms == 0u) {
-        c->rate_tokens = RATE_BURST;
+        c->rate_tokens = cap;
         c->rate_last_ms = now_ms;
         return;
     }
     if (now_ms > c->rate_last_ms) {
         c->rate_tokens += (double)(now_ms - c->rate_last_ms) *
                           (RATE_REFILL_PER_SEC / 1000.0);
-        if (c->rate_tokens > RATE_BURST) {
-            c->rate_tokens = RATE_BURST;
+        if (c->rate_tokens > cap) {
+            c->rate_tokens = cap;
         }
         c->rate_last_ms = now_ms;
     }
@@ -159,9 +172,10 @@ static void conn_readable(server_t *s, conn_t *c)
             return;
         }
         /* #224: every framed line is charged before parsing, rejected lines
-         * included, so invalid input cannot dodge the flood controls. */
-        limited = (c->kind != CONN_SERVER && c->rate_tokens < 1.0);
-        if (c->kind != CONN_SERVER && !limited) {
+         * included, so invalid input cannot dodge the flood controls. #540:
+         * peer lines spend from their larger bucket like any other line. */
+        limited = (c->rate_tokens < 1.0);
+        if (!limited) {
             c->rate_tokens -= 1.0;
         }
         frame_last = (--budget == 0u);
@@ -189,11 +203,12 @@ static void conn_readable(server_t *s, conn_t *c)
         } else {
             s->n_lines++;
         }
-        /* #168: each dispatched client line spends one token. Empty means the
+        /* #168: each dispatched line spends one token. Empty means the
          * sender is flooding: one 417, then CLOSING, and the reaper collects
-         * the fd at step 7. The reply precedes the mark because the reply
-         * path refuses a CLOSING target. "Once" needs no flag: a CLOSING
-         * conn is never read again. */
+         * the fd at step 7. (On a peer link the 417 is refused -- numerics
+         * never go to peers -- and the close is the whole response.) The
+         * reply precedes the mark because the reply path refuses a CLOSING
+         * target. "Once" needs no flag: a CLOSING conn is never read again. */
         if (limited) {
             {
                 int need_flush;

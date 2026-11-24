@@ -237,6 +237,10 @@ irc_add_integration_test(test_eintr test_eintr.c)
 # gets one 417 and a close, an honest client is unaffected.
 irc_add_integration_test(test_flood_rate test_flood_rate.c)
 
+# #540: peer links get the larger bucket (16384) instead of an exemption; a
+# legit netburst is absorbed, a back-to-back flood is capped.
+irc_add_integration_test(test_flood_peer test_flood_peer.c)
+
 # #282: the two writer interactions with no N=4 coverage -- TLS pending-drain
 # under writers (byte-exact PONG oracle; TSan is the race oracle) and
 # 417-flush-deferred-to-writers (417 before close plus a short pump).

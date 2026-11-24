@@ -4,7 +4,8 @@
  * refilling at 50/sec. Each dispatched client line spends one token; an empty
  * bucket means the sender is flooding, and the node answers that line with one
  * 417, flushes it, marks the connection CLOSING, and lets the reaper collect
- * the fd. CONN_SERVER links are exempt and never spend.
+ * the fd. CONN_SERVER links spend from a larger bucket instead (16384, #540;
+ * see test_flood_peer.c).
  *
  * Two clients prove the two halves: a flooder that sends 300 PINGs back to
  * back (registration spends 2 tokens, so 302 spend against a 256 burst -- the
