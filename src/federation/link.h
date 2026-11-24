@@ -355,6 +355,15 @@
 #define IRC_FED_ADVERTISE_MS IRC_FED_KEEPALIVE_MS
 #endif
 
+/* How long fed_send_shutdown() waits, across ALL links, for a saturated peer
+ * to become writable before it gives up and closes. 500, because the shutdown
+ * acceptance is "out within ~1 s with a saturated peer": half the budget
+ * flushes, the other half is the receive drain and the close walk. One
+ * deadline shared by every link, so ten slow peers cost no more than one. */
+#ifndef FED_SHUTDOWN_FLUSH_MS
+#define FED_SHUTDOWN_FLUSH_MS 500u
+#endif
+
 #ifndef IRC_FED_KEEPALIVE_MS
 #define IRC_FED_KEEPALIVE_MS 30000
 #endif
@@ -891,14 +900,26 @@ void fed_on_federate(server_t *s, conn_t *c, const message_t *m);
  * on the same link -- not a tick, not a sweep, not the socket closing. */
 int fed_mark_clean_leave(server_t *s, server_link_t *link, int set);
 
+/* Bounded write drain for one link's goodbye, and the local clean_leave mark
+ * when the budget runs out: `c`'s queue is pumped until empty or until
+ * `flush_stop` (a server_now_ms() deadline, one per goodbye shared by every
+ * link), polling for POLLOUT between pumps. The caller holds c->wq_lock.
+ * Returns 1 flushed, 0 left pending (link marked clean locally, observable
+ * printed). Exported for the shutdown-drain test, which drives it against a
+ * socketpair; the only other caller is fed_send_shutdown(). */
+int fed_drain_writes(server_t *s, server_link_t *link, conn_t *c,
+                     uint64_t flush_stop);
+
 /* Send `SHUTDOWN` to every ESTABLISHED link and return how many carried it.
  * Called from server_shutdown() and from nowhere else, which is what a graceful
  * leave IS: this node says it is going and then it goes.
  *
- * BEST EFFORT, and the limit is stated because it is real: the line is queued and
- * the queue is drained by a single conn_pump() per link, so on a lossy path a
- * SHUTDOWN can fail to arrive. That degradation is CORRECT rather than a defect:
- * a peer that does not hear it sees a closed socket, applies its retry policy,
+ * BEST EFFORT, and the limit is stated because it is real: the line is queued
+ * and the write queue is flushed by a bounded poll(WRITE) wait
+ * (FED_SHUTDOWN_FLUSH_MS, one deadline shared by every link) after the first
+ * pump, so a peer that stays unwritable past the budget still loses the
+ * SHUTDOWN. That degradation is CORRECT rather than a defect: a peer that
+ * does not hear it sees a closed socket, applies its retry policy,
  * and finds the node gone. The cost of sending it is that a clean leave
  * occasionally reads as a failure; the cost of not sending it is that EVERY clean
  * leave reads as one. `reason` is taken and not sent -- 4.3 has no SHUTDOWN and
