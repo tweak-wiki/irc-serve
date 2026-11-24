@@ -1704,8 +1704,8 @@ static const char *const k_info[] = {
     "  other letter is refused with 472 rather than silently ignored.",
     "- user modes: none. 004 advertises i and nothing evaluates it, so a user mode",
     "  offered with MODE is refused too.",
-    "- federation: FEDERATE link handshake, the S-verb set, SBURST resync,",
-    "  per-node (origin,epoch,id) dedup, hop ceiling 10.",
+    "- notify locality: SETNAME/AWAY/INVITE notifications are node-local only,",
+    "  not forwarded: members on other nodes keep burst-time values until resync.",
     "- no authentication, no services, no operator flags: PASS is recorded and not",
     "  checked, and CHOPER is refused with 464 because there is nothing to grant.",
     "- free software under the GNU AGPL v3.0 or later; see LICENSE and NOTICE."
