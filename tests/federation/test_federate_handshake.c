@@ -1,5 +1,5 @@
 /* Real federation handshake state-machine tests, exercising
- * federation_handshake.c with an explicit caller-owned context: valid
+ * federation/handshake.c with an explicit caller-owned context: valid
  * transitions, rejected transitions observable via returns, state unchanged
  * on rejection, failure/timeout reachability, and NULL safety. */
 #include <assert.h>

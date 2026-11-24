@@ -91,10 +91,10 @@ trap cleanup EXIT
 # One fault: stage the tree, apply the fault, build it SANITIZED, and require the
 # cell's own probe to go red AND the cell's own report to change.
 #
-# WHY IT READS ASAN_RUN_OPTS OUT OF THE (POSSIBLY FAULTED) SCRIPT. The fault under
-# test is one word in that variable, so re-typing the options here would prove this
-# script's own copy of them. Everything the tooth asserts -- the options, the probe's
-# verdict, the report's text -- comes out of the faulted tree.
+# WHY IT READS THE OPTIONS OUT OF THE (POSSIBLY FAULTED) TREE. The fault under test
+# is one word in gate-lib.sh's variable, so re-typing the options here would prove
+# this script's own copy of them. Everything the tooth asserts -- the options, the
+# probe's verdict, the report's text -- comes out of the faulted tree.
 # ---------------------------------------------------------------------------
 run_asan_option_fault() {
     local name=$1 script=$2 expect_class=$3
@@ -150,11 +150,10 @@ run_asan_option_fault() {
     fi
     note "    probe binary is newer than every source in the staged tree"
 
-    # The options, read out of the faulted tree.
-    local opts
-    opts=$(sed -n 's/^ASAN_RUN_OPTS="\(.*\)"$/\1/p' "$d/scripts/gate-linux-cell.sh" | head -1)
+    # The options, read out of the faulted tree's single definition.
+    opts=$(. "$d/scripts/gate-lib.sh" && printf '%s' "$GATE_ASAN_OPTS_LINUX")
     if [ -z "$opts" ]; then
-        note "FAULT $name: ASAN_RUN_OPTS was not readable from the faulted script"
+        note "FAULT $name: gate-lib.sh was not readable from the faulted tree"
         FAIL=$((FAIL + 1)); FAILED_LIST="$FAILED_LIST $name(noopts)"; return
     fi
     note "    ASAN_OPTIONS from the faulted cell: $opts"
@@ -241,7 +240,7 @@ control_green() {
         FAIL=$((FAIL + 1)); FAILED_LIST="$FAILED_LIST control(noprobe)"; return
     fi
     local opts rc=0
-    opts=$(sed -n 's/^ASAN_RUN_OPTS="\(.*\)"$/\1/p' "$root/scripts/gate-linux-cell.sh" | head -1)
+    opts=$(. "$root/scripts/gate-lib.sh" && printf '%s' "$GATE_ASAN_OPTS_LINUX")
     note "--- control: ASAN_OPTIONS from the SHIPPED cell: $opts"
     docker run --rm -e ASAN_OPTIONS="$opts" -v "$d:/build" -w /build "$IMAGE" \
         b/tests/integration/asan_coverage_probe >"$d.probe.log" 2>&1 || rc=$?
