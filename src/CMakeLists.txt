@@ -141,6 +141,10 @@ add_library(irc_core STATIC
   # attach/get/detach) split out of server.c. The lifecycle, link/dial
   # registries and shutdown stay there; this file holds the registries.
   core/server_registry.c
+  # #543: the nonblocking outbound-dial FSM (dial/collect/progress/count) split
+  # out of server.c. The lifecycle, link lookup and shutdown stay there; this
+  # file holds the dial side of 3.4.
+  core/server_dial.c
   core/channel.c
   core/poll_loop.c
   core/reply.c

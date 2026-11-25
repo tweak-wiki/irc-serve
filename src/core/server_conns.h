@@ -5,7 +5,8 @@
  * shutdown stay in server.c. The dispatch-side declarations live in
  * core/server.h -- the registry functions were already declared there -- so
  * this header only declares the two accept-time helpers shared with the
- * listeners and dial that stay in server.c, and marks the seam.
+ * listeners in server.c and the dial FSM in core/server_dial.c, and marks the
+ * seam.
  */
 #ifndef IRC_CORE_SERVER_CONNS_H
 #define IRC_CORE_SERVER_CONNS_H
