@@ -31,63 +31,56 @@ into a temporary one that clears on the next resync.
 
 ## Status
 
-**A working server. 100 tests, 0 skipped, 0 code-scanning alerts, 0 required
-third-party dependencies.**
+**A working server, released as [v0.8.0-federation](https://github.com/tweak-wiki/irc-serve/releases/tag/v0.8.0-federation).
+~150 tests, 0 skipped, 0 code-scanning alerts, 0 required third-party dependencies.**
 
-There is no release. `irc-serve --help` prints the version — one definition, in
-`src/core/server.h`, which CMake, the packaging and every report of it read; the
-**repository's** newest tag is `backup-before-claude-rewrite-3` (`14d64cd`), a
-**safety marker** from the history rewrite rather than a release. Newest is by
-`creatordate`, and it is read from `origin` rather than from your checkout — a tag
-that exists only in one local clone is not a tag this project has. The newest *phase*
-tag is `v0.7.0-messaging`, and the newest *release* is nothing, because there has never
-been one.
+`irc-serve --help` prints the version — one definition, in `src/core/server.h`,
+which CMake, the packaging and every report of it read; `test_version_truth`
+fails the build if any copy disagrees. Tags follow `v0.N.0-<area>`; the newest
+is `v0.8.0-federation`, the federation-integration release (actor echo,
+inbound S-verb emission, SASL 903–908, remote targets, departure propagation),
+verified live on a two-node staging mesh.
 
 | | |
 |---|---|
-| Tests | **100 passing, 0 skipped**, 0 failing |
+| Tests | **~150 passing, 0 skipped**, 0 failing |
 | Warnings | **0**, on gcc-16, upstream Clang 23 and Apple clang 21 (`-Weverything`), Release **and** Debug |
 | Sanitizers | ASan + UBSan clean locally; **ASan + LeakSanitizer + UBSan clean on Linux**, on the CI job and in `scripts/gate-linux-cell.sh` |
 | Code scanning | **0 open alerts** (CodeQL) |
 | Language | strict C11, **no required third-party libraries**; TLS (`-DWITH_TLS=ON`) adds the optional one |
-| Size | ~45,400 lines of C (`src/` only) |
+| Size | ~53,400 lines of C (`src/` only) |
 
 Every test that was ever a CTest skip is now a real test and
 `tests/known_skips.txt` is **empty**. What that buys is a bound on **behaviour**: a
 green suite means every registered test did what it says it does, on three compilers,
 two configurations each, with and without TLS. It is **not** a statement about
-coverage — 14 of the registered tests are unit-style, they exercise functions rather
-than the wire, and no green run can distinguish "the wire path is covered" from "the
-wire path is untested and nothing noticed". Reading this table as a coverage claim is
-the error this paragraph used to make, and it is worth naming because a status table
+coverage — the unit-style tests exercise functions rather than the wire, and no
+green run can distinguish "the wire path is covered" from "the wire path is
+untested and nothing noticed". Reading this table as a coverage claim is the
+error this paragraph used to make, and it is worth naming because a status table
 is exactly where a reader goes looking for one.
 
 **What this status does and does not mean, precisely.** The wire contract is
-frozen and documented, and the tree is clean under three compilers and three
-sanitizers. Whether the suite covers *all* of that contract is a question about the
+frozen and documented, the tree is clean under three compilers and three
+sanitizers, and the headline federation paths are staging-verified against real
+sockets. Whether the suite covers *all* of that contract is a question about the
 tests rather than about their result, and it has no answer in this table. It does **not** mean hardened for the open
 internet — see the limits below and [SECURITY.md](SECURITY.md).
-
-**And it used to claim `v1.0.0`, which was not true.** That claim was deliberate
-when it was written — it was a *maturity* milestone, not a release, and it was
-bounded at the time by the paragraph above — but it was still a version number a
-reader would take as a release, in a project with no 1.x history, no `v1.0.0` tag,
-and TLS landing in its final weeks. The bounded sentence was worth keeping; the
-number was not, so the number is gone and the sentence stays.
 
 ### Verified behaviour
 
 Checked against a **clean `git clone`**, a Release build and a **real client
-socket** — not inferred from the source:
+socket** — not inferred from the source — plus a live two-node staging mesh
+for everything federated:
 
 - Registration `001`–`005`, MOTD `372`/`375`/`376`, and `421` for an unknown verb
   naming the verb it was given
 - `JOIN` `PART` `TOPIC` `NAMES` `LIST` `KICK` `MODE`, `+o`/`+v` rendering as `@`/`+`,
-  origin ownership, single-writer refusal `437`
+  origin ownership, single-writer refusal `437`, per-conn channel cap `405`
 - `WHO` with `352` and `315` end-of; `WHOIS` with `311` `312` `319` `317` `318`,
   plus `301` away, `330` account and `319`'s `@`/`+` channel sigils
-- `401` unknown target, `442` not on that channel, `461` missing parameter, `482`
-  lacking authority
+- `401` unknown target, `441` on-server-but-elsewhere, `442` not on that channel,
+  `461` missing parameter, `482` lacking authority, `417` over bound, `474` banned
 - `MODE #chan +b` as a **query**: one `367` per mask then `368`, and `478` when
   the list is at `CHAN_MAX_BANS`
 - `254` from `LUSERS` once any channel exists, absent while the count is zero
@@ -112,14 +105,17 @@ socket** — not inferred from the source:
   [SECURITY.md](SECURITY.md)
 - Every RFC 2812 numeric, what this node does with each one and why — see
   [docs/RFC2812_CONFORMANCE.md](docs/RFC2812_CONFORMANCE.md)
-- **Federation** — peer links, the `FEDERATE` handshake, the S-verb set, `SBURST`
-  resync driven on link-up, `(origin, epoch, id)` dedup, hop ceiling 10, and
-  backoff with a retry budget on a dropped link
-- **IRCv3** — `CAP` negotiation, SASL PLAIN, real tag escaping, `multi-prefix`,
-  `message-ids`, `account-tag`, `account-notify`, `extended-join`,
-  `extended-isupport`, `userhost-in-names`, `setname`, `echo-message`,
-  `standard-replies`, `away-notify`, `batch`, `labeled-response`, `invite-notify`,
-  `tls` and `sts` (Strict Transport Security)
+- **Federation** — peer links, the `FEDERATE` handshake (exact version match),
+  the S-verb set, `SBURST` resync driven on link-up, `(origin, epoch, id)` dedup
+  (exactly-once delivery verified), hop ceiling 10, backoff with a retry budget
+  on a dropped link, actor echo on forwarded state changes, inbound S-verbs
+  rendered as client lines, remote KICK/MODE/WHOIS targets, departure
+  propagation, and SHUTDOWN goodbye flushed on clean stop
+- **IRCv3** — `CAP` negotiation, SASL PLAIN with `903`–`908` numerics, real tag
+  escaping with `msgid`, `multi-prefix`, `message-ids`, `account-tag`,
+  `account-notify`, `extended-join`, `userhost-in-names`, `setname`,
+  `echo-message`, `standard-replies` (`FAIL` shapes), `away-notify`, `batch`,
+  `labeled-response`, `invite-notify`, `tls` and `sts`
 - **TLS** — optional, off by default, and the build has **no required third-party
   dependency** without it. With `-DWITH_TLS=ON`: implicit TLS on its own port
   (RFC 7194's 6697), `STARTTLS` on the plaintext port with the IRCv3 refusal rules,
@@ -134,12 +130,16 @@ Each is documented where it is excluded.
 
 | Missing | Why |
 |---|---|
-| Rate limiting | none. A client may open connections as fast as the node accepts them |
-| Operator (IRCop) model | none. `CHOPER` answers `482` for every request by design, so it cannot succeed |
+| Rate limiting | Flood token bucket + 417 exists per connection; no global connection-rate limit. A client may open connections as fast as the node accepts them |
+| Operator (IRCop) model | none. `CHOPER`, `KILL` and `KNOCK` are refused by design (`464`/`481`, `482`), so none can succeed |
 | Services (NickServ, ChanServ) | none. Accounts exist but are **operator-created by editing a file**; `REGISTER` is refused `482` |
 | Account **federation** | the account registry is per node. Two nodes with two registries **disagree** about who somebody is, and `+account` deliberately does not cross a link |
+| Cross-node notifies | `SETNAME`/`AWAY`/`INVITE` notify only the originating node's members until the 4.3 wire bump lands (tracked separately) |
 | `chathistory` | needs per-client message history, which conflicts with §2.2's disposal rule and the fail-closed posture. A design conflict, not a task |
 | `oper-tag`, `account-extban` | blocked on a subsystem that does not exist — an operator model, and a ban-expression parser |
+| `TAGMSG` relay | the verb answers `421`; typing indicators are not relayed (tracked) |
+| User `MODE <nick>` | answered `403`; user-mode query/set is not implemented (tracked) |
+| `JOIN 0` (part-all) | answered `403`; the bulk-leave special case is not implemented (tracked) |
 | WebSocket transport | a second transport for the `core/transport.h` interface, which now has two implementations |
 | `sasl-3.2` (SCRAM/EXTERNAL) | a crypto surface for *authentication*, which is a different problem from *transport* encryption and is not solved by TLS |
 | epoll | the `FD_SETSIZE` ceiling of 1024 is accepted and documented; every accept and dial site rejects above it rather than truncating |
@@ -377,11 +377,18 @@ N=0 and at N=4 (`IRC_WRITERS=4`, a test-harness override in
 ## Layout
 
 ```
-src/core/         message, connection, server, poll_loop, reply, channel, commands
-src/federation/   link, verbs, burst, dedup
-src/              node_main, protocol_parse, ircv3_tags, sasl_framework
-tests/            unit, contract, benchmark, integration, harness
-docs/             SERVER_DESIGN, DEVELOPMENT, SPEC_TRACKING, STATS
+src/core/         message, connection, server_*, poll_loop, reply, channel,
+                 chan_verbs*, commands_*, fanout_*, cap, batch, resume, strtab
+src/federation/   link*, dispatch, encode, burst, dedup, verbs*, state,
+                 membership, tick, departure, advertise, notify, nickreg
+src/              node_main, ircv3_tags, sasl_framework, account_store, tls_*
+tests/            integration, federation, protocol, compliance, contracts,
+                 fuzz, benchmark, harness
+docs/             SERVER_DESIGN, DEVELOPMENT, SPEC_TRACKING, RFC2812_CONFORMANCE,
+                 DEPLOY, STATS
+openspec/specs/  channels, auth, messaging, federation, tls, server-core,
+                 threading, usage
+packaging/       systemd units, debian, arch, homebrew
 ```
 
 ## Documentation
@@ -391,8 +398,11 @@ docs/             SERVER_DESIGN, DEVELOPMENT, SPEC_TRACKING, STATS
 | [`docs/SERVER_DESIGN.md`](docs/SERVER_DESIGN.md) | Architecture and the phase plan. Start here. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Branching, what `main` enforces, runner setup, rollback |
 | [`docs/SPEC_TRACKING.md`](docs/SPEC_TRACKING.md) | Per-feature status against RFC 1459 / 2812 / IRCv3 |
+| [`docs/RFC2812_CONFORMANCE.md`](docs/RFC2812_CONFORMANCE.md) | Every numeric, what this node does with each one and why |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Staging/stable slots, the deploy workflow, sudoers allowlist |
 | [`SECURITY.md`](SECURITY.md) | Threat model, what TLS does and does not cover |
 | [`docs/STATS.md`](docs/STATS.md) | Generated test counts |
+| [`openspec/specs/`](openspec/specs/) | Executable specs: channels, auth, messaging, federation, tls, server-core, threading, usage |
 
 ## Contributing
 
