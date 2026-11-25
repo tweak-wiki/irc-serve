@@ -158,21 +158,23 @@ int main(void)
      * is why this fixture enables writers above. Looking is the check, the
      * same move test_close_sites.c makes: the report must use the locked
      * accessor. Literals are stripped by the reader, so this is code only. */
+    /* #543 TU-12: server_queue()/server_queue_quiet() moved verbatim from
+     * server.c to server_conns.c; the shape asserted below is unchanged. */
     {
         char code[TF_SRC_MAX];
         size_t len = 0;
-        long got = tf_read_code_into(code, sizeof code, "src/core/server.c",
-                                     &len);
+        long got = tf_read_code_into(code, sizeof code,
+                                     "src/core/server_conns.c", &len);
         const char *fn;
         const char *use;
         const char *next;
 
         TF_CHECK_MSG(got >= 0,
-                     "could not read src/core/server.c (is IRCSERVE_SRC_DIR "
-                     "set?)");
+                     "could not read src/core/server_conns.c (is "
+                     "IRCSERVE_SRC_DIR set?)");
         fn = strstr(code, "int server_queue_quiet(server_t");
         TF_CHECK_MSG(fn != NULL,
-                     "could not find server_queue() in server.c");
+                     "could not find server_queue() in server_conns.c");
         use = strstr(fn, "conn_write_pending_locked(c)");
         next = strstr(fn, "int server_reap(server_t");
         TF_CHECK_MSG(use != NULL && next != NULL && use < next,
