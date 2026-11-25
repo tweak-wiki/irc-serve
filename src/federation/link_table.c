@@ -4,9 +4,10 @@
  * (fed_link_set_state() + fed_link_of_conn() + fed_link_new() +
  * fed_link_set_tls() + fed_link_configure()). All five stay declared in
  * federation/link.h (tick.c/link_config.c/link_guard.c/link_accept.c/
- * link_dump.c precedent, no new header); no static helpers move. The reason
- * spellings (FED_REASON_NAME) + fed_federate_reason() and the FEDERATE
- * exchange (fed_queue_federate()) stay in link.c.
+ * link_dump.c/link_queue.c precedent, no new header); no static helpers move.
+ * The reason spellings (FED_REASON_NAME) + fed_federate_reason() stay in
+ * link.c; the FEDERATE exchange sender (fed_queue_federate()) is now in
+ * federation/link_queue.c (issue #543 TU-40).
  */
 #include "federation/link.h"
 
