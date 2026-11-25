@@ -1149,6 +1149,62 @@ static void test_join_refuses_long_name(nf_node_t *node)
     tc_close(&a.c);
 }
 
+/* RFC 2812 3.2.1: a bare `JOIN 0` parts the client from every channel (issue
+ * #667). Zero channels is a no-op; `JOIN 0,#x` is not a bare 0. */
+static void test_join_zero(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+    size_t mb;
+
+    /* Zero channels: no-op, no error. */
+    client_open(&a, node, "j0idle");
+    ma = tc_received(&a.c);
+    client_send(&a, "JOIN 0");
+    (void)send_and_drain(&a, "j0-empty");
+    expect_absent_from(tc_buffer(&a.c), ma, "no error for JOIN 0 with no channels",
+                       " 403 ");
+    expect_absent_from(tc_buffer(&a.c), ma, "no error for JOIN 0 with no channels",
+                       " 461 ");
+    expect_absent_from(tc_buffer(&a.c), ma, "no PART echo for JOIN 0 with no channels",
+                       " PART ");
+
+    /* Two channels: one PART echo each, then NAMES shows nothing. */
+    client_send(&a, "JOIN #j0a");
+    (void)send_and_drain(&a, "j0-join-a");
+    client_send(&a, "JOIN #j0b");
+    (void)send_and_drain(&a, "j0-join-b");
+    ma = tc_received(&a.c);
+    client_send(&a, "JOIN 0");
+    (void)send_and_drain(&a, "j0-leave");
+    expect_line(&a.c, "PART echo for the first channel on JOIN 0",
+                ":j0idle!j0idle@127.0.0.1 PART #J0A\r\n");
+    expect_line(&a.c, "PART echo for the second channel on JOIN 0",
+                ":j0idle!j0idle@127.0.0.1 PART #J0B\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no 403 for a bare JOIN 0", " 403 ");
+    mb = tc_received(&a.c);
+    client_send(&a, "NAMES #j0a");
+    (void)send_and_drain(&a, "j0-names");
+    expect_absent_from(tc_buffer(&a.c), mb, "NAMES shows nobody after JOIN 0",
+                       " 353 ");
+
+    /* Not a bare 0: the list path answers, with 403 for the 0 element. */
+    client_open(&b, node, "j0mix");
+    client_send(&b, "JOIN #j0c");
+    (void)send_and_drain(&b, "j0-join-c");
+    mb = tc_received(&b.c);
+    client_send(&b, "JOIN 0,#j0d");
+    (void)send_and_drain(&b, "j0-mixed");
+    expect_line(&b.c, "403 for the 0 element of a JOIN list",
+                ":irc.test 403 j0mix 0 :No such channel\r\n");
+    expect_absent_from(tc_buffer(&b.c), mb, "no mass PART for JOIN 0,#j0d",
+                       " PART #J0C");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
+
 /* NAMES and LIST, on a channel and on one that does not exist, and the decision
  * that LIST enumerates channels the requester has not joined. */
 static void test_names_and_list(nf_node_t *node)
@@ -2392,6 +2448,7 @@ int main(void)
     test_part(&node);
     test_join_refuses_empty(&node);
     test_join_refuses_long_name(&node);
+    test_join_zero(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
