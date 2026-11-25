@@ -32,7 +32,7 @@ into a temporary one that clears on the next resync.
 ## Status
 
 **A working server, released as [v0.8.0-federation](https://github.com/tweak-wiki/irc-serve/releases/tag/v0.8.0-federation).
-~150 tests, 0 skipped, 0 code-scanning alerts, 0 required third-party dependencies.**
+153 tests, 0 skipped, 0 code-scanning alerts, 0 required third-party dependencies.**
 
 `irc-serve --help` prints the version — one definition, in `src/core/server.h`,
 which CMake, the packaging and every report of it read; `test_version_truth`
@@ -43,7 +43,7 @@ verified live on a two-node staging mesh.
 
 | | |
 |---|---|
-| Tests | **~150 passing, 0 skipped**, 0 failing |
+| Tests | **153 passing, 0 skipped**, 0 failing |
 | Warnings | **0**, on gcc-16, upstream Clang 23 and Apple clang 21 (`-Weverything`), Release **and** Debug |
 | Sanitizers | ASan + UBSan clean locally; **ASan + LeakSanitizer + UBSan clean on Linux**, on the CI job and in `scripts/gate-linux-cell.sh` |
 | Code scanning | **0 open alerts** (CodeQL) |
