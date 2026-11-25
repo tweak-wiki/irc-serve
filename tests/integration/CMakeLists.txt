@@ -466,6 +466,10 @@ irc_add_integration_test(test_userhost test_userhost.c)
 # stub is which of the other numerics does NOT come back for each input.
 irc_add_integration_test(test_knock test_knock.c)
 
+# #672, IRCv3 TAGMSG relay. Its own file because the property is the relayed
+# bytes on another client's connection, not a numeric on the sender's.
+irc_add_integration_test(test_tagmsg test_tagmsg.c)
+
 # 7/Phase 7, 4.2's LUSERS, ADMIN and INFO. One file rather than three because
 # they are one family with one fixture, and because the file's central assertion
 # is that INFO's list of claims about the node is TRUE -- which is checked by
