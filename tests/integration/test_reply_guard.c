@@ -319,11 +319,16 @@ int main(void)
          * there, and the conn_mark_closing positive moved with
          * handle_quit(). */
         char *conn = tf_read_code("src/core/commands_conn.c", NULL);
+        /* #543 TU-29: the welcome burst (001-005 + MOTD) moved verbatim to
+         * commands_welcome.c; the same two negatives apply there (it answers
+         * through reply() only). */
+        char *welcome = tf_read_code("src/core/commands_welcome.c", NULL);
         char *rep = tf_read_code("src/core/reply.c", NULL);
         const char *at;
         const char *queue_at;
 
-        TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL && conn != NULL,
+        TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL && conn != NULL &&
+                     welcome != NULL,
                      "could not read the sources (is IRCSERVE_SRC_DIR set?)");
 
         TF_CHECK_MSG(!tf_calls(cmds, "server_queue"),
@@ -346,6 +351,13 @@ int main(void)
                      "link, which is exactly what 3 forbids");
         TF_CHECK_MSG(!tf_calls(conn, "conn_pump"),
                      "commands_conn.c calls conn_pump(): a handler has "
+                     "reached around reply() into the socket itself");
+        TF_CHECK_MSG(!tf_calls(welcome, "server_queue"),
+                     "commands_welcome.c calls server_queue(): the burst has "
+                     "reached around reply() and can therefore write to a peer "
+                     "link, which is exactly what 3 forbids");
+        TF_CHECK_MSG(!tf_calls(welcome, "conn_pump"),
+                     "commands_welcome.c calls conn_pump(): the burst has "
                      "reached around reply() into the socket itself");
         /* QUIT must go through conn_mark_closing() so the reaper stays the only
          * close site (3.4). It is asserted here rather than left to
@@ -388,6 +400,7 @@ int main(void)
         free(cmds);
         free(reg);
         free(conn);
+        free(welcome);
         free(rep);
     }
 
