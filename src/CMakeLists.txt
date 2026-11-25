@@ -284,6 +284,10 @@ add_library(irc_core STATIC
   # link.c (issue #543). It is listed here, beside its only production caller,
   # because that is where a reader looking for the rules will look first.
   federation/handshake.c
+  # The FEDERATE admission guard (secret_matches + fed_check_federate()),
+  # split out of link.c (issue #543). Listed beside link.c; the verdict
+  # stays declared in federation/link.h.
+  federation/link_guard.c
   # The departure half: the SQUIT announcement, the link teardown, the clean-leave
   # latch, the shutdown drain and the operator's reset door, split out of link.c
   # (issue #543). Listed beside link.c; link.c reaches fed_link_down() through
