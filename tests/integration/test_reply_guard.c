@@ -314,11 +314,16 @@ int main(void)
          * commands_register.c; the same two negatives apply there, and the
          * nick-claim positive control moved with handle_nick(). */
         char *reg = tf_read_code("src/core/commands_register.c", NULL);
+        /* #543 TU-27: the connection-lifecycle handlers (PING/PONG/QUIT)
+         * moved verbatim to commands_conn.c; the same two negatives apply
+         * there, and the conn_mark_closing positive moved with
+         * handle_quit(). */
+        char *conn = tf_read_code("src/core/commands_conn.c", NULL);
         char *rep = tf_read_code("src/core/reply.c", NULL);
         const char *at;
         const char *queue_at;
 
-        TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL,
+        TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL && conn != NULL,
                      "could not read the sources (is IRCSERVE_SRC_DIR set?)");
 
         TF_CHECK_MSG(!tf_calls(cmds, "server_queue"),
@@ -335,12 +340,19 @@ int main(void)
         TF_CHECK_MSG(!tf_calls(reg, "conn_pump"),
                      "commands_register.c calls conn_pump(): a handler has "
                      "reached around reply() into the socket itself");
+        TF_CHECK_MSG(!tf_calls(conn, "server_queue"),
+                     "commands_conn.c calls server_queue(): a handler has "
+                     "reached around reply() and can therefore write to a peer "
+                     "link, which is exactly what 3 forbids");
+        TF_CHECK_MSG(!tf_calls(conn, "conn_pump"),
+                     "commands_conn.c calls conn_pump(): a handler has "
+                     "reached around reply() into the socket itself");
         /* QUIT must go through conn_mark_closing() so the reaper stays the only
          * close site (3.4). It is asserted here rather than left to
          * test_close_sites.c, which proves the same rule from the other side:
          * that no file but server.c calls close(). */
-        TF_CHECK_MSG(tf_calls(cmds, "conn_mark_closing"),
-                     "commands.c no longer calls conn_mark_closing(): QUIT must "
+        TF_CHECK_MSG(tf_calls(conn, "conn_mark_closing"),
+                     "commands_conn.c no longer calls conn_mark_closing(): QUIT must "
                      "MARK the connection closing and let the reaper close the "
                      "descriptor (3.4), or it has found a second close site");
         TF_CHECK_MSG(strstr(reg, "server_nick_claim") != NULL,
@@ -375,6 +387,7 @@ int main(void)
         }
         free(cmds);
         free(reg);
+        free(conn);
         free(rep);
     }
 
