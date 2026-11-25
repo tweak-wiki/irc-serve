@@ -5,11 +5,17 @@
  * IRC_FED_MIN_SECRET is refused (-1, node left unopened) unless the
  * IRC_SERVE_ALLOW_SHORT_SECRET escape hatch is set, while "" (opt-out of
  * federation) and a 16-byte secret still open.
+ *
+ * Issue #659: the inbound path carries no length verdict -- a short offered
+ * secret is BAD_SECRET like any other wrong one, never a refusal-because-short
+ * (a distinct verdict would oracle the offered length).
  */
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/message.h"
 #include "core/server.h"
 #include "federation/link.h"
 
@@ -44,6 +50,22 @@ int main(void)
     fed_close(&s);
     assert(unsetenv("IRC_SERVE_ALLOW_SHORT_SECRET") == 0);
     server_shutdown(&s);
+
+    /* --- inbound: short-but-wrong is BAD_SECRET, not a length verdict ---- */
+    {
+        message_t m;
+        char line[256];
+        assert(server_init(&s, "irc.a") == 0);
+        assert(fed_open(&s, "0123456789abcdef") == 0);
+        (void)snprintf(line, sizeof line, ":irc.b FEDERATE irc.b 7 short %s",
+                        IRC_SERVE_VERSION);
+        assert(message_parse(line, &m) == 0);
+        assert(fed_check_federate(&s, NULL, &m, s.fed_secret, NULL)
+               == FED_BAD_SECRET);
+        message_free(&m);
+        fed_close(&s);
+        server_shutdown(&s);
+    }
 
     return 0;
 }
