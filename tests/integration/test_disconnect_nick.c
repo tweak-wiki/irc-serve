@@ -366,7 +366,9 @@ int main(void)
         /* #543 TU-12: server_close_conn() moved verbatim from server.c to
          * server_conns.c; the shape asserted below is unchanged. */
         char *code = tf_read_code("src/core/server_conns.c", &len);
-        char *cmds = tf_read_code("src/core/commands.c", &len);
+        /* #543 TU-27: handle_quit() moved verbatim from commands.c to
+         * commands_conn.c; the shape asserted below is unchanged. */
+        char *cmds = tf_read_code("src/core/commands_conn.c", &len);
         const char *fn;
         const char *fn_end;
         char body[8192];
@@ -376,8 +378,8 @@ int main(void)
                      "could not read src/core/server_conns.c (is "
                      "IRCSERVE_SRC_DIR set?)");
         TF_CHECK_MSG(cmds != NULL,
-                     "could not read src/core/commands.c (is IRCSERVE_SRC_DIR "
-                     "set?)");
+                     "could not read src/core/commands_conn.c (is "
+                     "IRCSERVE_SRC_DIR set?)");
 
         /* The close path. One call, and it is a call that owns BOTH halves of
          * the index. The two negative checks are the assertion that matters: a
@@ -413,7 +415,7 @@ int main(void)
          * release: a QUIT is a teardown, and the name-scoped operation is for
          * giving up one name while staying connected. */
         fn = strstr(cmds, "handle_quit(server_t");
-        TF_CHECK_MSG(fn != NULL, "could not find handle_quit() in commands.c");
+        TF_CHECK_MSG(fn != NULL, "could not find handle_quit() in commands_conn.c");
         fn_end = strstr(fn, "\n}\n");
         TF_CHECK_MSG(fn_end != NULL,
                      "could not find the end of handle_quit()");
