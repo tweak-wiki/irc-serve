@@ -1980,20 +1980,11 @@ void handle_away(server_t *s, conn_t *c, const message_t *m)
  * RFC 2812 3.3.4: "If the <nickname> parameter begins with a '*' then only those
  * users who have set a user mode to be invisible will be returned."
  *
- * This node has no user modes. 004 advertises a user-mode set of "i" and MODE
- * evaluates none of it -- `MODE <nick> +i` reaches handle_mode() and is refused
- * before any mode is looked at, because the first parameter is canonicalised as a
- * channel name and a nickname is not one, so the refusal is 403 ERR_NOSUCHCHANNEL
- * naming the upper-cased nickname -- so the set of invisible users is EMPTY and the
- * honest answer to `USERHOST *bob` is that bob is not in it.
- *
- * (That paragraph said 472 until Phase 11's RFC 2812 sweep checked it, and it was
- * wrong: handle_mode() resolves its first parameter through canonical_channel()
- * and refuses a nickname as an unknown CHANNEL long before the mode loop, so the
- * answer is 403 and never 472. Which of the two numerics is right is a separate
- * question and an open one -- RFC 2812 3.3.2 answers a MODE naming a nickname with
- * 221 RPL_UMODEIS, or 501/502 for a change, so 403 is a category error and 472
- * would have been a different one. See docs/RFC2812_CONFORMANCE.md.)
+ * This node evaluates one user mode, `+i` (issue #668): `MODE <nick>` reaches
+ * handle_mode()'s user-mode half and is answered 221 RPL_UMODEIS, or 501/502
+ * for a change. The `*` branch below is unchanged: it still answers "not here"
+ * for every `*nick` query rather than consulting c->umode_i, which is a wider
+ * invisibility semantics than one mode bit earns.
  *
  * That is answered with the '*' branch, not with a special case, and the reason
  * is that '*' is the RFC's own marker for "not on this server in the sense you
@@ -2041,7 +2032,7 @@ void handle_userhost(server_t *s, conn_t *c, const message_t *m)
         if (who == NULL || want_invisible) {
             /* See the header comment: the `*` branch covers BOTH "no such user"
              * and "asked about a user that is not invisible", and they are the
-             * same answer because this node has no invisibility.
+             * same answer because the `*` prefix does not consult c->umode_i.
              *
              * An empty name has nothing to repeat, so it gets the bare marker.
              * The alternative -- "%s*" with an empty name -- renders "**", and

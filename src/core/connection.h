@@ -936,6 +936,10 @@ typedef struct conn {
      * two can never be read apart. See the CONN_MAX_ACCOUNT block above. */
     char        account[CONN_MAX_ACCOUNT + 1];
     int         logged_in;
+    /* User mode +i (invisible): the only user mode this node evaluates. 004
+     * advertises `i`; MODE <self> [+/-i] reads and writes this bit and 221
+     * reports it. Zero (visible) is the calloc default from conn_new(). */
+    int         umode_i;
     struct chan **chans;           /* channels joined; Phase 4 */
     size_t      nchans;
     size_t      cap;

@@ -598,6 +598,84 @@ static void check_482_keeps_its_channel(test_client_t *c)
 }
 
 /* ===========================================================================
+ * 5. MODE <nick> IS A USER-MODE QUERY, NOT A CHANNEL VERB (issue #668)
+ * ====================================================================== */
+/* RFC 2812 3.3.2: a MODE whose target is a nickname answers 221 RPL_UMODEIS
+ * for a query, 501 for an unknown flag, 502 for another user's modes -- never
+ * 403. This node evaluates exactly one user mode, `+i`, so the mode string is
+ * "+i" or "+". Each probe closes its window with mark() and asserts the ABSENCE
+ * of " 403 ", because a node that still routed nicks through canonical_channel
+ * satisfies none of the positive needles. */
+static void check_umodeis(test_client_t *c)
+{
+    size_t from;
+    size_t end;
+    char line[512];
+
+    /* Query with no modes set: the empty string, RFC-shaped as "+". */
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE alice") == 0, "the MODE self query failed");
+    end = mark(c);
+    TF_CHECK_MSG(end > from, "the MODE self query produced no window");
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "221", line, sizeof line) == 0,
+                 "MODE alice must be answered 221, not 403.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 221 alice + :User modes") == 0,
+                 "221's field list is \"221 <client> <modes>\", got \"%s\"", line);
+    TF_CHECK_MSG(strstr(tc_buffer(c) + from, " 403 ") == NULL,
+                 "no 403 may appear in a MODE <nick> window.\n  window: %s",
+                 tc_buffer(c) + from);
+
+    /* Set +i: answered 221 and STICKY -- a second query shows +i. */
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE alice +i") == 0, "the MODE self +i failed");
+    end = mark(c);
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "221", line, sizeof line) == 0,
+                 "MODE alice +i must be answered 221.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 221 alice +i :User modes") == 0,
+                 "221 after +i must carry \"+i\", got \"%s\"", line);
+    (void)end;
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE alice") == 0, "the second MODE query failed");
+    (void)mark(c);
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "221", line, sizeof line) == 0,
+                 "the second MODE alice query produced no 221.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 221 alice +i :User modes") == 0,
+                 "+i did not stick: \"%s\"", line);
+
+    /* The nick matches case-insensitively: MODE ALICE -i clears for alice. */
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE ALICE -i") == 0, "the MODE ALICE -i failed");
+    (void)mark(c);
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "221", line, sizeof line) == 0,
+                 "MODE ALICE -i must be answered 221.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 221 alice + :User modes") == 0,
+                 "-i must clear back to \"+\", got \"%s\"", line);
+
+    /* An unevaluated letter is 501, and another user's modes are 502. */
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE alice +z") == 0, "the MODE +z failed");
+    (void)mark(c);
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "501", line, sizeof line) == 0,
+                 "MODE alice +z must be answered 501.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 501 alice :Unknown MODE flag") == 0,
+                 "501's field list is \"501 <client> :text\", got \"%s\"", line);
+    from = mark(c);
+    TF_CHECK_MSG(tc_send(c, "MODE bob") == 0, "the MODE bob failed");
+    (void)mark(c);
+    TF_CHECK_MSG(find_numeric(tc_buffer(c), from, "502", line, sizeof line) == 0,
+                 "MODE bob from alice must be answered 502.\n  window: %s",
+                 tc_buffer(c) + from);
+    TF_CHECK_MSG(strcmp(line, ":" BIN_NAME " 502 alice :Cant change mode for "
+                        "other users") == 0,
+                 "502's field list is \"502 <client> :text\", got \"%s\"", line);
+}
+
+/* ===========================================================================
  * 4. THE STANDARD-REPLIES CLIENT: THE VERB APPEARS EXACTLY ONCE
  * ====================================================================== */
 /* The legacy field is added on the legacy branch only, and this is the assertion
@@ -837,7 +915,9 @@ int main(void)
     register_client(&plain, node.port, "bob", NULL);
     join_existing_channel(&plain, "bob");
     check_482_keeps_its_channel(&plain);
-
+    /* AFTER bob exists: the 502 probe names a real other user, so a node that
+     * answered 401 for unknown nicks and 502 for known ones still passes. */
+    check_umodeis(&legacy);
     tc_init(&sreplies);
     register_client(&sreplies, node.port, "carol", "standard-replies");
     check_fail_carries_the_verb_once(&sreplies);

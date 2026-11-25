@@ -41,6 +41,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "core/cap.h"
 #include "core/channel.h"
@@ -2231,6 +2232,59 @@ static void send_ban_list(server_t *s, conn_t *dst, const chan_t *ch)
            dst->nick, ch->nbans);
 }
 
+/* The user-mode half of MODE (RFC 2812 3.3.2, issue #668): a MODE whose target
+ * is a nickname queries or sets USER modes, answered 221 (or 501/502) -- never
+ * 403. This node evaluates exactly one user mode, `+i` (invisible, c->umode_i,
+ * the letter 004 already advertises), so the mode string is "+i" or "+". Only
+ * one's own modes may be read or changed: anything else is 502. */
+static void handle_mode_user(server_t *s, conn_t *c, const message_t *m)
+{
+    char modes[3];
+    int add = -1;
+    const char *p;
+
+    if (strcasecmp(m->params[0], c->nick) != 0) {
+        (void)reply_refused(s, c, "MODE", NULL, "502", NULL, 0,
+                            "Cant change mode for other users");
+        return;
+    }
+    if (m->nparams < 2) {
+        modes[0] = '+';
+        modes[1] = (char)(c->umode_i ? 'i' : '\0');
+        modes[2] = '\0';
+        (void)reply(s, c, "221", (const char *const[]){ modes }, 1,
+                    "User modes");
+        return;
+    }
+    /* Mirror the channel path's too-FEW rule: "" or a bare sign names no mode
+     * letter, so 461 rather than 501. */
+    if (m->params[1][0] == '\0' ||
+        ((m->params[1][0] == '+' || m->params[1][0] == '-') &&
+         m->params[1][1] == '\0')) {
+        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
+    for (p = m->params[1]; *p != '\0'; p++) {
+        if (*p == '+') {
+            add = 1;
+        } else if (*p == '-') {
+            add = 0;
+        } else if (add >= 0 && *p == 'i') {
+            c->umode_i = add;
+        } else {
+            /* A letter this node does not evaluate, or one before any sign. */
+            (void)reply_refused(s, c, "MODE", NULL, "501", NULL, 0,
+                                "Unknown MODE flag");
+            return;
+        }
+    }
+    modes[0] = '+';
+    modes[1] = (char)(c->umode_i ? 'i' : '\0');
+    modes[2] = '\0';
+    (void)reply(s, c, "221", (const char *const[]){ modes }, 1, "User modes");
+}
+
 void handle_mode(server_t *s, conn_t *c, const message_t *m)
 {
     chan_t *ch;
@@ -2242,6 +2296,13 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     if (m->nparams < 1) {
         (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
                             "Not enough parameters");
+        return;
+    }
+    /* Not a channel name but a nickname: the user-mode half (RFC 2812 3.3.2).
+     * valid_nick() keeps garbage like `MODE 0` on the channel path's 403. */
+    if ((m->params[0][0] != CHAN_TYPE1 && m->params[0][0] != CHAN_TYPE2) &&
+        valid_nick(m->params[0])) {
+        handle_mode_user(s, c, m);
         return;
     }
     ch = resolve_joined(s, c, m->params[0]);
