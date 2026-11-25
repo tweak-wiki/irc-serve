@@ -35,10 +35,10 @@
  * Three things make it a different instrument rather than a longer list:
  *
  *   1. THE VERB LIST IS DERIVED, NOT WRITTEN. It is parsed out of
- *      `commands.c`'s `k_commands[]` -- the dispatch table itself -- so a verb
- *      added tomorrow is swept tomorrow without this file being edited. Four
- *      checks keep the parse honest and they are in `derive_verbs()` and
- *      `probe_verb()`.
+ *      `commands_dispatch.c`'s `k_commands[]` -- the dispatch table itself --
+ *      so a verb added tomorrow is swept tomorrow without this file being
+ *      edited. Four checks keep the parse honest and they are in
+ *      `derive_verbs()` and `probe_verb()`.
  *   2. THE COORDINATES ARE GENERATED, NOT LISTED. Every marker byte is tried in
  *      every argument position of every verb, so the space is covered by
  *      construction instead of by somebody remembering a position.
@@ -143,10 +143,10 @@
  *     receives. That is a live CROSS-CLIENT terminal injection. It is routed out of
  *     this pass because the fix is a policy decision about which nicknames this node
  *     accepts; see the block above the table.
- *   - ELEVEN NUMERICS ECHO A CLIENT-SUPPLIED VALUE BACK TO THE CLIENT THAT SENT IT.
- *     One of them (421) is argued for at length in `commands.c`. The other ten are not
- *     argued anywhere, and the argument would not hold anyway: "there is no second
- *     reader" is not the same as "there is no reader", because a client that logs
+ *     One of them (421) is argued for at length in `commands_dispatch.c`. The
+ *     other ten are not argued anywhere, and the argument would not hold
+ *     anyway: "there is no second reader" is not the same as "there is no
+ *     reader", because a client that logs
  *     numerics to a file, or a bouncer relaying them to a human's terminal, is the
  *     second reader and is downstream of the client rather than of this node.
  *   - PONG ECHOES ITS TOKEN, which RFC 2812 2.4 REQUIRES. That one cannot be fixed
@@ -636,7 +636,8 @@ static size_t pre_reg_count(void)
     return n;
 }
 
-/* Read src/core/commands.c with COMMENTS REMOVED and STRING LITERALS KEPT.
+/* Read src/core/commands_dispatch.c with COMMENTS REMOVED and STRING LITERALS
+ * KEPT.
  *
  * WHY NOT `tf_read_code()`, which is the harness's own reader: it strips string
  * literals as well as comments, because every existing caller searches for
@@ -661,7 +662,7 @@ static char *sw_read_table_text(size_t *len_out)
     int prev = 0;
     int ch;
 
-    (void)snprintf(path, sizeof path, "%s/src/core/commands.c", IRCSERVE_SRC_DIR);
+    (void)snprintf(path, sizeof path, "%s/src/core/commands_dispatch.c", IRCSERVE_SRC_DIR);
     f = fopen(path, "rb");
     TF_CHECK_MSG(f != NULL, "could not open %s (is IRCSERVE_SRC_DIR set?)", path);
     out = (char *)malloc(cap);
@@ -767,9 +768,9 @@ static void derive_verbs(void)
     TF_CHECK_MSG(len > 0u, "the dispatch table text is empty");
     p = strstr(text, "k_commands[] = {");
     TF_CHECK_MSG(p != NULL,
-                 "src/core/commands.c has no `k_commands[] = {` line, so this test "
-                 "cannot derive the verb surface and would otherwise sweep nothing "
-                 "while reporting success");
+                 "src/core/commands_dispatch.c has no `k_commands[] = {` line, "
+                 "so this test cannot derive the verb surface and would "
+                 "otherwise sweep nothing while reporting success");
     p += strlen("k_commands[] = {");
     /* The table's own closing line. Every row in it is one line long, so the
      * first `\n};` is the end of the table and not a nested brace inside it. */

@@ -169,33 +169,38 @@ add_library(irc_core STATIC
   # there; this file holds the delivery half and the static helpers it owns.
   core/fanout_deliver.c
   core/commands.c
+  # #543: the dispatch seam (command table + lookup + commands_dispatch())
+  # split out of commands.c, with handle_motd() moving to commands_welcome.c.
+  # Declared in core/commands_dispatch.h, re-exported through core/commands.h.
+  core/commands_dispatch.c
   # #543: the AUTHENTICATE family (SASL PLAIN exchange) split out of commands.c.
-  # The dispatch table stays there; this file holds the handler and its helpers.
+  # The dispatch table in commands_dispatch.c names it; this file holds the handler.
   core/commands_auth.c
   # #543: the account-registration family (REGISTER/ACCOUNT/UNREGISTER refusal
-  # policy) split out of commands.c. The dispatch table stays there; this file
-  # holds the handlers and their helper.
+  # policy) split out of commands.c. The dispatch table in commands_dispatch.c
+  # names them; this file holds the handlers and their helper.
   core/commands_account.c
   # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
-  # The dispatch table stays there; this file holds the verbs and their helpers.
+  # The table in commands_dispatch.c names them; this file holds the verbs.
   core/commands_info.c
   # #543: the registration family (PASS/NICK/USER) split out of commands.c.
-  # The dispatch table stays there; this file holds the handlers and copy_field.
+  # The table in commands_dispatch.c names them; this file holds the handlers.
   core/commands_register.c
   # #543: the connection-lifecycle handlers (PING/PONG/QUIT) split out of
-  # commands.c. The dispatch table stays there; this file holds the handlers.
+  # commands.c. The table in commands_dispatch.c names them; this file holds the handlers.
   core/commands_conn.c
   # #543: the SETNAME family (IRCv3 `setname`) split out of commands.c.
-  # The dispatch table stays there; this file holds the handler.
+  # The table in commands_dispatch.c names it; this file holds the handler.
   core/commands_setname.c
   # #543: the CHOPER refusal family (RFC 2812 3.4.1) split out of commands.c.
-  # The dispatch table stays there; this file holds the handler.
+  # The table in commands_dispatch.c names it; this file holds the handler.
   core/commands_choper.c
   # #543: the STARTTLS family (upgrade refusals + CAP pass-through) split out
-  # of commands.c. The dispatch table stays there; this file holds the handlers.
+  # of commands.c. The table in commands_dispatch.c names them; this file holds the handlers.
   core/commands_starttls.c
-  # #543: the welcome burst (001-005 + MOTD) split out of commands.c.
-  # commands_state_update() and handle_motd() stay there and call in.
+  # #543: the welcome burst (001-005 + MOTD) split out of commands.c, with
+  # handle_motd() moving here for the table in commands_dispatch.c.
+  # commands_state_update() stays there and calls in.
   core/commands_welcome.c
   # Phase 10.1: the account IDENTITY on a connection. It is a module of its own
   # for the reason core/cap.c is -- the predicate every consumer asks must have

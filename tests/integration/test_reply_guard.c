@@ -335,13 +335,18 @@ int main(void)
          * commands_starttls.c; the same two negatives apply there (it answers
          * through reply() only and leaves the handshake to conn_pump()). */
         char *starttls = tf_read_code("src/core/commands_starttls.c", NULL);
+        /* #543 TU-34: the dispatch seam (command table + lookup +
+         * commands_dispatch()) moved verbatim to commands_dispatch.c, with
+         * handle_motd() moving to commands_welcome.c; the same two negatives
+         * apply there (it answers through reply() only). */
+        char *dispatch = tf_read_code("src/core/commands_dispatch.c", NULL);
         char *rep = tf_read_code("src/core/reply.c", NULL);
         const char *at;
         const char *queue_at;
 
         TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL && conn != NULL &&
                      welcome != NULL && setname != NULL && choper != NULL &&
-                     starttls != NULL,
+                     starttls != NULL && dispatch != NULL,
                      "could not read the sources (is IRCSERVE_SRC_DIR set?)");
 
         TF_CHECK_MSG(!tf_calls(cmds, "server_queue"),
@@ -393,6 +398,13 @@ int main(void)
         TF_CHECK_MSG(!tf_calls(starttls, "conn_pump"),
                      "commands_starttls.c calls conn_pump(): the handler has "
                      "reached around reply() into the socket itself");
+        TF_CHECK_MSG(!tf_calls(dispatch, "server_queue"),
+                     "commands_dispatch.c calls server_queue(): dispatch has "
+                     "reached around reply() and can therefore write to a peer "
+                     "link, which is exactly what 3 forbids");
+        TF_CHECK_MSG(!tf_calls(dispatch, "conn_pump"),
+                     "commands_dispatch.c calls conn_pump(): dispatch has "
+                     "reached around reply() into the socket itself");
         /* QUIT must go through conn_mark_closing() so the reaper stays the only
          * close site (3.4). It is asserted here rather than left to
          * test_close_sites.c, which proves the same rule from the other side:
@@ -438,6 +450,7 @@ int main(void)
         free(setname);
         free(choper);
         free(starttls);
+        free(dispatch);
         free(rep);
     }
 

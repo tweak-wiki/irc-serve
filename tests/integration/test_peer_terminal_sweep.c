@@ -867,8 +867,9 @@ static void ps_expect_verdict(const nf_node_t *node, size_t from,
  * waiting.
  *
  * The PING goes down the CLIENT socket rather than the peer link, and that is not a
- * convenience. The peer dispatch table has no `PING` -- `src/core/commands.c` lists
- * it for clients and the federation verb map has no entry -- so a PING sent down the
+ * convenience. The peer dispatch table has no `PING` --
+ * `src/core/commands_dispatch.c` lists it for clients and the federation verb
+ * map has no entry -- so a PING sent down the
  * link this test owns is an unknown verb the node counts and does not answer, and
  * waiting for a PONG to it waits for a line the node will never send. The first
  * version of this file sent it down the peer link and reported that as "the node

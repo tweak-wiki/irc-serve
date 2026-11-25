@@ -35,6 +35,10 @@
  *                          has no business deciding that a descriptor dies.
  *   src/core/commands.c     NONE, same reason: a handler states what it wants
  *                          to say, never what happens to the socket.
+ *   src/core/commands_dispatch.c
+ *                          NONE, same reason: the dispatch seam moved here
+ *                          (#543 TU-34) and names handlers without touching
+ *                          the socket.
  *   src/core/server_conns.c The registry close in server_close_conn() -- the one
  *                          place a conn_t's descriptor is closed. Plus: the
  *                          accept whose descriptor was >= FD_SETSIZE and so
@@ -197,6 +201,9 @@ int main(void)
         "src/core/message.c",
         "src/core/reply.c",
         "src/core/commands.c",
+        /* #543 TU-34: the dispatch seam moved from commands.c to
+         * commands_dispatch.c; the no-close rule follows the moved code. */
+        "src/core/commands_dispatch.c",
         "src/node_main.c",
         "src/ircv3_tags.c",
         "src/sasl_framework.c",
@@ -219,7 +226,8 @@ int main(void)
      * server.c to server_conns.c). */
     static const char *const no_destroy[] = {
         "src/core/poll_loop.c", "src/core/message.c", "src/core/reply.c",
-        "src/core/commands.c", "src/node_main.c",
+        "src/core/commands.c", "src/core/commands_dispatch.c",
+        "src/node_main.c",
         "src/ircv3_tags.c",
         "src/sasl_framework.c",
         /* The tick module. It is in the second list and NOT the first, which is
