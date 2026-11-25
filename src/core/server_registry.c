@@ -1,8 +1,8 @@
-/* server_registry.c -- see core/server.h. The nick and channel registries,
- * verbatim out of server.c (issue #543); the lifecycle, link/dial registries
- * and shutdown stay there. The registry functions were already declared in
- * core/server.h, and the two enumeration helpers stay static here, so there
- * is no new header (fanout_deliver.c precedent).
+/* server_registry.c -- see core/server.h. The nick, channel and peer-link
+ * registries, verbatim out of server.c (issue #543); the lifecycle, dial
+ * registry and shutdown stay there. The registry functions were already
+ * declared in core/server.h, and the two enumeration helpers stay static
+ * here, so there is no new header (fanout_deliver.c precedent).
  */
 #include "core/server.h"
 
@@ -391,3 +391,83 @@ chan_t *server_chan_at(const server_t *s, size_t i)
     }
     return s->chan_objs[i];
 }
+
+/* ---------------------------------------------------------------------------
+ * The peer link registry (2.3)
+ * ---------------------------------------------------------------------------
+ * A vector, and the reason is at server_link_t. These three are the only ways
+ * into it, so the layout never has to be known outside this file -- which is the
+ * same bargain server_t::nick_objs makes with server_nick_at().
+ */
+server_link_t *server_find_link(const server_t *s, const char *name)
+{
+    size_t i;
+
+    if (s == NULL || name == NULL || name[0] == '\0') {
+        return NULL;
+    }
+    for (i = 0; i < s->nlinks; i++) {
+        if (irc_ascii_same(s->links[i].name, name)) {
+            return &s->links[i];
+        }
+    }
+    return NULL;
+}
+
+size_t server_link_count(const server_t *s)
+{
+    return (s == NULL) ? 0u : s->nlinks;
+}
+
+server_link_t *server_link_at(const server_t *s, size_t i)
+{
+    if (s == NULL || i >= s->nlinks) {
+        return NULL;
+    }
+    return &s->links[i];
+}
+
+conn_t *server_link_conn(const server_t *s, const server_link_t *link)
+{
+    /* Every one of these is a real case and not defensive padding:
+     *   link == NULL   the caller had no link, so there is nothing to name
+     *   fd < 0          a link with no socket: between dial halves, or after a
+     *                   peer was dropped. Common, not degenerate.
+     *   fd out of range by_fd is indexed BY the descriptor, so an fd the table
+     *                   cannot hold names no slot at all. */
+    if (s == NULL || link == NULL || link->fd < 0 ||
+        link->fd >= SERVER_FD_TABLE) {
+        return NULL;
+    }
+    return s->by_fd[link->fd];
+}
+
+/* ---------------------------------------------------------------------------
+ * Peer lookup by server name (2.3)
+ * ---------------------------------------------------------------------------
+ * A link, a state test and a by_fd index. The reasoning for all three -- and for
+ * why this is no longer a scan of by_fd for a conn_t::peer_name -- is at
+ * server_find_peer() in the header, which is where a caller of this function
+ * will be reading.
+ *
+ * The ESTABLISHED comparison is an int against the link's single state field
+ * rather than a switch on handshake_state_t, deliberately: the state is an
+ * enum value held in an int, and -Weverything's -Wswitch-default and
+ * -Wcovered-switch-default cannot both be satisfied by a switch over it, and
+ * a two-way test does not need one. The field is written in exactly one
+ * place (fed_link_set_state() in link.c), so the comparison cannot be reading
+ * a field nothing has updated. */
+conn_t *server_find_peer(const server_t *s, const char *name)
+{
+    const server_link_t *link;
+
+    if (s == NULL || s->by_fd == NULL) {
+        return NULL;
+    }
+    link = server_find_link(s, name);
+    if (link == NULL || link->state != (int)ESTABLISHED) {
+        return NULL;
+    }
+    return server_link_conn(s, link);
+}
+
