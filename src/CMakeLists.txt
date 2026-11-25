@@ -238,7 +238,12 @@ add_library(irc_core STATIC
   # 4.3's wire and dedup.c is 2.4's loop guard, and neither is reachable from
   # the message path yet. Putting them beside core/ would imply they are part of
   # the always-on path, and a reader would expect to find them in fanout.c.
-  federation/verbs.c
+  # #543 TU-42: verbs.c is fully split (last family: fed_touch_server() +
+  # fed_actor_prefix() + fed_local_emit() + fed_forward_all() -> verbs_emit.c)
+  # and holds only the split map, so it is no longer compiled.
+  # The shared emit helpers the decode side reports through, split out of
+  # verbs.c (issue #543). Declared in federation/verbs.h.
+  federation/verbs_emit.c
   # fed_obs(), the ONE printf for a peer-path log line, split out of verbs.c
   # (issue #543). Declared in federation/obs.h, re-exported via verbs.h.
   federation/obs.c
