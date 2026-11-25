@@ -758,6 +758,14 @@ void fed_set_retry(server_t *s, uint64_t base_ms, uint64_t max_ms, unsigned budg
  * in federation/departure.c can take a link back to INIT. */
 void fed_link_set_state(server_link_t *link, handshake_state_t state);
 
+/* The FEDERATE-exchange half of link.c, reached by the tick half in
+ * federation/tick.c (issue #543). Extern for the same reason
+ * fed_link_set_state() above is: one implementation, two files. */
+server_link_t *fed_link_of_conn(const server_t *s, const conn_t *c);
+int fed_queue_federate(server_t *s, server_link_t *link, conn_t *c);
+void fed_refuse(server_t *s, server_link_t *link, conn_t *c,
+                const char *claim, const char *why);
+
 /* Mark the link to `name` as one that must carry TLS, or as one that need not.
  *
  * THE STICKINESS IS THE POINT and it is why this is a separate call rather than an
@@ -802,8 +810,8 @@ server_link_t *fed_link_configure(server_t *s, const char *name,
  *   - T1  a DIAL_CONNECTING entry older than IRC_FED_DIAL_TIMEOUT_MS. poll()
  *        reports nothing for a connect() to a black-holed host, so without this
  *        the entry sits in the table for the life of the process. This is the
- *        one place this file closes a descriptor, and it closes a DIAL, which
- *        is not a connection: it is not in by_fd, there is no conn_t, and
+ *        one place federation/tick.c closes a descriptor, and it closes a DIAL,
+ *        which is not a connection: it is not in by_fd, there is no conn_t, and
  *        server.c already closes exactly these on the same grounds.
  *   - promotion of a link whose dial reported DIAL_CONNECTED.
  *   - T2  HANDSHAKE_SENT older than IRC_FED_HS_TIMEOUT_MS.

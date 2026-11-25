@@ -47,7 +47,7 @@
  *   everything else         NONE.
  *
  * ---------------------------------------------------------------------------
- * src/federation/link.c IS THE EXCEPTION, AND IT IS A NARROW ONE
+ * src/federation/tick.c IS THE EXCEPTION, AND IT IS A NARROW ONE
  * ---------------------------------------------------------------------------
  * It closes exactly one thing: the descriptor of a DIAL_CONNECTING entry that
  * fed_tick()'s T1 has decided will never complete. That is a DIAL and not a
@@ -56,8 +56,10 @@
  * precisely this ground, in server_dial_progress()'s DIAL_FAILED arms and in
  * the shutdown walk. Without it a connect() to a black-holed host would leak a
  * descriptor on every timeout.
+ * (#543 TU-26: the tick half, T1 included, moved verbatim from link.c to
+ * tick.c; the exception moved with it. link.c is back in `never` below.)
  *
- * So link.c is NOT in the `never` list above: putting it there would mean
+ * So tick.c is NOT in the `never` list above: putting it there would mean
  * asserting a falsehood, and a test that asserts a falsehood is a test that
  * has stopped checking anything. What it gets instead is in the `no_destroy`
  * list, plus the two targeted assertions at the bottom of this file: that it
@@ -68,7 +70,7 @@
  *
  * The consequence of the exception is stated rather than glossed: the "no stray
  * close in a federation file" property is no longer covered by list
- * membership for link.c. It is covered by the two assertions instead, and that
+ * membership for tick.c. It is covered by the two assertions instead, and that
  * is why they are there.
  *
  * Comments and string/char literals are stripped before the search, so prose
@@ -194,7 +196,10 @@ int main(void)
         "src/core/commands.c",
         "src/node_main.c",
         "src/ircv3_tags.c",
-        "src/sasl_framework.c"
+        "src/sasl_framework.c",
+        /* #543 TU-26: the tick half (T1's close included) moved from link.c to
+         * tick.c, so link.c is back under the blanket rule. */
+        "src/federation/link.c"
     };
     const char *fn;
     const char *end;
@@ -214,10 +219,13 @@ int main(void)
         "src/core/commands.c", "src/node_main.c",
         "src/ircv3_tags.c",
         "src/sasl_framework.c",
-        /* The link module. It is in the second list and NOT the first, which is
+        /* The tick module. It is in the second list and NOT the first, which is
          * the whole of the exception documented in the header: it closes a
          * DIAL that never became a connection, and it must never destroy a
          * connection. The two assertions below pin the close itself. */
+        "src/federation/tick.c",
+        /* link.c keeps the no-destroy half after the split: it no longer
+         * closes anything, but it still must never destroy a connection. */
         "src/federation/link.c"
     };
 
@@ -301,19 +309,20 @@ int main(void)
                  "descriptor (found %d close() calls): it would leak one "
                  "descriptor per refused connection", rc);
 
-    /* federation/link.c: the one file outside the server core (server.c and
+    /* federation/tick.c: the one file outside the server core (server.c and
      * server_conns.c) that may call close(), and it may call it for exactly
      * one reason. Two assertions, and both are needed: the first says there
      * is only the one, the second says which one it is. Together they are
      * stronger than membership in `never` would have been, because `never`
      * would have said "this file never closes" -- which is false -- and a
-     * list entry that is false takes the file's real protection with it. */
+     * list entry that is false takes the file's real protection with it.
+     * (#543 TU-26: T1's close moved here verbatim from link.c.) */
     {
         int n;
 
-        load_into(alt, sizeof alt, "src/federation/link.c");
+        load_into(alt, sizeof alt, "src/federation/tick.c");
         TF_CHECK_MSG(tf_calls(alt, "close"),
-                     "src/federation/link.c no longer calls close() at all: "
+                     "src/federation/tick.c no longer calls close() at all: "
                      "T1 has to close the descriptor of a dial that will never "
                      "complete, because a connect() to a black-holed host is "
                      "not in by_fd and the reaper cannot own it. If the "
@@ -329,23 +338,23 @@ int main(void)
          * pass. */
         fn = strstr(alt, "fed_dial_expired(server_t");
         TF_CHECK_MSG(fn != NULL,
-                     "could not find fed_dial_expired() in link.c; the function "
+                     "could not find fed_dial_expired() in tick.c; the function "
                      "that owns the one close() this file is allowed has been "
                      "renamed, and the comment above it with it");
         end = strstr(fn, "\n}\n");
         TF_CHECK_MSG(end != NULL,
-                     "could not find the end of fed_dial_expired() in link.c");
+                     "could not find the end of fed_dial_expired() in tick.c");
         rc = calls_between("close", fn, end);
         TF_CHECK_MSG(rc == 1,
                      "fed_dial_expired() does not contain exactly one close() "
                      "(found %d): that is the dial-timeout close, and it is the "
                      "only close a peer-link file may have", rc);
-        /* And nothing else in link.c does. The whole-file count plus the
+        /* And nothing else in tick.c does. The whole-file count plus the
          * in-function count is the pair that says both things; either alone
          * would leave room for a second close elsewhere. */
         n = calls_between("close", alt, alt + strlen(alt));
         TF_CHECK_MSG(n == rc,
-                     "src/federation/link.c has %d close() calls in total but %d "
+                     "src/federation/tick.c has %d close() calls in total but %d "
                      "inside fed_dial_expired(): a peer link is the one place "
                      "outside the registry that touches a descriptor, so a "
                      "close anywhere else is a close path 3.4 does not have", n,
