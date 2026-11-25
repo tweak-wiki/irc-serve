@@ -153,13 +153,26 @@ jobs:
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-a"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
-          # restart (not enable --now): --now never restarts running units, so
+          # DIRECTION PREFLIGHT: exactly one side may declare --peer. Both
+          # dialling wedges the pair into mutual NAME_IN_USE with no link
+          # (usage spec: one-direction dialing). The reference units encode
+          # A-dials/B-accepts; fail here — before touching anything — if the
+          # live units drifted, rather than deploying onto a wedge.
+          peers_a=$(sudo systemctl show irc-serve-fed-a --property=ExecStart | grep -o "\-\-peer " | wc -l)
+          peers_b=$(sudo systemctl show irc-serve-fed-b --property=ExecStart | grep -o "\-\-peer " | wc -l)
+          [ "$((peers_a + peers_b))" = 1 ] || { echo "dial direction broken: fed-a declares $peers_a --peer, fed-b declares $peers_b (want exactly 1 total). Fix the unit files by hand (DEPLOY.md step 0)."; exit 1; }
+          # ORDERED restart, acceptor first: B must be listening before A
+          # dials, or A's first attempt hits a closed port and burns retry
+          # budget. (A simultaneous restart usually still converges via
+          # redial, but the order is free and removes the race.)
+          # restart, not enable --now: --now never restarts running units, so
           # redeploys kept serving the stale binary (#610). No bare `enable`:
           # not in the sudoers allowlist, and the hand-install already
           # enabled both units.
           RESTART_TS=$(date +%s)
-          sudo systemctl restart irc-serve-fed-a irc-serve-fed-b
-          sleep 5
+          sudo systemctl restart irc-serve-fed-b
+          ./scripts/irc-health-check.sh 127.0.0.1 6669
+          sudo systemctl restart irc-serve-fed-a
           # Protocol-level per node, not bare connects (#531).
           for port in 6668 6669; do
             ./scripts/irc-health-check.sh 127.0.0.1 "$port"
@@ -178,3 +191,46 @@ jobs:
           echo "--- link status B (since restart) ---"
           sudo journalctl -u irc-serve-fed-b --no-pager --since "@$RESTART_TS" | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
           [ "$ok_a" = 1 ] && [ "$ok_b" = 1 ] || { echo "fed link did not re-establish within 60s of restart"; exit 1; }
+          # Federation smoke: a channel_join + cross-node PRIVMSG over real
+          # sockets. The link being ESTABLISHED proves the handshake; this
+          # proves the mesh passes traffic both ways.
+          python3 - <<'EOF'
+          import socket, time
+          def drain(s):
+              out = b''
+              try:
+                  while True:
+                      d = s.recv(65536)
+                      if not d:
+                          break
+                      out += d
+              except Exception:
+                  pass
+              return out.decode('utf-8', 'replace')
+          def client(nick, port):
+              s = socket.create_connection(('127.0.0.1', port), timeout=10)
+              s.sendall(f'NICK {nick}\r\nUSER {nick} 0 * :deploy smoke\r\n'.encode())
+              time.sleep(1)
+              s.settimeout(1)
+              drain(s)
+              return s
+          a = client('depA', 6668)
+          b = client('depB', 6669)
+          a.sendall(b'JOIN #deploysmoke\r\n')
+          time.sleep(1)
+          drain(a)
+          b.sendall(b'JOIN #deploysmoke\r\n')
+          time.sleep(1)
+          bj = drain(b)
+          assert 'JOIN #DEPLOYSMOKE' in bj, f'B missing own JOIN echo: {bj[:150]!r}'
+          assert 'JOIN #DEPLOYSMOKE' in drain(a), 'A missed remote JOIN'
+          b.sendall(b'PRIVMSG #deploysmoke :smoke-a\r\n')
+          time.sleep(1)
+          assert 'smoke-a' in drain(a), 'A missed channel PRIVMSG from B'
+          a.sendall(b'PRIVMSG #deploysmoke :smoke-b\r\n')
+          time.sleep(1)
+          assert 'smoke-b' in drain(b), 'B missed channel PRIVMSG from A'
+          a.close()
+          b.close()
+          print('fed smoke: JOIN echo + bidirectional PRIVMSG ok')
+          EOF
