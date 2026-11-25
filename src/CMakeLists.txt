@@ -205,6 +205,10 @@ add_library(irc_core STATIC
   # out of verbs.c (issue #543). Listed beside verbs.c; the store readers stay
   # declared in federation/link.h.
   federation/advertise.c
+  # The 4.3 extension's inbound notify half (SSETNAME/SAWAY/SINVITE), split
+  # out of verbs.c (issue #543). Listed beside verbs.c; fed_dispatch() stays
+  # there and reaches the handlers through federation/notify.h.
+  federation/notify.c
   federation/dedup.c
   # The peer link: the table, the FEDERATE exchange and the tick. It is listed
   # after the two above because it uses both -- dedup for T5 and verbs.c for
