@@ -302,6 +302,11 @@ add_library(irc_core STATIC
   # split out of link.c (issue #543). Listed beside link.c; fed_dump()
   # stays declared in federation/link.h.
   federation/link_dump.c
+  # The link table (fed_link_set_state() + fed_link_of_conn() + fed_link_new() +
+  # fed_link_set_tls() + fed_link_configure()), split out of link.c
+  # (issue #543). Listed beside link.c; all five stay declared in
+  # federation/link.h.
+  federation/link_table.c
   # The departure half: the SQUIT announcement, the link teardown, the clean-leave
   # latch, the shutdown drain and the operator's reset door, split out of link.c
   # (issue #543). Listed beside link.c; link.c reaches fed_link_down() through

@@ -451,30 +451,31 @@ int main(void)
          * Proving it by behaviour would need a link that was TLS, went away, and
          * came back -- and the only way to make it come back in the clear would be
          * for the code to have a path that clears the flag, which is exactly what
-         * the inspection rules out. So the claim is structural: `require_tls` is
-         * ASSIGNED in exactly one place in link.c, that place is fed_link_set_tls(),
-         * and its only caller is main() at startup. A second assignment would be a
-         * downgrade path and would make this fail.
+         * inspection rules out. So the claim is structural: `require_tls` is
+         * ASSIGNED in exactly one place in link_table.c (#543 TU-39 moved
+         * fed_link_set_tls() verbatim out of link.c), that place is
+         * fed_link_set_tls(), and its only caller is main() at startup. A
+         * second assignment would be a downgrade path and would make this fail.
          *
          * It is a strstr rather than tf_calls() because the field is ASSIGNED rather
          * than called, and tf_calls() requires a `(` after the name. */
         {
             size_t len = 0;
-            char *code = tf_read_code("src/federation/link.c", &len);
+            char *code = tf_read_code("src/federation/link_table.c", &len);
             const char *p;
             int assignments = 0;
 
             if (code == NULL) {
-                check(0, "read src/federation/link.c", "tf_read_code failed");
+                check(0, "read src/federation/link_table.c", "tf_read_code failed");
             } else {
                 check(strstr(code, "require_tls") != NULL,
-                      "link.c consults require_tls at all", NULL);
+                      "link_table.c consults require_tls at all", NULL);
                 for (p = code; (p = strstr(p, "require_tls =")) != NULL;
                      p += 13) {
                     assignments++;
                 }
                 check(assignments == 1,
-                      "require_tls is ASSIGNED exactly once in link.c, so there is "
+                      "require_tls is ASSIGNED exactly once in link_table.c, so there is "
                       "no path that turns a TLS link back into a plaintext one",
                       "a second assignment to require_tls is a downgrade path");
                 free(code);
