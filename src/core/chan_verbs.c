@@ -2489,6 +2489,31 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                ch->name, c->nick, shown, len, (unsigned char)m->params[1][0], bad);
         return;
     }
+    /* Surplus parameters are 461 with nothing applied (#662): each o/v/b letter
+     * consumes one argument, so more supplied arguments than such letters is a
+     * shape no mode string can use. Counted up front because the loop below
+     * applies per letter -- checking after would leave a prefix applied. Only
+     * asked of strings this node evaluates: a string naming an unknown letter
+     * is the loop's 472, and `MODE #c +k secret` must keep answering it. */
+    {
+        size_t need = 0;
+        int known_only = 1;
+
+        for (size_t k = 1; m->params[1][k] != '\0'; k++) {
+            char lm = m->params[1][k];
+
+            if (lm == 'o' || lm == 'v' || lm == 'b') {
+                need++;
+            } else {
+                known_only = 0;
+            }
+        }
+        if (known_only && (size_t)m->nparams - 2u > need) {
+            (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
+                                "Not enough parameters");
+            return;
+        }
+    }
     if (!chan_has_flag(ch, c, CHAN_MEMBER_OP)) {
         (void)reply_refused(s, c, "MODE", NULL, "482",
                             (const char *const[]){ ch->name }, 1,

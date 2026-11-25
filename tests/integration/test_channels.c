@@ -1582,6 +1582,28 @@ static void test_mode(nf_node_t *node)
     expect_line(&a.c, "461 when letters outnumber parameters",
                 ":irc.test 461 moa MODE :Not enough parameters\r\n");
 
+    /* MORE parameters than letters is 461 with nothing applied (#662): `+oo`
+     * takes exactly two arguments, so a third is surplus. The window must hold
+     * the 461 and no MODE echo -- every letter the loop applies announces
+     * itself with one, so no echo means no prefix of the request was applied.
+     * (`+oo moa mob` above proves the exact shape still applies both.) */
+    {
+        size_t from = send_and_drain(&a, "m-oo-surplus");
+
+        client_send(&a, "MODE #mo +oo moa mob extra-garbage");
+        (void)send_and_drain(&a, "m-oo-surplus-after");
+        {
+            const char *win = tc_buffer(&a.c) + from;
+
+            TF_CHECK_MSG(strstr(win, " 461 moa MODE :Not enough parameters\r\n") !=
+                         NULL,
+                         "surplus MODE parameters must be answered 461");
+            TF_CHECK_MSG(strstr(win, " MODE #MO ") == NULL,
+                         "the surplus MODE was echoed and so was applied: 461 "
+                         "must change nothing");
+        }
+    }
+
     tc_close(&a.c);
     tc_close(&b.c);
 }
