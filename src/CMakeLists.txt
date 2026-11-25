@@ -168,7 +168,8 @@ add_library(irc_core STATIC
   # fanout_deliver_* entry points) split out of fanout.c. Cap and stamp stay
   # there; this file holds the delivery half and the static helpers it owns.
   core/fanout_deliver.c
-  core/commands.c
+  # #543 TU-37: commands.c is fully split (last family -> commands_state.c)
+  # and holds only the split map, so it is no longer compiled.
   # #543: the dispatch seam (command table + lookup + commands_dispatch())
   # split out of commands.c, with handle_motd() moving to commands_welcome.c.
   # Declared in core/commands_dispatch.h, re-exported through core/commands.h.
@@ -200,8 +201,12 @@ add_library(irc_core STATIC
   core/commands_starttls.c
   # #543: the welcome burst (001-005 + MOTD) split out of commands.c, with
   # handle_motd() moving here for the table in commands_dispatch.c.
-  # commands_state_update() stays there and calls in.
+  # commands_state_update() lives in commands_state.c and calls in.
   core/commands_welcome.c
+  # #543: the registration projection (commands_registered() and
+  # commands_state_update()) split out of commands.c, completing it.
+  # Declared in core/commands_state.h, re-exported through core/commands.h.
+  core/commands_state.c
   # Phase 10.1: the account IDENTITY on a connection. It is a module of its own
   # for the reason core/cap.c is -- the predicate every consumer asks must have
   # one home, or two callers will each write `c->logged_in && c->account[0]` and

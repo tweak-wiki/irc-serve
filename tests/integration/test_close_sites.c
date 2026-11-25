@@ -204,6 +204,9 @@ int main(void)
         /* #543 TU-34: the dispatch seam moved from commands.c to
          * commands_dispatch.c; the no-close rule follows the moved code. */
         "src/core/commands_dispatch.c",
+        /* #543 TU-37: the registration projection moved from commands.c to
+         * commands_state.c; the no-close rule follows the moved code. */
+        "src/core/commands_state.c",
         "src/node_main.c",
         "src/ircv3_tags.c",
         "src/sasl_framework.c",
@@ -227,6 +230,7 @@ int main(void)
     static const char *const no_destroy[] = {
         "src/core/poll_loop.c", "src/core/message.c", "src/core/reply.c",
         "src/core/commands.c", "src/core/commands_dispatch.c",
+        "src/core/commands_state.c",
         "src/node_main.c",
         "src/ircv3_tags.c",
         "src/sasl_framework.c",
