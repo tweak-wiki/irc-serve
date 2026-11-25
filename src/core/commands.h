@@ -21,25 +21,13 @@
 #ifndef IRC_CORE_COMMANDS_H
 #define IRC_CORE_COMMANDS_H
 
+#include "core/commands_dispatch.h"
 #include "core/connection.h"
 #include "core/message.h"
 #include "core/server.h"
 
-/* The Phase 3 command surface: PASS, NICK, USER, PING, PONG, QUIT, MOTD, and
- * the pre-registration gate plus 451/421 for everything else. Matches
- * server_dispatch_fn, so it is installed by assigning it:
- *
- *     srv.dispatch = commands_dispatch;
- *
- * Assigned rather than hidden behind an install() helper so that what the
- * shipped binary does is visible at the point where it does it. A NULL
- * dispatch -- the honest Phase 2 state -- accepts, frames and parses and then
- * says nothing, which is what this replaces.
- *
- * `c` is the connection the command arrived ON and `m` is owned by the caller
- * and released as soon as this returns, so a handler that needs a field later
- * must copy it. */
-void commands_dispatch(server_t *s, conn_t *c, const message_t *m);
+/* commands_dispatch() lives in core/commands_dispatch.c (#543) and is
+ * re-exported here so all existing consumers work untouched. */
 
 /* Is this connection past the registration gate? CONN_REG_READY is the only
  * state in which a client command other than the registration verbs is legal,

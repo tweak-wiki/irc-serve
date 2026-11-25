@@ -1,6 +1,7 @@
 /* commands_welcome.c -- see commands_welcome.h. The welcome burst (001-005
- * then the MOTD), verbatim out of commands.c; commands_state_update() and
- * handle_motd() still live there and call in.
+ * then the MOTD), verbatim out of commands.c; commands_state_update() still
+ * lives there and calls in, and the dispatch table in commands_dispatch.c
+ * names handle_motd() through commands_welcome.h.
  */
 #include "core/commands_welcome.h"
 
@@ -277,4 +278,10 @@ void send_welcome(server_t *s, conn_t *c)
     if (cap_enabled(c, CAP_ACCOUNT_NOTIFY) != 0) {
         account_notify_current(s, c);
     }
+}
+
+void handle_motd(server_t *s, conn_t *c, const message_t *m)
+{
+    (void)m;
+    send_motd(s, c);
 }
