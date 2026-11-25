@@ -2134,12 +2134,17 @@ static void case_over_budget_changes_nothing(void)
     test_client_t alice;
     test_client_t ann;
     test_client_t bob;
-    /* B's roster after the SJOINs and BEFORE the refused resync, and it is also
-     * what it must be AFTER -- including the two-LINE shape, which is the part
-     * that carries the weight: the origin de-privileges alice in the transaction it
-     * is about to have discarded, so a node that applied the record on the way in
-     * would render one 353 line instead of two. */
+    /* B's roster after the SJOINs and BEFORE the refused resync: bob plain and
+     * local, ann plain and remote, alice remote with +o -- two 353 lines, the
+     * second the op group. */
     const char *const unchanged[] = { NICK_B " " NICK_E, "@" NICK_A };
+    /* B's roster AFTER the de-op below has travelled the LIVE path (#606): A
+     * fans the MODE out as SMODES and B converges, so alice is plain here and
+     * the answer is one line. The resync carries exactly this state, so a leak
+     * of its records would be invisible in the roster -- the discard is proven
+     * by the counters below, and the roster proves the transaction added,
+     * dropped and duplicated nothing against the live-converged state. */
+    const char *const deopped[] = { NICK_B " " NICK_A " " NICK_E };
 
     g_peer_port = 0;
     g_trace = 0;
@@ -2269,15 +2274,17 @@ static void case_over_budget_changes_nothing(void)
                  "not total: %s",
                  b.out);
 
-    /* AND NOTHING LEAKED. This is the assertion the whole case is for: ann was on
-     * the wire, in a member line the node read and charged, and the transaction
-     * that carried her was thrown away -- so she must not be in B's roster, in
-     * B's 353, or in the channel's member-server set. The absence check is scoped
-     * to THIS answer, and the line count is asserted too, so a leak that landed
-     * `ann` in the same 353 group as the others would be caught by the name and a
-     * leak that added a group of her own by the count. */
-    expect_names(&bob, "bob after the over-budget resync", NICK_B, CHAN_T, unchanged,
-                 2u, NULL);
+    /* AND NOTHING LEAKED. The de-op above also travelled the LIVE path (#606):
+     * A fanned it out as SMODES and B converged, so `deopped` -- one line,
+     * alice plain -- is the state the discarded transaction must leave behind.
+     * A leak that installed the transaction's records would land exactly this
+     * state too (it carries the post-de-op roster), so the roster cannot tell
+     * them apart and the discard is proven by the counters above; what the
+     * roster still proves is that the transaction added, dropped and
+     * duplicated nothing -- any of which renders a different line count or a
+     * different line. */
+    expect_names(&bob, "bob after the over-budget resync", NICK_B, CHAN_T, deopped,
+                 1u, NULL);
     /* AND THE LINK IS STILL GOOD, which is the other half of "discarded in full":
      * a peer is not punished for a transaction this node chose to refuse, because
      * the sender did nothing wrong -- it applied its own bound and never sent
@@ -2330,6 +2337,9 @@ static void case_truncated_burst_changes_nothing(void)
     test_client_t ann;
     test_client_t bob;
     const char *const unchanged[] = { NICK_B " " NICK_E, "@" NICK_A };
+    /* As in the over-budget case: the de-op converges over the live path, so
+     * the discarded transaction must leave this one-line roster behind. */
+    const char *const deopped[] = { NICK_B " " NICK_A " " NICK_E };
 
     g_peer_port = 0;
     g_trace = 0;
@@ -2448,11 +2458,14 @@ static void case_truncated_burst_changes_nothing(void)
                  "assertion is not preventing the apply: %s",
                  b.out);
 
-    /* AND NOTHING CHANGED, which is the claim. alice is still an operator on B,
-     * because the transaction that would have de-privileged her was thrown away
-     * before anything in it was installed. */
-    expect_names(&bob, "bob after the truncated transaction", NICK_B, CHAN_T, unchanged,
-                 2u, NULL);
+    /* AND NOTHING CHANGED against the live-converged state, which is the
+     * claim. The de-op travelled the live SMODES path (#606) and B applied
+     * it, so alice is plain here; the thrown-away transaction carried exactly
+     * this roster, and installing it would have rendered the same line -- the
+     * discard is proven by the counters above, and the roster proves the
+     * transaction added, dropped and duplicated nothing. */
+    expect_names(&bob, "bob after the truncated transaction", NICK_B, CHAN_T, deopped,
+                 1u, NULL);
     TF_CHECK_MSG(nf_expect(&b, "link: peer=" NAME_A " state=ESTABLISHED", T_IO_MS) == 0,
                  "node B's link to node A is not ESTABLISHED, so a truncated "
                  "transaction cost it the link: %s",

@@ -339,8 +339,14 @@ static void case_server_prefixed_verbs(void)
                  tc_buffer(&alice));
     TF_CHECK_MSG(strstr(tc_buffer(&alice), "!*@*") == NULL,
                  "a guessed hostmask rendered on KICK: %s", tc_buffer(&alice));
+    /* The SKICK above removed alice herself (#606: a SKICK whose victim is
+     * local drops the local membership after the emit), so the MODE below
+     * would have no audience. Re-JOIN her first; the channel still holds
+     * remote dave, so it was never disposed. */
+    TF_CHECK_MSG(tc_send(&alice, "JOIN " CHAN) == 0, "alice re-JOIN failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
+                 "alice re-JOIN never completed: %s", tc_buffer(&alice));
 
-    /* A garbage-prefixed SMODES still delivers, naming no garbage actor. */
     (void)tc_drain(&alice, 0, NULL);
     raw_stamp(stamp, sizeof stamp, id++);
     (void)snprintf(line, sizeof line, "%s:evil!x SMODES " NAME_B " " CHAN

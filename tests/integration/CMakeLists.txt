@@ -555,6 +555,9 @@ irc_add_integration_test(test_fed_roster test_fed_roster.c)
 # line to local members. Remote PART/JOIN/TOPIC observed on the other node.
 irc_add_integration_test(test_fed_state_emit test_fed_state_emit.c)
 
+# #606: KICK/MODE against a member on the peer resolves the federated roster,
+# emits SKICK/SMODES, and both rosters converge.
+irc_add_integration_test(test_fed_kick_mode_remote test_fed_kick_mode_remote.c)
 # #608: a local client departure (QUIT, bare EOF, flood close) must originate
 # an SPART so the peer drops the roster entry and the nickreg record. Each
 # case drops the B-side member one way and asserts far-side convergence.
