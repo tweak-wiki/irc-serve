@@ -26,6 +26,11 @@
  * reached through channel.h's include of it: a transitive include is what lets a
  * module keep using a symbol after the module that happened to pull it in stops. */
 #include "core/connection.h"
+/* fanout_forward_channel_sverb(): the teardown path originates a departure the
+ * same way a PART handler forwards one -- through 3.1's forward arm, never by
+ * hand. Named rather than reached through another header's include of it, per
+ * the convention above. */
+#include "core/fanout.h"
 #include "core/resume.h"
 #include "core/reply.h"
 
@@ -1267,6 +1272,37 @@ void chan_conn_gone(server_t *s, conn_t *c)
         chan_t *ch = c->chans[i];
 
         if (ch == NULL) {
+            continue;
+        }
+        /* #608: the departure the mesh never heard about. QUIT, EOF, the reap
+         * of either and a flood close all land here, so one SPART per channel
+         * with remote presence covers every closer. Forward-only: the local
+         * members get their PART from chan_member_leave() below (or the QUIT
+         * from handle_quit() on the quit_announced path), and a second write
+         * through fanout_deliver() would send it twice. No reason: a QUIT
+         * reason is not stored (there is no quit cache until Phase 9) and a
+         * hangup has none. Before the leave/drop below, because the dispose
+         * after them may free ch. Runs on the quit_announced path too: that
+         * skip is local-only, and the peer still needs the SPART. */
+        if (ch->nremotes > 0 || ch->nservers > 0) {
+            char prefix[CONN_HOSTMASK_MAX];
+            const char *sp[2];
+
+            sp[0] = c->nick;
+            sp[1] = ch->name;
+            if (conn_hostmask(c, prefix, sizeof prefix) != 0) {
+                (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE,
+                                                   "SPART", prefix, sp, 2, NULL);
+            }
+        }
+        /* Issue #609: a graceful QUIT already reached the union of this
+        * connection's channels from handle_quit() -- as QUIT, with the reason.
+        * Emitting PART here too would tell every member both, so the
+        * membership is dropped silently. A hangup never announced, and keeps
+        * the PART below. */
+        if (c->quit_announced != 0) {
+            member_drop(ch, c);
+            (void)chan_dispose_if_empty(s, ch);
             continue;
         }
         /* Silent to the departing conn: it is going away, and the reply module

@@ -389,6 +389,9 @@ irc_add_integration_test(test_ping_pong test_ping_pong.c)
 
 # 3.4 + Phase 3: QUIT closes through the reaper, and the nickname is released.
 irc_add_integration_test(test_quit test_quit.c)
+# Issue #609: a local QUIT renders as QUIT (not PART) to channel members,
+# and a renamer gets its own NICK echo plus channel/mesh fan-out.
+irc_add_integration_test(test_quit_nick_echo test_quit_nick_echo.c)
 
 # Issue #102: a client that disconnects WITHOUT QUIT -- the ordinary end of a
 # connection, and the path QUIT's test cannot reach -- must leave nothing behind
@@ -552,6 +555,11 @@ irc_add_integration_test(test_fed_roster test_fed_roster.c)
 # line to local members. Remote PART/JOIN/TOPIC observed on the other node.
 irc_add_integration_test(test_fed_state_emit test_fed_state_emit.c)
 
+# #608: a local client departure (QUIT, bare EOF, flood close) must originate
+# an SPART so the peer drops the roster entry and the nickreg record. Each
+# case drops the B-side member one way and asserts far-side convergence.
+irc_add_integration_test(test_fed_depart test_fed_depart.c)
+
 # 7/Phase 6: a PRIVMSG from A reaches B exactly once, the two-node ping-pong
 # settles, and 2.4's own-origin rule is the counter that proves it.
 irc_add_integration_test(test_fed_loop test_fed_loop.c)
@@ -616,6 +624,12 @@ irc_add_integration_test(test_fed_skick_log test_fed_skick_log.c)
 # client commands on a two-node mesh at all, because the SPART would have
 # removed the member first, and the test says so and pokes deliberately.
 irc_add_integration_test(test_fed_burst test_fed_burst.c)
+
+# #607: WHOIS/WHO/ISON answer remote members from the registry + roster union.
+# Two linked nodes with one client each on a shared channel; every query verb
+# is asserted on the wire, including qualified WHOIS and the still-401
+# unknown nick.
+irc_add_integration_test(test_fed_queries_remote test_fed_queries_remote.c)
 
 # #541: an acknowledged resync is not re-sent. A resync after a change sends
 # in full, an unchanged one is skipped (fed_burst_skipped, nothing on the

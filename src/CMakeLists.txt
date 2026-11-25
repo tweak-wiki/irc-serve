@@ -130,6 +130,9 @@ add_library(irc_core STATIC
   # #543: the nick/channel string -> pointer map split out of server.c.
   # The registries that use it stay there; this file holds the table.
   core/strtab.c
+  # #543: the writer pool (demand-steal drain threads) split out of server.c.
+  # The lifecycle, registries and shutdown stay there; this file holds the pool.
+  core/server_writers.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
@@ -139,10 +142,18 @@ add_library(irc_core STATIC
   # membership) split out of fanout.c. Delivery and forwarding stay there;
   # this file holds the "what did this name refer to" half.
   core/fanout_resolve.c
+  # #543: the forward leg (target-set walk + the fanout_forward_* entry
+  # points) split out of fanout.c. Delivery stays there; this file holds the
+  # forward half and the two static helpers it owns.
+  core/fanout_forward.c
   core/commands.c
   # #543: the AUTHENTICATE family (SASL PLAIN exchange) split out of commands.c.
   # The dispatch table stays there; this file holds the handler and its helpers.
   core/commands_auth.c
+  # #543: the account-registration family (REGISTER/ACCOUNT/UNREGISTER refusal
+  # policy) split out of commands.c. The dispatch table stays there; this file
+  # holds the handlers and their helper.
+  core/commands_account.c
   # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
   # The dispatch table stays there; this file holds the verbs and their helpers.
   core/commands_info.c
@@ -181,6 +192,10 @@ add_library(irc_core STATIC
   # The frozen S-verb shapes: the per-verb parameter encoders, split out of
   # verbs.c (issue #543). Listed beside verbs.c, whose header declares them.
   federation/shapes.c
+  # The ADVERTISE store: what a peer advertises and the collision check, split
+  # out of verbs.c (issue #543). Listed beside verbs.c; the store readers stay
+  # declared in federation/link.h.
+  federation/advertise.c
   federation/dedup.c
   # The peer link: the table, the FEDERATE exchange and the tick. It is listed
   # after the two above because it uses both -- dedup for T5 and verbs.c for
