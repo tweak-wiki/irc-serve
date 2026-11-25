@@ -261,6 +261,11 @@ add_library(irc_core STATIC
   # (issue #543). Listed beside link.c; the exchange half it reaches stays
   # declared in federation/link.h.
   federation/tick.c
+  # The open/close + per-node timer/retry overrides (fed_open/fed_close/
+  # fed_set_timeouts/fed_hs_due/fed_set_retry, with link_wipe()), split out of
+  # link.c (issue #543). Listed beside link.c; all five stay declared in
+  # federation/link.h.
+  federation/link_config.c
   # The handshake FSM: the caller-owned-context transition rules, split out of
   # link.c (issue #543). It is listed here, beside its only production caller,
   # because that is where a reader looking for the rules will look first.

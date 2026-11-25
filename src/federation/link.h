@@ -846,6 +846,16 @@ void fed_tick(server_t *s, uint64_t now_ms);
  */
 void fed_on_federate(server_t *s, conn_t *c, const message_t *m);
 
+/* The dispatch seam fed_open() installs: route a FEDERATE to fed_on_federate(),
+ * a line on an established link to fed_dispatch() via the saved inner dispatch,
+ * and anything else to the inner dispatch untouched.
+ *
+ * It is exported for the same reason the TU-26 exchange helpers are:
+ * link_config.c's fed_open() installs it, and one implementation in link.c
+ * with a declaration here is the whole of the sharing (issue #543 TU-30).
+ */
+void fed_dispatch_hook(server_t *s, conn_t *c, const message_t *m);
+
 /* The OPERATOR's reset: return the link to INIT, keeping `initiator` and the
  * pre-resolved address, and spend a fresh retry budget on it.
  *
