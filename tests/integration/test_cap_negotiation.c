@@ -739,10 +739,13 @@ static void test_sasl_too_long(char *store_path)
                 ":irc.test AUTHENTICATE * +\r\n");
 
     /* 1500 base64-alphabet bytes: past SASL_MAX_RESPONSE, inside IRC_MAX_LINE,
-     * so the handler -- not the framing -- answers. The connection is marked
-     * CLOSING on this arm (as before), whose write queue the loop drops rather
-     * than flushes, so the 905-vs-904 distinction is asserted on the node's
-     * own output: RESPONSE_TOO_LONG is the 905 arm, BAD_PAYLOAD the 904 one. */
+     * so the handler -- not the framing -- answers. Issue #658: the refusal
+     * arms used to queue AUTHENTICATE * + 905 behind mark_closing, and at
+     * --writers 0 the loop's write step runs before its read step per
+     * iteration while a CLOSING conn leaves the poll set, so the queued
+     * refusal died in the reaper's close() unsent and the client saw a bare
+     * EOF. The handler now flushes before the mark, so both lines must reach
+     * the client before EOF. */
     {
         char payload[1600];
         memset(payload, 'A', 1500u);
@@ -753,11 +756,65 @@ static void test_sasl_too_long(char *store_path)
     TF_CHECK_MSG(nf_expect(&node, "outcome=REJECTED reason=RESPONSE_TOO_LONG",
                            T_IO_MS) == 0,
                  "an over-long response was not answered on the 905 arm");
+    /* RFC 4422's server-chosen abort first, then the 905 verdict. */
+    expect_line(&c, "the abort before the 905",
+                ":irc.test AUTHENTICATE *\r\n");
+    TF_CHECK_MSG(tc_expect(&c, " 905 * :SASL authentication failed: response "
+                               "too long", T_IO_MS) == 0,
+                 "an over-long response never reached the client (#658)");
 
     nf_kill(&node);
     nf_free(&node);
     tc_close(&c);
 }
+
+/* --------------------------------------------------------------------------
+ * Issue #658: a malformed SASL payload must reach the client as
+ * AUTHENTICATE * + 904 BEFORE the close, not die queued behind
+ * mark_closing. `Z2FyYmFnZS1uby1udWxz` is valid base64 ("garbage-no-nuls")
+ * with no NUL fields, so plain_parse fails and the BAD_PAYLOAD arm answers.
+ * ------------------------------------------------------------------------ */
+static void test_sasl_bad_payload(char *store_path)
+{
+    nf_node_t node;
+    test_client_t c;
+    char portbuf[16];
+    char *argv[6];
+
+    tc_init(&c);
+    (void)snprintf(portbuf, sizeof portbuf, "0");
+    argv[0] = (char *)"irc-serve";
+    argv[1] = portbuf;
+    argv[2] = (char *)"--sasl-store";
+    argv[3] = store_path;
+    argv[4] = NULL;
+    argv[5] = NULL;
+    TF_CHECK(nf_spawn_binary_argv(&node, argv) == 0);
+    TF_CHECK_MSG(tc_connect(&c, node.port) == 0, "tc_connect failed");
+
+    TF_CHECK_MSG(tc_send(&c, "CAP END") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE PLAIN") == 0, "tc_send failed");
+    expect_line(&c, "the initial-response request",
+                ":irc.test AUTHENTICATE * +\r\n");
+
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE Z2FyYmFnZS1uby1udWxz") == 0,
+                 "tc_send failed");
+    TF_CHECK_MSG(nf_expect(&node, "outcome=REJECTED reason=BAD_PAYLOAD",
+                           T_IO_MS) == 0,
+                 "a malformed payload was not answered on the 904 arm");
+    /* RFC 4422's server-chosen abort first, then the 904 verdict -- both must
+     * arrive before EOF even though the connection is closing. */
+    expect_line(&c, "the abort before the 904",
+                ":irc.test AUTHENTICATE *\r\n");
+    TF_CHECK_MSG(tc_expect(&c, " 904 * :SASL PLAIN payload was not base64 or "
+                               "not three NUL-separated fields", T_IO_MS) == 0,
+                 "a malformed payload never reached the client (#658)");
+
+    nf_kill(&node);
+    nf_free(&node);
+    tc_close(&c);
+}
+
 
 /* --------------------------------------------------------------------------
  * Part 5: a credential file the operator got wrong, which must NOT become a
@@ -1502,6 +1559,7 @@ int main(void)
                          "correct horse");
     test_sasl_abort(good_store);
     test_sasl_too_long(good_store);
+    test_sasl_bad_payload(good_store);
     test_no_credential_in_the_log(good_store);
 
     /* A node given NO --sasl-store at all: the default, and the state most
