@@ -552,6 +552,10 @@ irc_add_integration_test(test_fed_roster test_fed_roster.c)
 # line to local members. Remote PART/JOIN/TOPIC observed on the other node.
 irc_add_integration_test(test_fed_state_emit test_fed_state_emit.c)
 
+# #606: KICK/MODE against a member on the peer resolves the federated roster,
+# emits SKICK/SMODES, and both rosters converge.
+irc_add_integration_test(test_fed_kick_mode_remote test_fed_kick_mode_remote.c)
+
 # 7/Phase 6: a PRIVMSG from A reaches B exactly once, the two-node ping-pong
 # settles, and 2.4's own-origin rule is the counter that proves it.
 irc_add_integration_test(test_fed_loop test_fed_loop.c)

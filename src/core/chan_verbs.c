@@ -1695,10 +1695,31 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
  * is more specific than "no such nick", and a client that acted on 401 would go
  * looking for a user who is simply elsewhere.
  */
+/* The federated half of target resolution (#606). chan_find_nick() walks only
+ * ch->members[] (local conns); a member on a peer lives in ch->remotes[].
+ * File-static, not shared: WHOIS/WHO/ISON need the same union (#607) and the
+ * first helper to land wins -- this one stays local so neither side rebases.
+ * Returns the entry or NULL; the caller owns nothing. */
+static chan_remote_t *chan_remote_by_nick(chan_t *ch, const char *nick)
+{
+    size_t i;
+
+    if (ch == NULL || nick == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < ch->nremotes; i++) {
+        if (chan_same_name(ch->remotes[i].nick, nick)) {
+            return &ch->remotes[i];
+        }
+    }
+    return NULL;
+}
+
 void handle_kick(server_t *s, conn_t *c, const message_t *m)
 {
     chan_t *ch;
     struct member *target;
+    chan_remote_t *remote;
     const char *reason;
     char clean_reason[CHAN_MAX_KICK_REASON + 1u];
     size_t kept_reason;
@@ -1838,7 +1859,10 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         return;
     }
     target = chan_find_nick(ch, m->params[1]);
-    if (target == NULL) {
+    /* A member of THIS channel on a peer is on the channel (#606): the local
+     * walk above misses it, so the remote roster is asked before 441/401. */
+    remote = (target == NULL) ? chan_remote_by_nick(ch, m->params[1]) : NULL;
+    if (target == NULL && remote == NULL) {
         /* 441 versus 401, and the difference is a fact about the node rather
          * than about the channel. A nickname this node has NEVER heard of is
          * 401. A nickname it holds -- registered, somewhere -- that simply is
@@ -1871,7 +1895,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         return;
     }
     printf("[observable] chan_kick: channel=%s by=%s target=%s\n", ch->name, c->nick,
-           target->c->nick);
+           (target != NULL) ? target->c->nick : remote->nick);
 
     /* The echo, in RFC 1459 2.3.1's parameter order: prefix, channel, target,
      * reason. */
@@ -1880,7 +1904,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * target is prepended by the fan-out. The frozen SKICK shape puts the
      * KICKER first and the channel second; the re-shaping is fed_sverb_params()'s
      * job and is not something this handler knows about. */
-    params[0] = target->c->nick;
+    params[0] = (target != NULL) ? target->c->nick : remote->nick;
     params[1] = reason;
     deliver_state_change(s, c, ch, "KICK", prefix, params, 2);
     if (verdict == CHAN_VERDICT_FORWARD) {
@@ -1888,7 +1912,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
         const char *echo[3];
 
         echo[0] = ch->name;
-        echo[1] = target->c->nick;
+        echo[1] = (target != NULL) ? target->c->nick : remote->nick;
         echo[2] = reason;
         (void)send_line(s, c, prefix, "KICK", echo, 3);
     }
@@ -1902,7 +1926,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
                ch->name, c->nick, raw_reason_len, kept_reason);
     }
 
-    {
+    if (target != NULL) {
         conn_t *kicked = target->c;
 
         /* Remove, then detach from the kicked connection. The broadcast above
@@ -1910,8 +1934,12 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
          * what keeps teardown from trying to remove it a second time. */
         (void)chan_remove_member(ch, kicked);
         (void)chan_detach_conn(kicked, ch);
-        (void)chan_dispose_if_empty(s, ch);
+    } else {
+        /* A peer member: the fan-out above already carried the SKICK to the
+         * member's node, so this is the local half -- drop the roster entry. */
+        (void)chan_remote_remove(ch, remote->server, remote->nick);
     }
+    (void)chan_dispose_if_empty(s, ch);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2561,23 +2589,37 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             next_arg++;
             target = chan_find_nick(ch, nick);
             if (target == NULL) {
-                /* 441/401 for the same reason as in KICK: "real but not here"
-                 * and "does not exist" are different facts. A MODE +o naming a
-                 * nickname that is not on the channel is a client bug, and 441
-                 * says precisely which bug. */
-                if (server_nick_lookup(s, nick) != NULL) {
-                    (void)reply(s, c, "441",
-                                (const char *const[]){ nick, ch->name }, 2,
-                                "They're not on that channel");
-                } else {
-                    (void)reply(s, c, "401", (const char *const[]){ nick },
-                                1, "No such nick/channel");
+                /* A peer member of THIS channel is on the channel (#606). */
+                chan_remote_t *rm = chan_remote_by_nick(ch, nick);
+                unsigned flag = (mode == 'o') ? CHAN_MEMBER_OP : CHAN_MEMBER_VOICE;
+
+                if (rm == NULL) {
+                    /* 441/401 for the same reason as in KICK: "real but not here"
+                     * and "does not exist" are different facts. A MODE +o naming a
+                     * nickname that is not on the channel is a client bug, and 441
+                     * says precisely which bug. */
+                    if (server_nick_lookup(s, nick) != NULL) {
+                        (void)reply(s, c, "441",
+                                    (const char *const[]){ nick, ch->name }, 2,
+                                    "They're not on that channel");
+                    } else {
+                        (void)reply(s, c, "401", (const char *const[]){ nick },
+                                    1, "No such nick/channel");
+                    }
+                    return;
                 }
-                return;
+                if (plus) {
+                    rm->flags |= flag;
+                } else {
+                    rm->flags &= ~flag;
+                }
+                nick = rm->nick;
+            } else {
+                (void)chan_set_member_flags(
+                    ch, target->c, plus,
+                    (mode == 'o') ? CHAN_MEMBER_OP : CHAN_MEMBER_VOICE);
+                nick = target->c->nick;
             }
-            (void)chan_set_member_flags(
-                ch, target->c, plus,
-                (mode == 'o') ? CHAN_MEMBER_OP : CHAN_MEMBER_VOICE);
             /* The echo, in RFC 1459 2.3.1's order: prefix, channel, mode, nick.
              * Four parameters, not three with a space in the last -- the wire has
              * no compound parameter, and message_format() would REFUSE one
@@ -2592,10 +2634,10 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
              * containing a separator in a non-final position rather than
              * reshaping it, and RFC 1459 2.3.1 has them as two. */
             params[0] = rendered;
-            params[1] = target->c->nick;
+            params[1] = nick;
             deliver_state_change(s, c, ch, "MODE", prefix, params, 2);
             printf("[observable] chan_member_mode: channel=%s by=%s nick=%s "
-                   "mode=%c set=%d\n", ch->name, c->nick, target->c->nick, mode,
+                   "mode=%c set=%d\n", ch->name, c->nick, nick, mode,
                    plus);
             continue;
         }

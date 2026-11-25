@@ -2255,6 +2255,37 @@ static void fed_in_smodes(server_t *s, server_link_t *link, chan_t *ch,
                 }
                 continue;
             }
+            if ((m == 'o' || m == 'v') && nparams == 4 && params[3][0] != '\0') {
+                /* A prefix mode names a MEMBER, not a channel property (#606):
+                 * without this a peer's `SMODES +o nick` fell through to
+                 * chan_mode_set() and cached `o` in ch->modes[] -- visible in
+                 * 324, invisible in 353. The origin already applied this to its
+                 * own roster; here the cache converges: a local member takes it
+                 * through chan_set_member_flags(), a roster entry in place. */
+                struct member *tm = chan_find_nick(ch, params[3]);
+                unsigned flag = (m == 'o') ? CHAN_MEMBER_OP : CHAN_MEMBER_VOICE;
+
+                if (tm != NULL && tm->c != NULL) {
+                    (void)chan_set_member_flags(ch, tm->c, on, flag);
+                } else {
+                    for (size_t k = 0; k < ch->nremotes; k++) {
+                        if (!chan_same_name(ch->remotes[k].nick, params[3])) {
+                            continue;
+                        }
+                        if (on) {
+                            ch->remotes[k].flags |= flag;
+                        } else {
+                            ch->remotes[k].flags &= ~flag;
+                        }
+                        break;
+                    }
+                }
+                if (napplied + 1u < sizeof applied) {
+                    applied[napplied++] = m;
+                    applied[napplied] = '\0';
+                }
+                continue;
+            }
             if (chan_mode_set(ch, m, on) > 0 && napplied + 1u < sizeof applied) {
                 applied[napplied++] = m;
                 applied[napplied] = '\0';
@@ -2471,6 +2502,22 @@ static void fed_in_skick(server_t *s, server_link_t *link, chan_t *ch,
             fed_local_emit(s, ch, who, "KICK", lp, 2);
         } else {
             fed_local_emit(s, ch, who, "KICK", &params[2], 1);
+        }
+    }
+    /* The victim may be LOCAL here (#606): a KICK names a member of the
+     * channel, and on the victim's own node that member is a conn, not a
+     * roster entry, so the remote removal above missed it. AFTER the emit --
+     * the victim has to see the KICK -- and before the forward, mirroring the
+     * local KICK path's remove-then-detach (which keeps teardown from removing
+     * it twice). A SKICK for a nick this node does not hold is a no-op. */
+    {
+        struct member *victim = chan_find_nick(ch, params[2]);
+
+        if (victim != NULL && victim->c != NULL) {
+            conn_t *vc = victim->c;
+
+            (void)chan_remove_member(ch, vc);
+            (void)chan_detach_conn(vc, ch);
         }
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SKICK", prefix,
