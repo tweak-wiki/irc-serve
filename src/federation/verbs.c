@@ -1608,6 +1608,11 @@ static void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
                                        sizeof actor);
 
     (void)chan_remote_remove(ch, link->name, params[0]);
+    /* #608: the registry entry the SJOIN for this member learned, keyed the
+     * same way the learn was (holder = the link it arrived on), so a departed
+     * member stops answering nick@server here instead of haunting it until
+     * the next burst. A PARTed-but-present nick re-learns on its next SJOIN. */
+    fed_nickreg_forget(s, params[0], link->name);
     fed_touch_server(ch, link->name, 0);
     fed_obs("[observable] fed_spart: channel=%s member=%s server=%s remote=%zu\n",
            ch->name, params[0], link->name, ch->nremotes);
