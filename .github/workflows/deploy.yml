@@ -65,10 +65,11 @@ jobs:
           chmod +x /tmp/irc-deploy/irc-serve
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-staging"
-          # restart (not enable --now): --now only starts stopped units, so a
-          # redeploy would keep serving the stale binary (#610). restart also
-          # starts an inactive unit, so first installs are covered.
-          sudo systemctl enable irc-serve-staging
+          # restart, not enable --now: --now never restarts running units, so
+          # redeploys kept serving the stale binary (#610). restart also starts
+          # an inactive unit, and the unit is already enabled at boot by the
+          # hand-install (DEPLOY.md step 0) — no enable call needed, and bare
+          # `enable` is not in the sudoers allowlist.
           sudo systemctl restart irc-serve-staging
           sleep 3
           # Protocol-level, not a bare connect: a wedged binary that still
@@ -95,8 +96,9 @@ jobs:
           chmod +x /tmp/irc-deploy/irc-serve
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
-          # restart (not enable --now): see staging above (#610).
-          sudo systemctl enable irc-serve-stable
+          # restart (not enable --now): see staging above (#610). No bare
+          # `enable`: not in the sudoers allowlist, and the hand-install
+          # already enabled the unit.
           sudo systemctl restart irc-serve-stable
           sleep 3
           # Protocol-level, not a bare connect: a wedged binary that still
@@ -152,8 +154,9 @@ jobs:
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-a"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
           # restart (not enable --now): --now never restarts running units, so
-          # redeploys kept serving the stale binary (#610).
-          sudo systemctl enable irc-serve-fed-a irc-serve-fed-b
+          # redeploys kept serving the stale binary (#610). No bare `enable`:
+          # not in the sudoers allowlist, and the hand-install already
+          # enabled both units.
           RESTART_TS=$(date +%s)
           sudo systemctl restart irc-serve-fed-a irc-serve-fed-b
           sleep 5
