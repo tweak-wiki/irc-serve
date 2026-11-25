@@ -146,6 +146,10 @@ add_library(irc_core STATIC
   # out of server.c. The lifecycle and shutdown stay there; this
   # file holds the dial side of 3.4.
   core/server_dial.c
+  # #543: the listener arms (listen/port/listen_tls/accept_tls_one) split
+  # out of server.c. The lifecycle and shutdown stay there; this
+  # file holds the bind side of 3.4.
+  core/server_listen.c
   core/channel.c
   core/poll_loop.c
   core/reply.c

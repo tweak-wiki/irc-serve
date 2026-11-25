@@ -44,6 +44,9 @@
  *                          reachable; the listener at shutdown; and dials that
  *                          never became connections (server_dial_progress()'s
  *                          DIAL_FAILED arms and the shutdown walk).
+ *                          (#543 TU-28: the bind/listen arms moved verbatim to
+ *                          server_listen.c, taking the pre-reachable closes with
+ *                          them; the shutdown-listener close stays in server.c.)
  *   everything else         NONE.
  *
  * ---------------------------------------------------------------------------

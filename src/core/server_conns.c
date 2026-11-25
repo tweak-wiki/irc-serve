@@ -2,7 +2,7 @@
  * verbatim out of server.c (issue #543); the lifecycle, nick/channel
  * registries and shutdown stay there. The two accept-time helpers move with
  * the registry and drop `static` (TU-10 precedent: fanout_stamp), because the
- * listeners and dial that stay in server.c share them.
+ * listeners (core/server_listen.c) and dial (core/server_dial.c) share them.
  */
 #include "core/server_conns.h"
 

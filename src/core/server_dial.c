@@ -1,7 +1,8 @@
 /* server_dial.c -- see core/server.h. The nonblocking outbound-dial FSM
  * (server_dial_count/server_dial/server_dial_collect/server_dial_progress),
- * verbatim out of server.c (issue #543); the lifecycle, link lookup, shutdown
- * and listen/accept arms stay there. The dial functions were already declared
+ * verbatim out of server.c (issue #543); the lifecycle, link lookup and
+ * shutdown stay there, and the listen/accept arms live in
+ * core/server_listen.c. The dial functions were already declared
  * in core/server.h and the block has no static helpers, so there is no new
  * header (fanout_deliver.c precedent).
  */
