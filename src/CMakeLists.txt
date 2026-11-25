@@ -143,6 +143,10 @@ add_library(irc_core STATIC
   # #543: the AUTHENTICATE family (SASL PLAIN exchange) split out of commands.c.
   # The dispatch table stays there; this file holds the handler and its helpers.
   core/commands_auth.c
+  # #543: the account-registration family (REGISTER/ACCOUNT/UNREGISTER refusal
+  # policy) split out of commands.c. The dispatch table stays there; this file
+  # holds the handlers and their helper.
+  core/commands_account.c
   # #543: the server-info family (LUSERS/ADMIN/INFO) split out of commands.c.
   # The dispatch table stays there; this file holds the verbs and their helpers.
   core/commands_info.c
