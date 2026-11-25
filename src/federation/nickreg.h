@@ -279,6 +279,19 @@ const char *fed_nickreg_holder(const server_t *s, const char *nick, char *out,
 const char *fed_nickreg_render(const server_t *s, const char *nick,
                                const char *server, char *out, size_t cap);
 
+/* The cached identity fields for a WHOIS/WHO/ISON answer (#607): the stored
+ * nick, holder, user, host and signon, or 0 when this node holds no entry.
+ * `server` scopes the lookup the way nickreg_find() does (NULL/"" matches any
+ * holder). Each out field is copied only when its cap is non-zero; fields do
+ * not fit is impossible at the registry's own widths, so a short cap still
+ * terminates rather than failing. Pointers are NOT returned because entries
+ * never move but ARE freed, and a WHOIS holding one across a send would be a
+ * use-after-purge. */
+int fed_nickreg_info(const server_t *s, const char *nick, const char *server,
+                      char *nick_out, size_t nick_cap, char *srv_out,
+                      size_t srv_cap, char *user_out, size_t user_cap,
+                      char *host_out, size_t host_cap, uint64_t *signon_out);
+
 /* THE RENAME-THE-LOSER DECISION, and it is a function rather than a rule in
  * commands.c because the DECISION and the ACT of renaming have to be in one
  * place: the winner is chosen by a comparison both sides of the mesh can make,
