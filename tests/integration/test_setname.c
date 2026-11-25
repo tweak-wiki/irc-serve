@@ -20,11 +20,12 @@
  *      to stand in for it would put a command word on the wire no client on this
  *      node has been told to expect.
  *   3. AN OVER-LONG REALNAME IS REFUSED, NOT TRUNCATED. This is the case the whole
- *      validation path exists for. `USER` truncates -- a client that has sent NICK
- *      and USER is otherwise stranded with no way to recover -- but SETNAME arrives
- *      on a live connection where refusing costs nothing, and a truncated realname
- *      is one the user did not write which this node then reports to every member of
- *      every channel they are on. The previous value is left EXACTLY as it was and
+ *      validation path exists for. `USER` refuses it too -- a 417 holding
+ *      registration, so the client can retry rather than registering under a
+ *      name it never wrote -- and SETNAME arrives on a live connection where
+ *      refusing costs nothing. A truncated realname is one the user did not
+ *      write which this node then reports to every member of every channel
+ *      they are on. The previous value is left EXACTLY as it was and
  *      that is asserted, not assumed.
  *   4. A HOSTILE REALNAME IS REFUSED TOO. A realname reaches this node's own log
  *      with no escaping, and 3.2 says the host is OBSERVED rather than asserted --

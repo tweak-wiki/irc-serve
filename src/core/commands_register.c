@@ -385,6 +385,20 @@ void handle_user(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
+    /* LENGTH IS REFUSED, like SETNAME, and the guard above is why the check is
+     * safe: dispatch does not enforce arity, so m->params[3] is only valid
+     * past the nparams < 4 return. A refused USER holds registration -- nothing
+     * is stored, user_seen stays clear, and the client can retry -- because a
+     * truncated realname would be a value the user never wrote that this node
+     * then reports as theirs. */
+    if (conn_realname_check(m->params[3]) == CONN_REALNAME_TOO_LONG) {
+        (void)reply_refused(s, c, "USER", "ERR_INPUTTOOLONG", "417", NULL, 0,
+                            "Realname is not acceptable");
+        printf("[observable] realname_refused: fd=%d nick=%s verb=USER "
+               "reason=TOO_LONG len=%zu\n",
+               c->fd, c->nick, strlen(m->params[3]));
+        return;
+    }
     /* ------------------------------------------------------------------------
      * THE IDENT, AND WHY IT IS VALIDATED AT INGEST RATHER THAN FILTERED AT RENDER
      * ------------------------------------------------------------------------
@@ -421,10 +435,9 @@ void handle_user(server_t *s, conn_t *c, const message_t *m)
      *      READING, and there may be more.
      *
      *   3. `conn_realname_check()` IS THE DIRECT PRECEDENT: the same field-list
-     *      argument, refusing so registration completes with an empty field. A
-     *      client that sends a control byte registers with no ident -- same
-     *      consequence as an over-long realname, which this function already
-     *      accepts.
+     *      argument, checked at ingest before anything is stored. A client that
+     *      sends a control byte registers with no ident -- the refusal empties
+     *      the field and the registration still completes.
      *
      * THE RULE IS `nickreg_ident_ok()`, which is THE PROJECT'S OWN RULE FOR A
      * HOSTMASK COMPONENT -- nickreg.c's header calls it exactly that -- and which
@@ -525,11 +538,12 @@ void handle_user(server_t *s, conn_t *c, const message_t *m)
      * every later roster, which is exactly the kind of discrepancy 3.4's observable
      * output exists to make findable.
      *
-     * LENGTH IS STILL TRUNCATED HERE and refused by SETNAME, and that difference is
-     * the same argument from the other side: 3.2's rule against a silently shortened
-     * parameter is about a value the node then REPORTS as the user's, and at
-     * registration the alternative is a stranded connection. copy_field() says so
-     * at its own definition and the truncation is announced rather than silent. */
+     * LENGTH IS REFUSED HERE, exactly as SETNAME refuses it: the TOO_LONG case
+     * never reaches this block, having been answered 417 above with nothing
+     * stored and registration held. What remains below is only the BAD_BYTE
+     * case, where the registration completes with an empty realname for the
+     * stranded-connection reason given above. copy_field() below therefore
+     * cannot truncate a realname -- anything over the bound is already gone. */
     v = conn_realname_check(m->params[3]);
     if (v == CONN_REALNAME_BAD_BYTE) {
         printf("[observable] realname_refused: fd=%d nick=%s verb=USER "
