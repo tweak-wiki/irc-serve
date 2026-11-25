@@ -4,7 +4,7 @@
  * Split out of federation/verbs.c (#543): fed_emit_departure_quits() stays
  * static in state.c (only the two departures call it); fed_in_shutdown(),
  * fed_in_spart(), fed_in_stopic(), fed_in_smodes(), fed_in_skick() and
- * fed_in_squit() moved verbatim and are extern so fed_dispatch() in verbs.c
+ * fed_in_squit() moved verbatim and are extern so fed_dispatch() in dispatch.c
  * can reach them. fed_touch_server() and fed_actor_prefix() stay in verbs.c
  * and are extern via federation/verbs.h: SJOIN/SNICK still use them.
  */

@@ -16,7 +16,7 @@
  * away (a `SQUIT`, queued from fed_link_down() and emitted straight onto the
  * wire rather than through the forwarded-verb table, for the reason the function
  * states). It does not carry messages: the inbound S-verb guard chain and its
- * handlers are federation/verbs.c's fed_dispatch() (C3), and the
+ * handlers are federation/dispatch.c's fed_dispatch() (C3), and the
  * resync is federation/burst.c's -- which this file CALLS, at establishment and on
  * link-down, and does not implement. The consequence to be aware of while reading
  * the tick is written out under "WHAT T3 COSTS A TEST" below -- it is the one place
@@ -823,7 +823,7 @@ void fed_tick(server_t *s, uint64_t now_ms);
  *
  * It is exported, and it is exported as a NAMED function rather than left as
  * three lines inside the dispatch hook, because two callers need it and they
- * are reached by different paths. federation/verbs.c's fed_dispatch() reaches it
+ * are reached by different paths. federation/dispatch.c's fed_dispatch() reaches it
  * at its G2 guard, for a FEDERATE that arrives on a link that is ALREADY
  * established -- a re-claim, which fed_check_federate() reports as
  * DUPLICATE_LINK or NAME_MISMATCH. The hook in this file reaches it for the

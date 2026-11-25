@@ -658,12 +658,13 @@ const char *fed_prefix_server(const char *prefix, char *out, size_t cap);
  */
 /* ADVERTISE <load%> [<name> <host> <port>]: record the peer's load and optional
  * dial hint, then run the name-collision check. Defined in
- * federation/advertise.c (issue #543); called from fed_dispatch() below. */
+ * federation/advertise.c (issue #543); called from fed_dispatch()
+ * (federation/dispatch.c). */
 void fed_in_advertise(server_t *s, server_link_t *link, const char *prefix,
                       const irc_serve_tags_t *tags, const char *const *params,
                       int nparams);
 
-void fed_dispatch(server_t *s, conn_t *c, const message_t *m);
+/* fed_dispatch() lives in federation/dispatch.{c,h} (issue #543). */
 
 /* ---------------------------------------------------------------------------
  * The node-wide forward, for the verbs that are about the NODE and not about a

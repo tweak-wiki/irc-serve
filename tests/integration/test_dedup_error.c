@@ -64,6 +64,7 @@
 #include "core/message.h"
 #include "core/server.h"
 #include "federation/dedup.h"
+#include "federation/dispatch.h"
 #include "federation/link.h"
 #include "federation/verbs.h"
 #include "federation_handshake.h"

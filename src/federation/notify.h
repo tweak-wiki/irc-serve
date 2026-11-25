@@ -2,8 +2,8 @@
  *
  * Split out of federation/verbs.c (#543): fed_relay_notify(),
  * fed_notify_prefix(), fed_notify_channels(), fed_in_ssetname(),
- * fed_in_saway() and fed_in_sinvite() moved verbatim. fed_dispatch() stays in
- * verbs.c and reaches the three handlers through this header; the three
+ * fed_in_saway() and fed_in_sinvite() moved verbatim. fed_dispatch() lives in
+ * dispatch.c and reaches the three handlers through this header; the three
  * helpers stay static: nothing outside notify.c calls them.
  */
 #ifndef IRC_FEDERATION_NOTIFY_H

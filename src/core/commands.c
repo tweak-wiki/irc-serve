@@ -32,6 +32,7 @@
 /* For transport_is_tls() -- the one question handle_authenticate() asks about a
  * connection before accepting a PLAIN credential (#167). */
 #include "core/transport.h"
+#include "federation/dispatch.h"
 #include "federation/nickreg.h"
 #include "federation/verbs.h"
 #include "account_store.h"

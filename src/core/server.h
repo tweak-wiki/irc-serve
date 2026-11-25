@@ -828,7 +828,7 @@ struct server {
 
     /* ------------------------------------------------------------------------
      * Phase 6 C3: the INBOUND guard chain, one counter per guard that can drop
-     * a line. federation/verbs.c's fed_dispatch() is the only writer.
+    * a line. federation/dispatch.c's fed_dispatch() is the only writer.
      * ------------------------------------------------------------------------
      *
      * ONE COUNTER PER GUARD, and that is the property worth having: a single
