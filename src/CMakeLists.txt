@@ -137,6 +137,10 @@ add_library(irc_core STATIC
   # out of server.c. The lifecycle, nick/channel registries and shutdown stay
   # there; this file holds the registry.
   core/server_conns.c
+  # #543: the nick and channel registries (claim/release/lookup/enumeration,
+  # attach/get/detach) split out of server.c. The lifecycle, link/dial
+  # registries and shutdown stay there; this file holds the registries.
+  core/server_registry.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
