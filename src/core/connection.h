@@ -1176,6 +1176,13 @@ typedef struct conn {
     atomic_size_t woff;
     atomic_size_t wlen;
     size_t      wcap;
+    /* Issue #609: 1 once handle_quit() has emitted `:nick!u@h QUIT [:reason]`
+    * to the union of this connection's channels. chan_conn_gone() then drops
+    * the membership silently instead of emitting PART -- a QUIT is not a
+    * leave of one channel. A hangup never sets it, so the reaper path keeps
+    * its PART. After the handoff group so that group's layout pinning is
+    * untouched. */
+    int         quit_announced;
 } conn_t;
 
 /* Allocate a zeroed connection for `fd` (state CONN_REG_PASS, kind `kind`,
