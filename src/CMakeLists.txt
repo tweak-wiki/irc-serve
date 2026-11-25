@@ -130,6 +130,9 @@ add_library(irc_core STATIC
   # #543: the nick/channel string -> pointer map split out of server.c.
   # The registries that use it stay there; this file holds the table.
   core/strtab.c
+  # #543: the writer pool (demand-steal drain threads) split out of server.c.
+  # The lifecycle, registries and shutdown stay there; this file holds the pool.
+  core/server_writers.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
