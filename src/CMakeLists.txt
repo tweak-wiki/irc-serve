@@ -150,6 +150,10 @@ add_library(irc_core STATIC
   # out of server.c. The lifecycle and shutdown stay there; this
   # file holds the bind side of 3.4.
   core/server_listen.c
+  # #543: the shutdown trio (phase1 goodbye/phase2 close/shutdown) split
+  # out of server.c. The lifecycle, clock, tick and msg-id counter stay
+  # there; this file holds the teardown.
+  core/server_shutdown.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
