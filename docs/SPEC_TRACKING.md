@@ -1436,8 +1436,10 @@ de-facto or IRCv3 origin of each.
   an unknown channel, with the name echoed upper-cased. RFC 2812 3.3.2 answers a
   MODE naming a nickname with `221`, or `501`/`502` for a change. A client that
   queries a user's modes is told "no such channel" about a connected user, and
-  `501`/`502`/`221` are all unreachable as a result. It was left unchanged: every
-  answer needs a user-mode string this node does not have.
+ `501`/`502`/`221` are all unreachable as a result. It was left unchanged: every
+ answer needs a user-mode string this node does not have. (Fixed afterwards: +i
+ is now evaluated on `conn_t::invisible` and `MODE <nick>` answers 221/501/502 —
+ issue #668, `docs/RFC2812_CONFORMANCE.md` §6.1/§6.8.)
 
 ### 11.3 Two arity deviations found, and NOT fixed — this is the open decision
 
