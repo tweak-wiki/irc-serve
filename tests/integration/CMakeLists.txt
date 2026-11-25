@@ -620,6 +620,12 @@ irc_add_integration_test(test_fed_skick_log test_fed_skick_log.c)
 # removed the member first, and the test says so and pokes deliberately.
 irc_add_integration_test(test_fed_burst test_fed_burst.c)
 
+# #607: WHOIS/WHO/ISON answer remote members from the registry + roster union.
+# Two linked nodes with one client each on a shared channel; every query verb
+# is asserted on the wire, including qualified WHOIS and the still-401
+# unknown nick.
+irc_add_integration_test(test_fed_queries_remote test_fed_queries_remote.c)
+
 # #541: an acknowledged resync is not re-sent. A resync after a change sends
 # in full, an unchanged one is skipped (fed_burst_skipped, nothing on the
 # wire), and a later change resyncs in full again.

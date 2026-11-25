@@ -18,7 +18,9 @@
  * that happened to pull it in stops. */
 #include "core/connection.h"
 #include "core/fanout.h"
+#include "core/message.h"
 #include "core/reply.h"
+#include "federation/nickreg.h"
 #include "federation/verbs.h"
 
 /* ---------------------------------------------------------------------------
@@ -503,12 +505,12 @@ void handle_notice(server_t *s, conn_t *c, const message_t *m)
  * is reported as the higher of the two -- a lossy answer, and the same lossy
  * answer it gets in 353 without the capability. That is what the capability is
  * for. */
-static void who_flags(char *out, size_t cap, const conn_t *c,
+static void who_flags(char *out, size_t cap, int away,
                       unsigned member_flags, int multiprefix)
 {
     size_t n = 0;
 
-    out[0] = (c->away[0] != '\0') ? 'G' : 'H';
+    out[0] = (away != 0) ? 'G' : 'H';
     n = 1u;
     if (multiprefix != 0) {
         /* INDEPENDENT TESTS, not an `else if` chain: +o and +v are
@@ -562,13 +564,85 @@ static void who_entry(server_t *s, conn_t *dst, const conn_t *who,
      * multi-prefix is two. */
     char flags[5];
 
-    who_flags(flags, sizeof flags, who, member_flags, multiprefix);
+    who_flags(flags, sizeof flags, (who->away[0] != '\0') ? 1 : 0, member_flags,
+              multiprefix);
     (void)reply(s, dst, "352",
                 (const char *const[]){ (channel != NULL) ? channel : "*",
                                         user_or_dash(who), who->host, s->name, who->nick,
                                         flags },
                 6, "0 %s",
                 (who->realname[0] != '\0') ? who->realname : who->nick);
+}
+
+/* ---------------------------------------------------------------------------
+ * Remote (federated) members in query answers (#607)
+ * ---------------------------------------------------------------------------
+ * WHOIS/WHO/ISON resolved through fanout_find_nick() only, which is the local
+ * table -- a member of a shared channel who lives on a peer was "no such
+ * nick". The union answered here is the local conn first, then the nick
+ * registry (holder/user/host/signon cache) and the channel remote rosters
+ * (per-channel user/host/account/flags). Every remote value is cached (#562
+ * notify-locality: no freshness claim), and a nick known nowhere is still
+ * 401 + 318.
+ *
+ * Bare WHO and mask-form WHO stay local: the broad-mask arm answers 315 alone
+ * by design (#170 amplification), and the mask sweep walks the local table.
+ * Channel WHO, WHOIS and ISON -- the forms that name a shared roster -- see
+ * remotes. */
+
+/* The server a 352/312 names for a remote roster row: the member's own server
+ * when a burst carried it, else the peer that reported them -- exact on a
+ * two-node mesh, which is burst.c's burst_member_server() fallback. "*" is
+ * unreachable (chan_remote_add() refuses an empty key) and exists because a
+ * MIDDLE parameter cannot be empty (3.2). */
+static const char *remote_member_server(const chan_remote_t *r)
+{
+    if (r->member_server[0] != '\0') {
+        return r->member_server;
+    }
+    if (r->server[0] != '\0') {
+        return r->server;
+    }
+    return "*";
+}
+
+/* The first roster entry for `nick` on `ch`, or NULL. Folds (2.1). */
+static const chan_remote_t *remote_find_nick(const chan_t *ch,
+                                             const char *nick)
+{
+    size_t n;
+
+    if (ch == NULL || nick == NULL) {
+        return NULL;
+    }
+    n = chan_remote_count(ch);
+    for (size_t i = 0; i < n; i++) {
+        const chan_remote_t *r = chan_remote_at(ch, i);
+
+        if (r->nick[0] != '\0' && irc_ascii_same(r->nick, nick) != 0) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+/* One 352 for a remote roster row: who_entry()'s shape with the conn_t fields
+ * replaced by the cached ones. Always 'H': neither the registry nor the roster
+ * carries away state, so 'G' would be a guess. Hopcount 1: the member is at
+ * least one forward away, and the exact distance is unknown (cached, #562).
+ * The realname is the nick: nothing on the wire carries a remote realname. */
+static void remote_who_entry(server_t *s, conn_t *dst, const chan_remote_t *r,
+                             const char *channel, int multiprefix)
+{
+    char flags[5];
+    const char *user = (r->user[0] != '\0') ? r->user : "-";
+    const char *host = (r->host[0] != '\0') ? r->host : "*";
+
+    who_flags(flags, sizeof flags, 0, r->flags, multiprefix);
+    (void)reply(s, dst, "352",
+                (const char *const[]){ channel, user, host,
+                                        remote_member_server(r), r->nick, flags },
+                6, "1 %s", r->nick);
 }
 
 /* WHO's mask-form row cap (#170). One input line walks the nick table and
@@ -645,6 +719,19 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
             }
             who_entry(s, c, ch->members[i].c, ch->name, ch->members[i].flags,
                       multiprefix);
+        }
+        /* The peers' members of the same channel (#607): the same rows from
+         * the cached roster, in roster order after the local members. */
+        for (size_t i = 0; i < chan_remote_count(ch); i++) {
+            const chan_remote_t *r = chan_remote_at(ch, i);
+
+            if (r->nick[0] == '\0') {
+                continue;
+            }
+            if (ops_only != 0 && (r->flags & CHAN_MEMBER_OP) == 0u) {
+                continue;
+            }
+            remote_who_entry(s, c, r, ch->name, multiprefix);
         }
         (void)reply(s, c, "315", (const char *const[]){ ch->name }, 1,
                     "End of WHO list");
@@ -860,6 +947,155 @@ static void send_whois_channels(server_t *s, conn_t *dst, const conn_t *who)
            dst->nick, who->nick, who->nchans, lines);
 }
 
+/* A WHOIS for a nick this node holds no conn_t for (#607). Answers from the
+ * union of the nick registry (holder/user/host/signon) and the channel remote
+ * rosters (user/host/account/flags/channels), or 0 when the nick is known
+ * nowhere -- the caller then sends 401 + 318. Identity is first-non-empty
+ * across the two: a live SJOIN fills the roster row's user/host but not the
+ * registry's, while a burst-only nick has registry fields and no roster row.
+ * `base` is the bare nick and `qserver` the holder a qualified `nick@server`
+ * target named (NULL when bare): a qualified target is answered only from
+ * that holder's records, and a nick held elsewhere is still unknown.
+ *
+ * 301 is absent: neither the registry nor the roster carries away state.
+ * 317 carries idle 0 with the cached signon (0 when never told): the idle of
+ * a user this node holds no socket for is unknowable, and 0 is the saturating
+ * floor rather than a measurement. Field order is the local one: 311, 312,
+ * 319, 317, 330, 318. */
+static int whois_remote(server_t *s, conn_t *dst, const char *base,
+                        const char *qserver)
+{
+    char nick[IRC_MAX_NICK + 1];
+    char srv[IRC_MAX_SERVER_NAME + 1];
+    char user[IRC_MAX_NICK + 1];
+    char host[CHAN_MAX_REMOTE_HOST + 1];
+    char account[CONN_MAX_ACCOUNT + 1];
+    char chans[WHOIS_CHANNELS_LINE + 1];
+    char idle[24];
+    char signon[24];
+    const char *dsrv;
+    uint64_t signon_ms = 0;
+    size_t used = 0;
+    int lines = 0;
+    int have = 0;
+    int have_reg = 0;
+
+    nick[0] = '\0';
+    srv[0] = '\0';
+    user[0] = '\0';
+    host[0] = '\0';
+    account[0] = '\0';
+    chans[0] = '\0';
+    if (base == NULL || base[0] == '\0') {
+        return 0;
+    }
+    if (fed_nickreg_info(s, base, qserver, nick, sizeof nick, srv, sizeof srv,
+                         user, sizeof user, host, sizeof host,
+                         &signon_ms) != 0) {
+        have = 1;
+        have_reg = 1;
+    }
+    for (size_t ci = 0; ci < server_chan_count(s); ci++) {
+        chan_t *ch = server_chan_at(s, ci);
+        const chan_remote_t *r;
+        const char *sigil;
+        size_t slen;
+        size_t nlen;
+
+        if (ch == NULL) {
+            continue;
+        }
+        r = remote_find_nick(ch, base);
+        if (r == NULL) {
+            continue;
+        }
+        if (qserver != NULL &&
+            chan_same_name(remote_member_server(r), qserver) == 0) {
+            continue;
+        }
+        /* Identity is first-non-empty across the two caches: a live SJOIN
+         * populates the roster's user/host but the registry's holder only,
+         * while a burst-only nick (no shared channel) has registry fields
+         * and no roster row at all. */
+        if (nick[0] == '\0') {
+            (void)snprintf(nick, sizeof nick, "%s", r->nick);
+        }
+        if (srv[0] == '\0') {
+            (void)snprintf(srv, sizeof srv, "%s", remote_member_server(r));
+        }
+        if (user[0] == '\0') {
+            (void)snprintf(user, sizeof user, "%s", r->user);
+        }
+        if (host[0] == '\0') {
+            (void)snprintf(host, sizeof host, "%s", r->host);
+        }
+        have = 1;
+        if (account[0] == '\0' && r->account[0] != '\0') {
+            (void)snprintf(account, sizeof account, "%s", r->account);
+        }
+        sigil = ((r->flags & CHAN_MEMBER_OP) != 0u) ? "@"
+              : ((r->flags & CHAN_MEMBER_VOICE) != 0u) ? "+" : "";
+        slen = strlen(sigil);
+        nlen = strlen(ch->name);
+        /* Flush-before-append, the same guard send_whois_channels() uses: one
+         * entry always fits WHOIS_CHANNELS_LINE, so a non-empty line is
+         * flushed and the append after it cannot overflow. */
+        if (used != 0u && used + slen + nlen + 1u > (size_t)WHOIS_CHANNELS_LINE) {
+            (void)reply(s, dst, "319", (const char *const[]){ nick }, 1, "%s",
+                        chans);
+            lines++;
+            used = 0;
+            chans[0] = '\0';
+        }
+        if (used != 0u) {
+            chans[used++] = ' ';
+        }
+        memcpy(chans + used, sigil, slen);
+        used += slen;
+        memcpy(chans + used, ch->name, nlen);
+        used += nlen;
+        chans[used] = '\0';
+    }
+    if (have == 0) {
+        return 0;
+    }
+    /* A qualified target names its own server for 312; anything else shows
+     * the holder the cache reported, or "*" when the cache never said. */
+    if (qserver != NULL) {
+        (void)snprintf(srv, sizeof srv, "%s", qserver);
+    }
+    if (nick[0] == '\0') {
+        (void)snprintf(nick, sizeof nick, "%s", base);
+    }
+    dsrv = (srv[0] != '\0') ? srv : "*";
+    (void)reply(s, dst, "311",
+                (const char *const[]){ nick,
+                                        (user[0] != '\0') ? user : "-",
+                                        (host[0] != '\0') ? host : "*", "*" },
+                4, "%s", nick);
+    (void)reply(s, dst, "312", (const char *const[]){ nick, dsrv }, 2, "%s",
+                "Remote user");
+    if (used != 0u) {
+        (void)reply(s, dst, "319", (const char *const[]){ nick }, 1, "%s",
+                    chans);
+        lines++;
+    }
+    (void)snprintf(idle, sizeof idle, "0");
+    (void)snprintf(signon, sizeof signon, "%llu",
+                   (unsigned long long)signon_ms);
+    (void)reply(s, dst, "317", (const char *const[]){ nick, idle, signon }, 3,
+                "seconds idle");
+    if (account[0] != '\0') {
+        (void)reply(s, dst, "330", (const char *const[]){ nick, account }, 2,
+                    "is logged in as");
+    }
+    (void)reply(s, dst, "318", (const char *const[]){ nick }, 1,
+                "End of /WHOIS list");
+    printf("[observable] whois_remote: by=%s nick=%s server=%s reg=%d lines=%d\n",
+           dst->nick, nick, dsrv, have_reg, lines);
+    return 1;
+}
+
 /* ---------------------------------------------------------------------------
  * WHOIS
  * ---------------------------------------------------------------------------
@@ -902,7 +1138,36 @@ void handle_whois(server_t *s, conn_t *c, const message_t *m)
                     "No such server");
         return;
     }
-    who = fanout_find_nick(s, nick);
+    /* A qualified target splits at the LAST '@' (2.1): the bare nick is looked
+     * up, scoped to the named holder. A qualifier naming this node answers the
+     * local table -- fanout_resolve.c's local PRIVMSG branch does the same, so
+     * a node never 401s its own user under a qualified name. Anything unusable
+     * as a split (no '@', an empty half, an over-long bare half that can never
+     * equal a stored nick) answers the whole target as a bare nick instead. */
+    {
+        const char *at = strrchr(nick, '@');
+        char base[IRC_MAX_NICK + 1];
+        const char *qserver = NULL;
+
+        if (at != NULL && at != nick && at[1] != '\0' &&
+            (size_t)(at - nick) <= (size_t)IRC_MAX_NICK) {
+            memcpy(base, nick, (size_t)(at - nick));
+            base[at - nick] = '\0';
+            qserver = at + 1;
+        }
+        if (qserver != NULL && chan_same_name(qserver, s->name) != 0) {
+            who = server_nick_lookup(s, base);
+        } else if (qserver == NULL) {
+            who = fanout_find_nick(s, nick);
+        } else {
+            who = NULL;
+        }
+        if (who == NULL &&
+            (qserver == NULL || chan_same_name(qserver, s->name) == 0) &&
+            whois_remote(s, c, (qserver != NULL) ? base : nick, qserver) != 0) {
+            return;
+        }
+    }
     if (who == NULL) {
         /* 401 and then 318. 318 is not optional: a client that asked about a
          * nick and received only 401 cannot tell "that user does not exist" from
@@ -1106,6 +1371,71 @@ void handle_whois(server_t *s, conn_t *c, const message_t *m)
  * "text_too_long", which reply.c documents as a bug report rather than a metric. */
 #define ISON_CHUNK_MAX (REPLY_TEXT_MAX - 1)
 
+/* One ISON token resolved without a local conn_t (#607): the registry first
+ * (a nick known from a burst but on no shared channel still counts as
+ * online), then the channel rosters. A qualified `nick@server` token is
+ * scoped to that holder; a qualifier naming this node answers the local
+ * table, the same local branch handle_whois() takes. Writes the stored nick
+ * to `out` (IRC_MAX_NICK + 1) and returns 1, or 0 when the nick is known
+ * nowhere -- and absence from the 303 IS that nick's answer. */
+static int ison_remote(server_t *s, const char *target, char *out, size_t cap)
+{
+    const char *at;
+    const char *qserver = NULL;
+    char base[IRC_MAX_NICK + 1];
+
+    if (target == NULL || out == NULL || cap == 0u) {
+        return 0;
+    }
+    at = strrchr(target, '@');
+    if (at != NULL && at != target && at[1] != '\0' &&
+        (size_t)(at - target) <= (size_t)IRC_MAX_NICK) {
+        memcpy(base, target, (size_t)(at - target));
+        base[at - target] = '\0';
+        qserver = at + 1;
+    } else {
+        /* An over-long bare half can never equal a stored nick (63), so
+         * refusing to truncate is a lookup that misses rather than a copy
+         * that could match a different name. */
+        if (strlen(target) > (size_t)IRC_MAX_NICK) {
+            return 0;
+        }
+        (void)snprintf(base, sizeof base, "%s", target);
+    }
+    if (qserver != NULL && chan_same_name(qserver, s->name) != 0) {
+        const conn_t *lu = server_nick_lookup(s, base);
+
+        if (lu == NULL || lu->nick[0] == '\0') {
+            return 0;
+        }
+        (void)snprintf(out, cap, "%s", lu->nick);
+        return 1;
+    }
+    if (fed_nickreg_info(s, base, qserver, out, cap, NULL, 0, NULL, 0, NULL, 0,
+                         NULL) != 0) {
+        return 1;
+    }
+    for (size_t ci = 0; ci < server_chan_count(s); ci++) {
+        chan_t *ch = server_chan_at(s, ci);
+        const chan_remote_t *r;
+
+        if (ch == NULL) {
+            continue;
+        }
+        r = remote_find_nick(ch, base);
+        if (r == NULL) {
+            continue;
+        }
+        if (qserver != NULL &&
+            chan_same_name(remote_member_server(r), qserver) == 0) {
+            continue;
+        }
+        (void)snprintf(out, cap, "%s", r->nick);
+        return 1;
+    }
+    return 0;
+}
+
 void handle_ison(server_t *s, conn_t *c, const message_t *m)
 {
     /* Sized by the WIRE, not by the reply. The parser accepts up to
@@ -1116,6 +1446,11 @@ void handle_ison(server_t *s, conn_t *c, const message_t *m)
      * node holds -- and it is exactly the kind of defect the two sizes being
      * different is meant to prevent. */
     const char *found[IRC_MAX_PARAMS];
+    /* Display nicks for remote hits: the registry and roster own their
+     * strings, and one shared buffer would alias every entry, so one row per
+     * token. Sized with the token count, not the reply, for the reason the
+     * comment on `found` gives. */
+    char rname[IRC_MAX_PARAMS][IRC_MAX_NICK + 1];
     size_t nfound = 0;
     size_t nout = 0;
     /* The nick list as ONE trailing parameter, NUL-terminated at `used`. + 1 is
@@ -1134,7 +1469,15 @@ void handle_ison(server_t *s, conn_t *c, const message_t *m)
         conn_t *who = fanout_find_nick(s, m->params[i]);
 
         if (who == NULL || who->nick[0] == '\0') {
-            continue; /* absent from the reply: that IS this nick's answer */
+            /* A remote nick is online too (#607); a nick known nowhere stays
+             * absent, and that absence IS its answer. */
+            if (ison_remote(s, m->params[i], rname[nfound],
+                            sizeof rname[nfound]) == 0) {
+                continue;
+            }
+            found[nfound] = rname[nfound];
+            nfound++;
+            continue;
         }
         found[nfound++] = who->nick;
     }
