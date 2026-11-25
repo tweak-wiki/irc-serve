@@ -17,8 +17,9 @@ never touch links, bursts, dedup, or nickreg.
 Links SHALL authenticate fail-closed and recover with backoff.
 
 #### Scenario: Weak secret
-- **WHEN** `FEDERATE` arrives with a secret under 16 bytes (outside tests)
-- **THEN** the link is refused — a warning alone is not enough.
+- **WHEN** the node is configured with a secret under 16 bytes (outside tests)
+- **THEN** startup refuses with `link_open_refused: reason=SECRET_SHORT` — a warning alone is not enough.
+- Inbound `FEDERATE` carries no length verdict: a wrong secret of any length is refused as `BAD_SECRET`, so the refusal never oracles the offered length.
 
 #### Scenario: Plaintext peer auth
 - **WHEN** a peer is TLS-required and `FEDERATE` arrives on plaintext
