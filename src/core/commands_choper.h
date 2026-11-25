@@ -10,6 +10,8 @@
 
 #include "core/commands.h"
 
+void handle_kill(server_t *s, conn_t *c, const message_t *m);
+
 void handle_choper(server_t *s, conn_t *c, const message_t *m);
 
 #endif /* IRC_CORE_COMMANDS_CHOPER_H */

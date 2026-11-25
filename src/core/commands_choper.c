@@ -103,3 +103,15 @@ void handle_choper(server_t *s, conn_t *c, const message_t *m)
                (unsigned long long)s->n_pass_seen);
     }
 }
+
+/* KILL, refused. RFC 2812 3.7.1 gates KILL on an IRC operator, and this node
+ * has none (see the file comment), so every KILL from a client is 481. No
+ * arity check: the answer does not depend on the parameters. */
+void handle_kill(server_t *s, conn_t *c, const message_t *m)
+{
+    (void)m;
+    (void)reply_refused(s, c, "KILL", NULL, "481", NULL, 0,
+                        "You're not an IRC operator");
+    printf("[observable] kill_refused: by=%s reason=NO_OPER_FLAGS\n",
+           c->nick);
+}

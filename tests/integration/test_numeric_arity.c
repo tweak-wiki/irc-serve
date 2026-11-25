@@ -115,12 +115,13 @@ typedef struct {
  * ambiguity docs/RFC2812_CONFORMANCE.md section 5 records -- so both directions
  * are driven rather than the convenient one.
  *
- * PASS, BATCH, OPER, SERVICE, REHASH, KILL and WHO are deliberately NOT here. PASS
- * and BATCH have state; OPER, SERVICE, REHASH and KILL have no handler or a NULL
- * one and answer 421, so a probe against them would be testing the dispatch table
- * rather than the arity; and bare WHO is not a refusal at all -- this node gives it
+ * PASS, BATCH, OPER, SERVICE, REHASH and WHO are deliberately NOT here. PASS
+ * and BATCH have state; OPER, SERVICE and REHASH have no handler and answer
+ * 421, so a probe against them would be testing the dispatch table rather
+ * than the arity; and bare WHO is not a refusal at all -- this node gives it
  * the de-facto '*' mask and answers 352, which is the right answer and not this
- * file's subject.
+ * file's subject. KILL is not here either: it answers 481 at every arity (issue
+ * #670), so there is no arity refusal to probe.
  *
  * USERHOST, ISON and PART appear ONCE rather than twice, for two reasons
  * worth writing down because both were found by trying the probe and reading the
