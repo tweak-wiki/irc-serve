@@ -126,7 +126,9 @@ add_library(irc_core STATIC
   core/secret_util.c
   core/message.c
   core/connection.c
-  core/server.c
+  # #543 TU-44: server.c is fully split (last family: lifecycle + clock/
+  # tick/msg-id -> core/server_lifecycle.c); this file now holds only the
+  # split map and is no longer compiled.
   # #543: the nick/channel string -> pointer map split out of server.c.
   # The registries that use it stay there; this file holds the table.
   core/strtab.c
@@ -151,9 +153,14 @@ add_library(irc_core STATIC
   # file holds the bind side of 3.4.
   core/server_listen.c
   # #543: the shutdown trio (phase1 goodbye/phase2 close/shutdown) split
-  # out of server.c. The lifecycle, clock, tick and msg-id counter stay
-  # there; this file holds the teardown.
+  # out of server.c. The lifecycle, clock, tick and msg-id counter live in
+  # core/server_lifecycle.c now; this file holds the teardown.
   core/server_shutdown.c
+  # #543: the lifecycle (server_init plus the msgid seed helpers), the clock
+  # (server_now_ms), the tick (server_tick) and the msg-id counter
+  # (server_next_msg_id) split out of server.c. All four stay declared in
+  # core/server.h; this file holds the final family.
+  core/server_lifecycle.c
   core/channel.c
   core/poll_loop.c
   core/reply.c
