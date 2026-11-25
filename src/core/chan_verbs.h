@@ -151,12 +151,18 @@ typedef enum {
     CHAN_VERDICT_REFUSED
 } chan_verdict_t;
 
+/* 2.2's single-writer decision (defined in core/chan_verbs.c). Shared through
+ * this header since #543 TU-46 (core/chan_verbs_list.c is its first outside
+ * caller); resolve_joined() stays file-static for the remaining handlers. */
+chan_verdict_t authority_ok(server_t *s, conn_t *c, const chan_t *ch,
+                            const char *verb, int stateful);
+
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
  * validate arity, resolve the channel, answer the local preconditions (442/482/
  * 401/417 keep their own numerics), ask the authority question, and only then
- * touch state. The authority question is asked in chan_verbs.c's own
- * authority_ok(), which every one of these calls -- there is no verb that
- * decides it for itself.
+ * touch state. The authority question is asked through authority_ok() (defined
+ * in chan_verbs.c, shared through this header), which every one of these calls
+ * -- there is no verb that decides it for itself.
  *
  * INVITE is the one that does not fit that sentence exactly, and the exception
  * is deliberate: it changes no channel state, so it asks authority_ok() the way
