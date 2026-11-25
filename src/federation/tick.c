@@ -2,8 +2,8 @@
  *
  * Split verbatim out of link.c (issue #543 TU-26): the dial lookup, the
  * reconnect schedule, the dial-expiry/promotion/keepalive/dead arms and
- * fed_tick() itself. The FEDERATE exchange (fed_queue_federate/fed_refuse/
- * fed_link_of_conn) stays in link.c and is reached through link.h.
+ * fed_tick() itself. The FEDERATE exchange sender (fed_queue_federate) is in
+ * link_queue.c (TU-40) and is reached through link.h.
  */
 #include "federation/link.h"
 

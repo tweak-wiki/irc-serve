@@ -307,6 +307,10 @@ add_library(irc_core STATIC
   # (issue #543). Listed beside link.c; all five stay declared in
   # federation/link.h.
   federation/link_table.c
+  # The FEDERATE exchange sender (fed_queue_federate()), split out of link.c
+  # (issue #543). Listed beside link.c; it stays declared in
+  # federation/link.h.
+  federation/link_queue.c
   # The departure half: the SQUIT announcement, the link teardown, the clean-leave
   # latch, the shutdown drain and the operator's reset door, split out of link.c
   # (issue #543). Listed beside link.c; link.c reaches fed_link_down() through
