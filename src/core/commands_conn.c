@@ -116,6 +116,12 @@ void handle_quit(server_t *s, conn_t *c, const message_t *m)
                c->fd, c->nick, shown, (reason != NULL) ? strlen(reason) : 0u,
                conn_text_bad_count(reason));
     }
+    /* Issue #663: stash the stripped reason for the mesh. chan_conn_gone()
+    * runs after this handler and carries it in a quit-flagged SPART, so the
+    * far node renders QUIT with the reason. The local emission below keeps
+    * its own full-length strip. */
+    (void)conn_text_strip(c->quit_reason, sizeof c->quit_reason,
+                          (reason != NULL) ? reason : "", STRIP_STORED);
     /* Issue #609: the QUIT line itself, to the union of this connection's
     * channels, excluding the quitter. Without it chan_conn_gone() renders
     * the departure as one PART per channel, and a QUIT is not a PART --

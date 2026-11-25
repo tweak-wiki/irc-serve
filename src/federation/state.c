@@ -166,14 +166,159 @@ void fed_in_shutdown(server_t *s, server_link_t *link, const char *prefix,
         }
     }
 }
+/* Issue #663: the quit dedup set. A remote QUIT arrives as one quit-flagged
+ * SPART per channel the member shared, but every local client sees exactly
+ * one QUIT (union semantics, like handle_quit()'s local emission). The first
+ * SPART marks (server, nick) and emits; the rest only remove and forward.
+ * Rejoin clears the mark (fed_quit_unmark), so a later quit announces again.
+ * Comparisons are chan_same_name() -- the same case-insensitive rule the
+ * roster uses -- and a full ring reuses the oldest slot: under pathological
+ * churn the cost is a duplicate QUIT, never a lost one. */
+static int fed_quit_seen(server_t *s, const char *server, const char *nick)
+{
+    size_t n;
 
-/* SPART: <member> <channel> [<reason>]. */
+    if (s == NULL || server == NULL || nick == NULL) {
+        return 0;
+    }
+    n = sizeof s->fed_quit_seen_nick / sizeof s->fed_quit_seen_nick[0];
+    for (size_t i = 0; i < n; i++) {
+        if (s->fed_quit_seen_nick[i][0] == '\0') {
+            continue;
+        }
+        if (chan_same_name(s->fed_quit_seen_srv[i], server) != 0 &&
+            chan_same_name(s->fed_quit_seen_nick[i], nick) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void fed_quit_mark(server_t *s, const char *server, const char *nick)
+{
+    size_t n;
+    size_t slot;
+
+    if (s == NULL || server == NULL || nick == NULL) {
+        return;
+    }
+    n = sizeof s->fed_quit_seen_nick / sizeof s->fed_quit_seen_nick[0];
+    slot = (size_t)(s->fed_quit_seen_at % (unsigned)n);
+    s->fed_quit_seen_at++;
+    (void)snprintf(s->fed_quit_seen_srv[slot],
+                   sizeof s->fed_quit_seen_srv[slot], "%s", server);
+    (void)snprintf(s->fed_quit_seen_nick[slot],
+                   sizeof s->fed_quit_seen_nick[slot], "%s", nick);
+}
+
+void fed_quit_unmark(server_t *s, const char *server, const char *nick)
+{
+    size_t n;
+
+    if (s == NULL || server == NULL || nick == NULL) {
+        return;
+    }
+    n = sizeof s->fed_quit_seen_nick / sizeof s->fed_quit_seen_nick[0];
+    for (size_t i = 0; i < n; i++) {
+        if (chan_same_name(s->fed_quit_seen_srv[i], server) != 0 &&
+            chan_same_name(s->fed_quit_seen_nick[i], nick) != 0) {
+            s->fed_quit_seen_srv[i][0] = '\0';
+            s->fed_quit_seen_nick[i][0] = '\0';
+        }
+    }
+}
+
+/* One union QUIT for a departed member: every local client sharing any
+ * channel with (server, nick) sees `:nick!u@h QUIT [:reason]` once, with the
+ * reason stripped the way the local QUIT path strips it. `first` is the
+ * channel whose SPART triggered this call -- gathered BEFORE its roster
+ * entry is removed, so it is already in the list the walk builds; a member
+ * found nowhere (a stale SPART) still reaches that one channel's members,
+ * which is what the old per-channel PART did. */
+static void fed_emit_member_quit(server_t *s, chan_t *first, const char *server,
+                                 const char *nick, const char *who,
+                                 const char *reason)
+{
+    size_t nch = server_chan_count(s);
+    chan_t **list = (chan_t **)malloc((nch > 0u ? nch : 1u) * sizeof *list);
+    size_t nfound = 0;
+    char clean[CHAN_MAX_PART_REASON + 1u];
+    const char *qp[1];
+    fanout_form_t plain;
+    int delivered = 0;
+
+    plain.params = NULL;
+    plain.nparams = 0;
+    if (reason != NULL && reason[0] != '\0') {
+        (void)conn_text_strip(clean, sizeof clean, reason, STRIP_STORED);
+        qp[0] = clean;
+        plain.params = qp;
+        plain.nparams = 1;
+    }
+    if (list == NULL) {
+        fed_local_emit(s, first, who, "QUIT", plain.params, plain.nparams);
+        return;
+    }
+    for (size_t ci = 0; ci < nch; ci++) {
+        chan_t *qch = server_chan_at(s, ci);
+
+        if (qch == NULL) {
+            continue;
+        }
+        for (size_t r = 0; r < qch->nremotes; r++) {
+            const chan_remote_t *m = &qch->remotes[r];
+
+            if (chan_same_name(m->server, server) != 0 &&
+                chan_same_name(m->nick, nick) != 0) {
+                list[nfound++] = qch;
+                break;
+            }
+        }
+    }
+    if (nfound > 0) {
+        delivered = fanout_deliver_union_local_gated(s, list, nfound, who,
+                                                     "QUIT", &plain, NULL,
+                                                     NULL, NULL, NULL);
+    } else {
+        fed_local_emit(s, first, who, "QUIT", plain.params, plain.nparams);
+    }
+    free(list);
+    printf("[observable] fed_spart_quit: member=%s server=%s channels=%zu "
+           "recipients=%d\n",
+           nick, server, (nfound > 0) ? nfound : 1u, delivered);
+}
+
+/* SPART: <member> <channel> [<reason>] -- or issue #663's quit form
+ * <member> <channel> quit [<reason>], or the escaped PART form
+ * <member> <channel> part <reason> for a PART whose reason is exactly
+ * `quit`. A four-parameter line with any other marker is refused: guessing
+ * at an unknown shape is how rosters diverge. */
 void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
                          const char *prefix, const irc_serve_tags_t *tags,
                          const char *const *params, int nparams)
 {
-    if (nparams < 2 || nparams > 3) {
+    int is_quit = 0;
+    int announce = 0;
+    const char *reason = NULL;
+
+    if (nparams < 2 || nparams > 4) {
         return;
+    }
+    if (nparams == 4) {
+        if (strcmp(params[2], "quit") == 0) {
+            is_quit = 1;
+            reason = params[3];
+        } else if (strcmp(params[2], "part") == 0) {
+            reason = params[3];
+        } else {
+            return;
+        }
+    } else if (nparams == 3) {
+        if (strcmp(params[2], "quit") == 0) {
+            is_quit = 1;
+        } else {
+            reason = params[2];
+        }
     }
     /* The actor BEFORE the removal below: the roster record is the only
      * place this node's burst-described hostmask lives, and the purge
@@ -182,6 +327,14 @@ void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
     const char *who = fed_actor_prefix(ch, params[0], prefix, 0, actor,
                                        sizeof actor);
 
+    /* A quit announces once no matter how many channels the member shared:
+     * the first SPART marks and emits the union QUIT, and the rest only
+     * remove and forward. The gather runs before the removal below so the
+     * triggering channel is still in the set. */
+    if (is_quit != 0 && fed_quit_seen(s, link->name, params[0]) == 0) {
+        fed_quit_mark(s, link->name, params[0]);
+        announce = 1;
+    }
     (void)chan_remote_remove(ch, link->name, params[0]);
     /* #608: the registry entry the SJOIN for this member learned, keyed the
      * same way the learn was (holder = the link it arrived on), so a departed
@@ -191,17 +344,22 @@ void fed_in_spart(server_t *s, server_link_t *link, chan_t *ch,
     fed_touch_server(ch, link->name, 0);
     fed_obs("[observable] fed_spart: channel=%s member=%s server=%s remote=%zu\n",
            ch->name, params[0], link->name, ch->nremotes);
-    /* The PART this node's own clients see, with the reason stripped the way
-     * the local PART path strips it -- announced nowhere else, stored nowhere. */
-    if (nparams > 2) {
-        char clean[CHAN_MAX_PART_REASON + 1u];
-        const char *lp[1];
+    if (announce != 0) {
+        fed_emit_member_quit(s, ch, link->name, params[0], who, reason);
+    } else if (is_quit == 0) {
+        /* The PART this node's own clients see, with the reason stripped the
+         * way the local PART path strips it -- announced nowhere else,
+         * stored nowhere. */
+        if (reason != NULL) {
+            char clean[CHAN_MAX_PART_REASON + 1u];
+            const char *lp[1];
 
-        (void)conn_text_strip(clean, sizeof clean, params[2], STRIP_STORED);
-        lp[0] = clean;
-        fed_local_emit(s, ch, who, "PART", lp, 1);
-    } else {
-        fed_local_emit(s, ch, who, "PART", NULL, 0);
+            (void)conn_text_strip(clean, sizeof clean, reason, STRIP_STORED);
+            lp[0] = clean;
+            fed_local_emit(s, ch, who, "PART", lp, 1);
+        } else {
+            fed_local_emit(s, ch, who, "PART", NULL, 0);
+        }
     }
     (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE, "SPART", prefix,
                                        params, nparams, tags);

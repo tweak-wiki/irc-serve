@@ -17,6 +17,7 @@
  * remote-nick registry, which is what the four fields Phase 6 kept on the wire
  * and discarded were for. See the comment at apply_end()'s registry loop. */
 #include "federation/nickreg.h"
+#include "federation/state.h"
 #include "federation/verbs.h"
 
 /* ---------------------------------------------------------------------------
@@ -2652,6 +2653,9 @@ static int apply_end(server_t *s, server_link_t *link, const message_t *m)
                  * it would forward the message to a server that does not hold bob. */
                 fed_nickreg_learn_member(s, sc->members[k].nick, origin,
                                          sc->members[k].server, applied_ms);
+                /* Issue #663: the member is back, so an earlier quit mark
+                * must not swallow the next announcement. */
+                fed_quit_unmark(s, origin, sc->members[k].nick);
                 installed++;
             }
             /* THE HOST AND THE IDENT, from the one staged record for this nick

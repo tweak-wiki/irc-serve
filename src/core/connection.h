@@ -1180,6 +1180,11 @@ typedef struct conn {
     atomic_size_t woff;
     atomic_size_t wlen;
     size_t      wcap;
+    /* Issue #663: stripped QUIT reason, carried to the mesh by chan_conn_gone()
+    * as the trailing parameter of a quit-flagged SPART. Empty -- including on
+    * a hangup, which never sets it -- means a bare QUIT. PART-sized (255): a
+    * longer local reason still renders in full locally. */
+    char        quit_reason[256];
     /* Issue #609: 1 once handle_quit() has emitted `:nick!u@h QUIT [:reason]`
     * to the union of this connection's channels. chan_conn_gone() then drops
     * the membership silently instead of emitting PART -- a QUIT is not a

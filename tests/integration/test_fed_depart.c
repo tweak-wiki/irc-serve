@@ -1,11 +1,15 @@
-/* test_fed_depart.c -- #608: a local client departure must reach the mesh.
+/* test_fed_depart.c -- #608/#663: a local client departure must reach the mesh.
  *
  * QUIT, a bare EOF and a flood close all end in chan_conn_gone(), which used
- * to emit PART to local members only. The peer kept the chan_remote_t entry
- * and the nickreg record, so the ghost stayed in NAMES until the next burst.
- * Each case below drops bob (on B) one way and asserts the far side converges:
- * A applies the SPART, alice sees `:bob!... PART #T`, NAMES #T drops bob, and
- * `bob@irc.b` stops resolving (401) instead of answering from the registry.
+ * to emit PART to local members only (#608: the peer kept the chan_remote_t
+ * entry and the nickreg record, so the ghost stayed in NAMES until the next
+ * burst). Since #663 the departure crosses the wire as a quit-flagged SPART,
+ * so the far side renders one QUIT -- with the reason on a graceful QUIT,
+ * bare on a hangup -- instead of one PART per channel. Each case below drops
+ * bob (on B) one way and asserts the far side converges: A applies the
+ * SPART, alice sees `:bob!... QUIT`, NAMES #T drops bob, and `bob@irc.b`
+ * stops resolving (401) instead of answering from the registry. An explicit
+ * PART still renders PART (test_fed_state_emit.c pins that half).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +32,7 @@
 #define NAME_A "irc.a"
 #define NAME_B "irc.b"
 #define CHAN   "#T"
+#define CHAN2  "#U"
 #define NICK_A "alice"
 #define NICK_B "bob"
 
@@ -121,21 +126,71 @@ static void mesh_up(nf_node_t *a, nf_node_t *b, test_client_t *alice,
                  "scoped PRIVMSG never reached bob before the drop: %s",
                  tc_buffer(bob));
 }
+/* Occurrences of needle in haystack, for asserting one departure rendered
+ * exactly one QUIT. */
+static size_t count_hits(const char *haystack, const char *needle)
+{
+    size_t n = 0;
+    const char *p = haystack;
+    size_t len = strlen(needle);
 
-/* The far side converged: SPART applied, PART rendered, roster and registry
- * clean. The SPART wait comes first so the NAMES below cannot pass on a node
- * that answers from a stale cache. */
-static void expect_remote_gone(nf_node_t *a, test_client_t *alice)
+    while ((p = strstr(p, needle)) != NULL) {
+        n++;
+        p += len;
+    }
+    return n;
+}
+
+
+/* The far side converged: SPART applied, one QUIT rendered, roster and
+ * registry clean. The SPART wait comes first so the NAMES below cannot pass
+ * on a node that answers from a stale cache. want_reason is NULL for a bare
+ * QUIT (hangup) or the reason text for a graceful QUIT. union_check waits
+ * for the second channel's SPART too and asserts the whole departure rendered
+ * exactly one QUIT -- never one per channel, never a PART. It must run before
+ * the drains below compact alice's history. */
+static void expect_remote_gone(nf_node_t *a, test_client_t *alice,
+                               const char *want_reason, int union_check)
 {
     TF_CHECK_MSG(nf_expect(a, "fed_spart: channel=" CHAN " member=" NICK_B,
                            T_IO_MS) == 0,
                  "node A never applied the departure SPART: %s", a->out);
-    TF_CHECK_MSG(tc_expect(alice, "PART " CHAN, T_IO_MS) == 0,
-                 "alice never saw bob's departure PART: %s",
+    if (union_check != 0) {
+        TF_CHECK_MSG(nf_expect(a, "fed_spart: channel=" CHAN2
+                               " member=" NICK_B, T_IO_MS) == 0,
+                     "node A never applied the departure SPART " CHAN2 ": %s",
+                     a->out);
+    }
+    TF_CHECK_MSG(tc_expect(alice, " QUIT", T_IO_MS) == 0,
+                 "alice never saw bob's departure QUIT: %s",
                  tc_buffer(alice));
     TF_CHECK_MSG(strstr(tc_buffer(alice), ":" NICK_B "!") != NULL,
-                 "the departure PART carried no hostmask actor: %s",
+                 "the departure QUIT carried no hostmask actor: %s",
                  tc_buffer(alice));
+    if (want_reason != NULL) {
+        /* The colon is framing, not content: a one-word reason needs none
+        * on the wire, so `QUIT bye` and `QUIT :bye` are the same reason. */
+        char want[256];
+        char want_bare[256];
+
+        (void)snprintf(want, sizeof want, "QUIT :%s", want_reason);
+        (void)snprintf(want_bare, sizeof want_bare, "QUIT %s", want_reason);
+        TF_CHECK_MSG(strstr(tc_buffer(alice), want) != NULL ||
+                     strstr(tc_buffer(alice), want_bare) != NULL,
+                     "the departure QUIT carried no reason: %s",
+                     tc_buffer(alice));
+    } else {
+        TF_CHECK_MSG(strstr(tc_buffer(alice), "QUIT :") == NULL,
+                     "a hangup must render a bare QUIT: %s",
+                     tc_buffer(alice));
+    }
+    TF_CHECK_MSG(strstr(tc_buffer(alice), "PART " CHAN) == NULL,
+                 "a remote quit rendered as PART: %s", tc_buffer(alice));
+    if (union_check != 0) {
+        TF_CHECK_MSG(count_hits(tc_buffer(alice), " QUIT") == 1u,
+                     "one departure rendered more than one QUIT: %s",
+                     tc_buffer(alice));
+    }
 
     (void)tc_drain(alice, 0, NULL);
     TF_CHECK_MSG(tc_send(alice, "NAMES " CHAN) == 0, "NAMES send failed");
@@ -172,10 +227,11 @@ static void case_eof_depart(void)
     test_client_t bob;
 
     mesh_up(&a, &b, &alice, &bob);
-    /* Gone with no QUIT: the socket close is the whole signal. */
+    /* Gone with no QUIT: the socket close is the whole signal, and the far
+    * node still renders QUIT -- bare, with no reason. */
     tc_close(&bob);
     (void)tc_drain(&alice, 0, NULL);
-    expect_remote_gone(&a, &alice);
+    expect_remote_gone(&a, &alice, NULL, 0);
     mesh_down(&a, &b, &alice, &bob);
 }
 
@@ -187,10 +243,27 @@ static void case_quit_depart(void)
     test_client_t bob;
 
     mesh_up(&a, &b, &alice, &bob);
-    TF_CHECK_MSG(tc_send(&bob, "QUIT :bye") == 0, "bob's QUIT send failed");
+    TF_CHECK_MSG(tc_send(&bob, "JOIN " CHAN2) == 0, "bob's JOIN " CHAN2
+                 " send failed");
+    TF_CHECK_MSG(tc_expect(&bob, " 366 ", T_IO_MS) == 0,
+                 "bob's JOIN " CHAN2 " never completed");
+    TF_CHECK_MSG(nf_expect(&a, "fed_sjoin: channel=" CHAN2 " member=" NICK_B,
+                           T_IO_MS) == 0,
+                 "node A never applied bob's SJOIN " CHAN2 ": %s", a.out);
+    TF_CHECK_MSG(tc_send(&alice, "JOIN " CHAN2) == 0, "alice's JOIN " CHAN2
+                 " send failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 366 ", T_IO_MS) == 0,
+                 "alice's JOIN " CHAN2 " never completed");
+    TF_CHECK_MSG(nf_expect(&b, "fed_sjoin: channel=" CHAN2 " member=" NICK_A,
+                           T_IO_MS) == 0,
+                 "node B never applied alice's SJOIN " CHAN2 ": %s", b.out);
+    (void)tc_drain(&bob, 0, NULL);
+    (void)tc_drain(&alice, 0, NULL);
+    TF_CHECK_MSG(tc_send(&bob, "QUIT :bye for now") == 0,
+                 "bob's QUIT send failed");
     tc_close(&bob);
     (void)tc_drain(&alice, 0, NULL);
-    expect_remote_gone(&a, &alice);
+    expect_remote_gone(&a, &alice, "bye for now", 1);
     mesh_down(&a, &b, &alice, &bob);
 }
 
@@ -219,7 +292,7 @@ static void case_flood_depart(void)
                  "(rc=%d)",
                  rc);
     (void)tc_drain(&alice, 0, NULL);
-    expect_remote_gone(&a, &alice);
+    expect_remote_gone(&a, &alice, NULL, 0);
     mesh_down(&a, &b, &alice, &bob);
 }
 

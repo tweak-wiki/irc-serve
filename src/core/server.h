@@ -892,6 +892,17 @@ struct server {
      * verb this build does not speak is the opposite situation from a peer
      * speaking one it should not have sent. */
     uint64_t  n_fed_squit_self;  /* a SQUIT naming THIS node's own name */
+    /* Issue #663: members whose quit this node already announced. A remote
+    * QUIT arrives as one quit-flagged SPART per shared channel, but the
+    * clients must see one QUIT each (union semantics, like the local path),
+    * so the first SPART emits and marks, and the rest only remove and
+    * forward. Cleared when the member rejoins (fed_quit_unmark(), called
+    * from the SJOIN and burst-install paths); a fixed ring, so under
+    * pathological churn the oldest entry is reused and the cost is a
+    * duplicate QUIT, never a lost one. Zeroed with the struct. */
+    char      fed_quit_seen_srv[32][IRC_MAX_SERVER_NAME + 1];
+    char      fed_quit_seen_nick[32][IRC_MAX_NICK + 1];
+    unsigned  fed_quit_seen_at;
 
     /* ------------------------------------------------------------------------
      * Phase 6 C4: the 4.3 resync, which is a TRANSACTION and therefore has two
