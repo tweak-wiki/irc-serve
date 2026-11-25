@@ -1,5 +1,8 @@
 # Reference systemd unit for the CachyOS deploy box. Hand-managed; see
 # irc-serve-stable.service for why CI never writes this file (#532).
+# ACCEPT-ONLY: B declares no --peer. A dials B (see fed-a.service); if both
+# list each other both dial and each rejects the inbound claim NAME_IN_USE,
+# leaving no link (usage spec: one-direction dialing). Keep it this way.
 [Unit]
 Description=irc-serve federated node B (irc.b :6669)
 After=network-online.target
@@ -7,7 +10,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=irc-serve
-ExecStart=/opt/irc-serve/irc-serve-fed-b --name irc.b --secret-file /etc/irc-serve/fed-secret --peer irc.a,127.0.0.1,6668 6669
+ExecStart=/opt/irc-serve/irc-serve-fed-b --name irc.b --secret-file /etc/irc-serve/fed-secret 6669
 Restart=on-failure
 RestartSec=5
 [Install]
