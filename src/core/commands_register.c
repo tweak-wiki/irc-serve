@@ -385,6 +385,25 @@ void handle_user(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
+
+    /* THE REALNAME LENGTH IS REFUSED HERE, mirroring SETNAME (gate 3): an
+     * over-long realname is 417 and registration does NOT complete -- no
+     * `user_seen`, no stored ident, no 001 -- so a retry with a valid USER
+     * still registers. 3.2 forbids delivering a silently shortened parameter,
+     * and at registration the shortened value would federate via extended-join
+     * as if the client wrote it. Checked BEFORE any field is written, so the
+     * refusal stores nothing. The BAD_BYTE arm below still empties the field
+     * and registers, because refusing that would strand a half-registered
+     * client over a rendering accident (see below). */
+    if (conn_realname_check(m->params[3]) == CONN_REALNAME_TOO_LONG) {
+        (void)reply_refused(s, c, "USER", "ERR_INPUTTOOLONG", "417", NULL, 0,
+                            "Realname is not acceptable");
+        printf("[observable] realname_refused: fd=%d nick=%s verb=USER "
+               "reason=TOO_LONG len=%zu\n",
+               c->fd, c->nick, strlen(m->params[3]));
+        return;
+    }
+
     /* ------------------------------------------------------------------------
      * THE IDENT, AND WHY IT IS VALIDATED AT INGEST RATHER THAN FILTERED AT RENDER
      * ------------------------------------------------------------------------
@@ -525,11 +544,10 @@ void handle_user(server_t *s, conn_t *c, const message_t *m)
      * every later roster, which is exactly the kind of discrepancy 3.4's observable
      * output exists to make findable.
      *
-     * LENGTH IS STILL TRUNCATED HERE and refused by SETNAME, and that difference is
-     * the same argument from the other side: 3.2's rule against a silently shortened
-     * parameter is about a value the node then REPORTS as the user's, and at
-     * registration the alternative is a stranded connection. copy_field() says so
-     * at its own definition and the truncation is announced rather than silent. */
+     * LENGTH IS REFUSED ABOVE with 417, exactly like SETNAME: an over-long
+     * realname never reaches this copy, so copy_field() cannot truncate it
+     * (the length was already proven within bounds) and no shortened value is
+     * ever reported as the user's. */
     v = conn_realname_check(m->params[3]);
     if (v == CONN_REALNAME_BAD_BYTE) {
         printf("[observable] realname_refused: fd=%d nick=%s verb=USER "
