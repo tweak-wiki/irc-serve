@@ -65,7 +65,11 @@ jobs:
           chmod +x /tmp/irc-deploy/irc-serve
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-staging"
-          sudo systemctl enable --now irc-serve-staging
+          # restart (not enable --now): --now only starts stopped units, so a
+          # redeploy would keep serving the stale binary (#610). restart also
+          # starts an inactive unit, so first installs are covered.
+          sudo systemctl enable irc-serve-staging
+          sudo systemctl restart irc-serve-staging
           sleep 3
           # Protocol-level, not a bare connect: a wedged binary that still
           # listens must fail (#531).
@@ -91,7 +95,9 @@ jobs:
           chmod +x /tmp/irc-deploy/irc-serve
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-stable"
-          sudo systemctl enable --now irc-serve-stable
+          # restart (not enable --now): see staging above (#610).
+          sudo systemctl enable irc-serve-stable
+          sudo systemctl restart irc-serve-stable
           sleep 3
           # Protocol-level, not a bare connect: a wedged binary that still
           # listens must fail (#531).
@@ -145,14 +151,27 @@ jobs:
           sudo install -d -o root -g root -m 755 "$INSTALL_DIR"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-a"
           sudo install -m 755 /tmp/irc-deploy/irc-serve "$INSTALL_DIR/irc-serve-fed-b"
-          sudo systemctl enable --now irc-serve-fed-a irc-serve-fed-b
+          # restart (not enable --now): --now never restarts running units, so
+          # redeploys kept serving the stale binary (#610).
+          sudo systemctl enable irc-serve-fed-a irc-serve-fed-b
+          RESTART_TS=$(date +%s)
+          sudo systemctl restart irc-serve-fed-a irc-serve-fed-b
           sleep 5
           # Protocol-level per node, not bare connects (#531).
           for port in 6668 6669; do
             ./scripts/irc-health-check.sh 127.0.0.1 "$port"
           done
-          sleep 5
-          echo "--- link status A ---"
-          sudo journalctl -u irc-serve-fed-a --no-pager -n 40 | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
-          echo "--- link status B ---"
-          sudo journalctl -u irc-serve-fed-b --no-pager -n 40 | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
+          # Fail unless BOTH links re-establish after the restart: proves the
+          # running processes are the just-installed binary, not stale PIDs.
+          ok_a=0; ok_b=0
+          for i in $(seq 1 12); do
+            sudo journalctl -u irc-serve-fed-a --no-pager --since "@$RESTART_TS" | grep -q "link_established" && ok_a=1 || true
+            sudo journalctl -u irc-serve-fed-b --no-pager --since "@$RESTART_TS" | grep -q "link_established" && ok_b=1 || true
+            if [ "$ok_a" = 1 ] && [ "$ok_b" = 1 ]; then break; fi
+            sleep 5
+          done
+          echo "--- link status A (since restart) ---"
+          sudo journalctl -u irc-serve-fed-a --no-pager --since "@$RESTART_TS" | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
+          echo "--- link status B (since restart) ---"
+          sudo journalctl -u irc-serve-fed-b --no-pager --since "@$RESTART_TS" | grep -E "link_established|link_rejected|FEDERATE" | tail -5 || true
+          [ "$ok_a" = 1 ] && [ "$ok_b" = 1 ] || { echo "fed link did not re-establish within 60s of restart"; exit 1; }
