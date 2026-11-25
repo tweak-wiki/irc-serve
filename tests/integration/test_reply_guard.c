@@ -412,6 +412,7 @@ int main(void)
         free(reg);
         free(conn);
         free(welcome);
+        free(setname);
         free(rep);
     }
 
