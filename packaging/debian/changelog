@@ -1,3 +1,13 @@
+irc-serve (0.8.0-1) unstable; urgency=medium
+
+  * Federation-integration release: actor echo on forwarded state changes
+  * (#558), inbound S-verb client emission (#559), SASL 903-908 numerics
+  * (#560), remote KICK/MODE/WHOIS targets (#606/#607), QUIT/NICK echo
+  * (#609), departure propagation (#608), shutdown flush (#591), live
+  * staging-verified two-node mesh. No wire change since 0.2.0.
+
+ -- TheFirstIstari <euphonium.ashe.f@gmail.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
 irc-serve (0.2.0-1) unstable; urgency=medium
 
   * 4.3 wire extension (#563): SJOIN carries user+host; SSETNAME, SAWAY and
