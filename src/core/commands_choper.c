@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "core/fanout.h"
+#include "core/connection.h"
 #include "core/reply.h"
 
 /* ---------------------------------------------------------------------------
@@ -59,67 +59,47 @@
  * that must not claim a malformed nick is taken, and the 401 that must not claim
  * an absent user is elsewhere.
  *
- * 401 IS STILL CHECKED, and it comes first, because it is a real question with a
- * real answer and a different failure: CHOPER names a person, and this node
- * either holds that nickname or does not. A node that answered 464 to every
- * CHOPER without looking would be refusing a request about a user who is
- * demonstrably here, and 464's text would be about the wrong thing entirely.
+ * NO NICK LOOKUP HAPPENS, and no 401 is emitted (#673). params[0] names an
+ * account in a credential store, not an online nick, and there is no store to
+ * resolve it against -- so a lookup in the nick table answers a question
+ * nobody asked, and its 401 makes the refusal depend on who happens to be
+ * online (a user-enumeration oracle on top of a wrong numeric). The flow never
+ * needs an online target, so the handler answers 464 unconditionally; when an
+ * oper model lands, the lookup target becomes the store, not the nick table.
  *
- * THE PASSWORD IS NOT LOGGED, on either path. The 401 and 464 lines name the
- * target and never the password, and the observable line does the same -- the
+ * THE PASSWORD IS NOT LOGGED. The 464 line names the target and never the
+ * password, and the observable line does the same -- the
  * same discipline handle_pass() follows, and for the same reason: a node that
  * printed a secret to its own stdout would leak it into every log collector
  * downstream of it.
  */
 void handle_choper(server_t *s, conn_t *c, const message_t *m)
 {
-    conn_t *who;
-
     if (m->nparams != 2) {
         (void)reply_refused(s, c, "CHOPER", "INVALID_PARAMS", "461", NULL, 0,
                             "Not enough parameters");
         return;
     }
-    /* fanout_find_nick() rather than server_nick_lookup(): both are the same
-     * folded registry, and the wrapper is the one that carries the NULL and
-     * empty-name guards. The empty-name guard is DEFENCE IN DEPTH and not a
-     * reachable case from this command: 3.2 has no way to express an empty
-     * middle parameter -- 4.3.1 says the same about a wire format -- so a
-     * `CHOPER :<password>` reaches the arity check as a message with ONE
-     * parameter and is refused there, and any name that gets past it is
-     * non-empty by construction. The wrapper is used rather than the raw lookup
-     * because it is the one that would be correct if that ever stopped being
-     * true, and because a caller must not have to know it. */
-    who = fanout_find_nick(s, m->params[0]);
-    if (who == NULL) {
-        (void)reply(s, c, "401", (const char *const[]){ m->params[0] }, 1,
-                    "No such nick/channel");
-        /* Measured, for the reason every other log-only value here is: this
-         * branch is reached precisely when the name is one this node does NOT
-         * hold, so it is the one place a nickname-shaped string arrives that has
-         * not been through `valid_nick()`. The 401 above still names it back to
-         * its sender. */
-        {
-            char shown[CONN_LOG_FIELD_MAX + 1u];
-
-            (void)conn_text_logsafe(shown, sizeof shown, m->params[0]);
-            printf("[observable] choper_refused: by=%s target=%s target_len=%zu "
-                   "target_bad_bytes=%zu reason=NO_SUCH_NICK\n",
-                   c->nick, shown, strlen(m->params[0]),
-                   conn_text_bad_count(m->params[0]));
-        }
-        return;
-    }
-
-    /* 464, WHICH ANSWERS ONLY THIS: a failed SASL exchange is 904, never 464,
-     * so the number alone tells a client this was an operator refusal. For a
-     * client that negotiated `standard-replies` this is
-     * `FAIL CHOPER ERR_NOPRIVILEGES`, which says "you are not an operator" outright. */
+    /* No nick lookup: params[0] names a credential account, not an online
+     * nick, and there is no credential store to check it against -- so the
+     * only honest answer is the 464 refusal, whether or not the name is
+     * online. The name echoes back verbatim: with no registry involved there
+     * is nothing to canonicalise its case against. */
     (void)reply_refused(s, c, "CHOPER", NULL, "464", NULL, 0,
                         "%s cannot become an operator: this server holds no "
                         "operator flags and no operator credentials",
-                        who->nick);
-    printf("[observable] choper_refused: by=%s target=%s reason=NO_OPER_FLAGS "
-           "oper=0 pass_seen=%llu\n",
-           c->nick, who->nick, (unsigned long long)s->n_pass_seen);
+                        m->params[0]);
+    /* Logged through conn_text_logsafe(): unlike the old online-target path,
+     * this name never passed through valid_nick(), so it is untrusted log
+     * input. The password is never logged. */
+    {
+        char shown[CONN_LOG_FIELD_MAX + 1u];
+
+        (void)conn_text_logsafe(shown, sizeof shown, m->params[0]);
+        printf("[observable] choper_refused: by=%s target=%s target_len=%zu "
+               "target_bad_bytes=%zu reason=NO_OPER_FLAGS oper=0 pass_seen=%llu\n",
+               c->nick, shown, strlen(m->params[0]),
+               conn_text_bad_count(m->params[0]),
+               (unsigned long long)s->n_pass_seen);
+    }
 }
