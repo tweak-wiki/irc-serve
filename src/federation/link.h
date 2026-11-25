@@ -754,6 +754,10 @@ void fed_set_retry(server_t *s, uint64_t base_ms, uint64_t max_ms, unsigned budg
  * do. The CLI's own cap of IRC_FED_MAX_PEERS --peer options is therefore a
  * limit on the command line, not on the table, and the two being different is
  * recorded rather than hidden. */
+/* The link's state transition. Defined in link.c; extern so the departure half
+ * in federation/departure.c can take a link back to INIT. */
+void fed_link_set_state(server_link_t *link, handshake_state_t state);
+
 /* Mark the link to `name` as one that must carry TLS, or as one that need not.
  *
  * THE STICKINESS IS THE POINT and it is why this is a separate call rather than an
