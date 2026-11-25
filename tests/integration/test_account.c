@@ -677,16 +677,19 @@ static void expect_no_tag_block(client_t *cl, size_t from, size_t end,
  * other. */
 static void expect_shutdown_frees_the_account_store(void)
 {
-    char *code = tf_read_code("src/core/server.c", NULL);
+    /* #543 TU-43: server_shutdown() lives in core/server_shutdown.c now, so
+     * the arm is asserted where the function is. */
+    char *code = tf_read_code("src/core/server_shutdown.c", NULL);
 
-    TF_CHECK_MSG(code != NULL, "could not read src/core/server.c");
+    TF_CHECK_MSG(code != NULL, "could not read src/core/server_shutdown.c");
     if (code == NULL) {
         return;
     }
     TF_CHECK_MSG(tf_calls(code, "account_store_free") == 1,
                  "server_shutdown() must release the account registry exactly "
                  "once, and it must not be a line with no free behind it: "
-                 "account_store_free() appears %d time(s) in src/core/server.c",
+                 "account_store_free() appears %d time(s) in "
+                 "src/core/server_shutdown.c",
                  tf_calls(code, "account_store_free"));
     free(code);
 }
