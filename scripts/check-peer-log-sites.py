@@ -266,7 +266,7 @@ MEASURE_BAD = re.compile(r"(?:\w+_)?(?:bad_bytes|bad|nonprintable|ctl_bytes)=")
 # needs a maintenance loop to stay valid, and a list that needs a loop is a list that
 # goes stale.
 ALLOWED_SITES = {
-    ("verbs.c", "fed_in_smodes"): {
+    ("state.c", "fed_in_smodes"): {
         # `applied` and `refused` are BUILT HERE, from this node's own decisions.
         # `applied` accumulates one byte per mode letter that chan_mode_implemented()
         # accepted, and `refused` one per letter it did not; both are written by this

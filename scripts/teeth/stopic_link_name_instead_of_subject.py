@@ -22,7 +22,7 @@ nothing.
 """
 from util import apply_fault
 
-p = "src/federation/verbs.c"
+p = "src/federation/state.c"
 old = """    if (!chan_same_name(tags->origin, ch->origin) &&
         !chan_server_has(ch, tags->origin)) {"""
 new = """    /* FAULT: the transport rather than the line, which is the rule as it was. */

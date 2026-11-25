@@ -538,6 +538,17 @@ void fed_obs(const char *fmt, ...)
 void fed_local_emit(server_t *s, chan_t *ch, const char *prefix,
                     const char *verb, const char *const *params, int nparams);
 
+/* Keep a channel's member-server set in step with the roster. Defined in
+ * verbs.c; called from the arrival handlers there (SJOIN/SNICK) and from the
+ * state half in federation/state.c (SPART/SKICK). */
+void fed_touch_server(chan_t *ch, const char *server, int adding);
+
+/* The actor an inbound state line renders with. Defined in verbs.c; called
+ * from SJOIN there and from the state half in federation/state.c. */
+const char *fed_actor_prefix(const chan_t *ch, const char *nick,
+                             const char *prefix, int withhold_bare,
+                             char *out, size_t cap);
+
 /* ---------------------------------------------------------------------------
  * The DECODE side
  * ---------------------------------------------------------------------------
