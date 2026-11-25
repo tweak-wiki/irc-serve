@@ -310,11 +310,15 @@ int main(void)
      * ------------------------------------------------------------------------ */
     {
         char *cmds = tf_read_code("src/core/commands.c", NULL);
+        /* #543 TU-25: the registration handlers moved verbatim to
+         * commands_register.c; the same two negatives apply there, and the
+         * nick-claim positive control moved with handle_nick(). */
+        char *reg = tf_read_code("src/core/commands_register.c", NULL);
         char *rep = tf_read_code("src/core/reply.c", NULL);
         const char *at;
         const char *queue_at;
 
-        TF_CHECK_MSG(cmds != NULL && rep != NULL,
+        TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL,
                      "could not read the sources (is IRCSERVE_SRC_DIR set?)");
 
         TF_CHECK_MSG(!tf_calls(cmds, "server_queue"),
@@ -324,6 +328,13 @@ int main(void)
         TF_CHECK_MSG(!tf_calls(cmds, "conn_pump"),
                      "commands.c calls conn_pump(): a handler has reached around "
                      "reply() into the socket itself");
+        TF_CHECK_MSG(!tf_calls(reg, "server_queue"),
+                     "commands_register.c calls server_queue(): a handler has "
+                     "reached around reply() and can therefore write to a peer "
+                     "link, which is exactly what 3 forbids");
+        TF_CHECK_MSG(!tf_calls(reg, "conn_pump"),
+                     "commands_register.c calls conn_pump(): a handler has "
+                     "reached around reply() into the socket itself");
         /* QUIT must go through conn_mark_closing() so the reaper stays the only
          * close site (3.4). It is asserted here rather than left to
          * test_close_sites.c, which proves the same rule from the other side:
@@ -332,8 +343,8 @@ int main(void)
                      "commands.c no longer calls conn_mark_closing(): QUIT must "
                      "MARK the connection closing and let the reaper close the "
                      "descriptor (3.4), or it has found a second close site");
-        TF_CHECK_MSG(strstr(cmds, "server_nick_claim") != NULL,
-                     "commands.c no longer claims nicknames: valid_nick() would "
+        TF_CHECK_MSG(strstr(reg, "server_nick_claim") != NULL,
+                     "commands_register.c no longer claims nicknames: valid_nick() would "
                      "have lost its only production caller, which is the whole "
                      "reason this phase exists");
 
@@ -363,6 +374,7 @@ int main(void)
                          "it and still compile");
         }
         free(cmds);
+        free(reg);
         free(rep);
     }
 

@@ -563,12 +563,14 @@ static void case_both_paths_ask_one_predicate(void)
 
     /* The CLIENT path's call site, in `handle_user()`. Read with comments
      * stripped so a comment describing the predicate cannot satisfy the
-     * assertion -- a rule that exists only in prose is not a rule. */
-    commands = tf_read_code("src/core/commands.c", &len);
+     * assertion -- a rule that exists only in prose is not a rule.
+     * #543 TU-25: handle_user() moved verbatim from commands.c to
+     * commands_register.c; the strings below moved with it. */
+    commands = tf_read_code("src/core/commands_register.c", &len);
     TF_CHECK_MSG(commands != NULL && len > 0u,
-                 "could not read src/core/commands.c, so the client path's call "
-                 "site could not be checked and this case would pass by not "
-                 "looking");
+                 "could not read src/core/commands_register.c, so the client "
+                 "path's call site could not be checked and this case would "
+                 "pass by not looking");
     TF_CHECK_MSG(strstr(commands, "nickreg_ident_ok(m->params[0], sizeof c->user)") != NULL,
                  "handle_user() no longer asks nickreg_ident_ok() about the client's "
                  "ident. Either the ingest check was removed -- in which case the "
@@ -688,9 +690,10 @@ static void case_both_paths_report_the_same_reason(void)
     char *nickreg;
     size_t len = 0u;
 
-    commands = read_source("src/core/commands.c", &len);
+    /* #543 TU-25: handle_user() moved verbatim to commands_register.c. */
+    commands = read_source("src/core/commands_register.c", &len);
     TF_CHECK_MSG(commands != NULL && len > 0u,
-                 "could not read src/core/commands.c");
+                 "could not read src/core/commands_register.c");
     TF_CHECK_MSG(occurrences(commands, "reason=NOT_A_PARAMETER_BYTE") >= 1u,
                  "the client path's refusal does not name reason="
                  "NOT_A_PARAMETER_BYTE, which is the token nickreg_ident_refused() "
