@@ -866,16 +866,12 @@ size_t conn_text_logsafe(char *out, size_t cap, const char *s);
  *   away        4.3's SBURST must send it for every nick, and 301/352 report
  *               it. See CONN_MAX_AWAY above, which is where the bound and the
  *               over-long policy are argued.
- *   signon_at   317 RPL_WHOISIDLE carries a signon time. There is no other
- *               value on the node that could fill it, and a numeric that lies
- *               about what it is is what Phase 4 refused to do for 329 ("reusing
- *               topic_when for it would be a numeric that lies about what it
- *               is"). Borrowing the node's boot time would be the same lie one
- *               level up: it is when the SERVER started, not when the user
- *               connected.
- *               signon_at stays wall-clock (time_t from time()): 317's
- *               <signon> is a calendar time the client compares against its
- *               own clock, so no monotonic substitute is the right value.
+ *   signon_at   When the connection was accepted (time_t from time()). It has
+ *               no wire surface since the #671 change: 317 used to carry it as
+ *               a second middle parameter, and now carries only <idle>, so the
+ *               stamp is an internal fact. Borrowing the node's boot time would
+ *               be the same lie one level up: it is when the SERVER started,
+ *               not when the user connected.
  *               last_active_ms is the separate monotonic stamp
  *               (server_now_ms() ms, #175) that 317's <idle> is computed
  *               from: idle is a duration, and a wall-clock duration warps
@@ -921,7 +917,7 @@ typedef struct conn {
      * one place, `handle_user()`, on the same path that stores the ident. */
     int         user_seen;         /* a USER command arrived; ident may be empty */
     char        away[CONN_MAX_AWAY + 1];
-    time_t      signon_at;         /* accept time; 317's <signon time> */
+    time_t      signon_at;         /* accept time; internal since #671 */
     uint64_t    last_active_ms;  /* last byte read, monotonic ms; 317's <idle> */
     unsigned    caps;              /* negotiated capabilities; core/cap.h bits */
     int         cap_negotiating;   /* CAP LS/REQ in flight; CAP END clears it */

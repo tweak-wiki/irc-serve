@@ -467,9 +467,11 @@ int main(void)
      * would satisfy every positive check in section 3. */
     expect_absent_in_window(&alice, from, end, "a here user's WHOIS", " 301 ");
 
-    /* 317's two middle parameters are numbers whose values depend on the clock,
-     * so only their SHAPE is checked -- and it is checked, because a 317 with no
-     * numbers where it must carry two is a numeric that says nothing at all.
+    /* 317's middle parameter is a number whose value depends on the clock, so
+     * only its SHAPE is checked -- and it is checked, because a 317 with no
+     * number where it must carry one is a numeric that says nothing at all.
+     * ONE number (issue #671): RFC 2812 5.1's field list is "<nick> <integer>
+     * :seconds idle", and a second number is the defect.
      *
      * The whole line is COPIED OUT of the window and matched against the RFC
      * 2812 3.3.4 shape, which is what makes the assertion mean something: it
@@ -486,7 +488,6 @@ int main(void)
         char wire[256];   /* not `line`: that is the away-body buffer in main() */
         char trailing[64];
         unsigned long long idle = 0;
-        unsigned long long signon = 0;
         const char *line_end;
         const char *body;
         size_t n;
@@ -512,9 +513,9 @@ int main(void)
                 body += strlen(" 317 alice bob ");
             }
             TF_CHECK_MSG(body != NULL &&
-                             sscanf(body, "%llu %llu :%63[^\r\n]", &idle, &signon,
-                                    trailing) == 3,
-                         "317's parameters are not <idle> <signon> "
+                             sscanf(body, "%llu :%63[^\r\n]", &idle,
+                                    trailing) == 2,
+                         "317's parameters are not <idle> "
                          ":seconds idle; the line was \"%s\"",
                          wire);
             /* The trailing parameter is read with a scanset rather than %s,
@@ -524,17 +525,6 @@ int main(void)
             TF_CHECK_MSG(strcmp(trailing, "seconds idle") == 0,
                          "317's trailing text is \"%s\", not \"seconds idle\"",
                          trailing);
-            /* A signon time of 0 is a field that was never written, and one in
-             * the future is a clock read wrongly. Both are checked because
-             * conn_t stores them at accept and connection.c stamps them on every
-             * read -- a node that left signon_at at 0 passes every shape check
-             * above. */
-            TF_CHECK_MSG(signon > 1000000000ull,
-                         "317's <signon> is %llu, which is not a plausible Unix "
-                         "timestamp: conn_t::signon_at was never set",
-                         signon);
-            TF_CHECK_MSG(signon <= (unsigned long long)time(NULL),
-                         "317's <signon> is in the future");
         }
     }
 

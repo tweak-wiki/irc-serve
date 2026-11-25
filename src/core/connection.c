@@ -81,15 +81,15 @@ conn_t *conn_new(int fd, int kind)
      * transport from the instant it exists" true rather than something each
      * construction site has to remember -- see transport.h. */
     transport_init_plaintext(c);
-    /* The two 317 RPL_WHOISIDLE stamps, taken where the connection comes
+    /* The accept-time stamps, taken where the connection comes
      * into existence rather than where they are asked for. signon_at is the
      * answer to "when did this user connect", which is a fact about accept and
      * is therefore true from this instant; last_active_ms starts at the
      * same instant so an idle time measured before the client has said
      * anything is zero rather than whatever the clock happened to read.
      *
-     * signon_at is wall-clock (time()): 317's <signon> is a calendar time
-     * the client compares against its own clock. last_active_ms is
+     * signon_at is wall-clock (time()): it has no wire surface since the #671
+     * change, and is kept as an internal fact. last_active_ms is
      * server_now_ms() on the MONOTONIC clock (#175): idle is a duration
      * and a wall-clock duration warps under an NTP step (mass-kick or
      * never-kick). See connection.h. */

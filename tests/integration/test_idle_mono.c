@@ -2,9 +2,9 @@
  *
  * conn_t::last_active_ms is server_now_ms() milliseconds, and 317's
  * <idle> is the saturating (now_ms - last_active_ms) / 1000 at format
- * time. A wall-clock step must therefore not move the idle number, while
- * 317's <signon> stays wall-clock (time_t): a calendar time the client
- * compares against its own clock.
+ * time. A wall-clock step must therefore not move the idle number. 317
+ * carries exactly one middle parameter, <idle> (issue #671): RFC 2812 5.1's
+ * "<nick> <integer> :seconds idle".
  *
  * In-process against server_t, like test_fanout_gate.c: the idle under test is
  * a fabricated stamp 60 s in the monotonic past, which no wire fixture could
@@ -84,10 +84,10 @@ static void queued(const member_t *m, size_t from, char *out, size_t cap)
     out[n] = '\0';
 }
 
-/* WHOIS `target` from `asker`, then parse the 317 <idle> <signon> pair out of
- * the queued bytes. */
+/* WHOIS `target` from `asker`, then parse the 317 <idle> out of the queued
+ * bytes. */
 static void whois_idle(const member_t *asker, const char *target,
-                       unsigned long long *idle, unsigned long long *signon)
+                       unsigned long long *idle)
 {
     char line[128];
     char buf[4096];
@@ -125,8 +125,9 @@ static void whois_idle(const member_t *asker, const char *target,
     if (body == NULL) {
         return;
     }
-    TF_CHECK_MSG(sscanf(body, "%llu %llu :%63[^\r\n]", idle, signon, trailing) == 3,
-                 "317's parameters are not <idle> <signon> :text; got:\n%s", buf);
+    /* ONE middle parameter (issue #671): a second number here is the defect. */
+    TF_CHECK_MSG(sscanf(body, "%llu :%63[^\r\n]", idle, trailing) == 2,
+                 "317's parameters are not <idle> :text; got:\n%s", buf);
 }
 
 int main(void)
@@ -134,7 +135,6 @@ int main(void)
     member_t asker;
     member_t target;
     unsigned long long idle = 0;
-    unsigned long long signon = 0;
 
     TF_CHECK_MSG(server_init(&g_server, "irc.test") == 0, "server_init failed");
     member_open(&asker, "alice");
@@ -142,9 +142,8 @@ int main(void)
 
     /* A fresh connection is idle for 0 s: last_active_ms starts at the
      * accept instant, so the difference at format time is sub-second. */
-    whois_idle(&asker, "bob", &idle, &signon);
+    whois_idle(&asker, "bob", &idle);
     TF_CHECK_MSG(idle == 0ull, "a fresh connection reports idle %llu, not 0", idle);
-    TF_CHECK_MSG(signon != 0ull, "317's <signon> is 0: never stamped");
 
     /* Advance the idle 60 s into the monotonic past. This is the whole of the
      * "advance tick 60 s" case: the formatter subtracts stamps on the same
@@ -160,21 +159,10 @@ int main(void)
                    (unsigned long long)(now_ms / 1000u));
         } else {
             target.c->last_active_ms = now_ms - 60000u;
-            whois_idle(&asker, "bob", &idle, &signon);
+            whois_idle(&asker, "bob", &idle);
             TF_CHECK_MSG(idle == 60ull, "60 s of monotonic idle reports %llu, not 60", idle);
         }
     }
-
-    /* 317's <signon> is wall-clock, not part of the idle computation: it
-     * must be a plausible Unix time (stamped by time() at accept), at or
-     * below now. Under the monotonic-ms stamps this ordering check fails --
-     * signon would be millisecond-scale against a seconds clock. */
-    TF_CHECK_MSG(signon > 1000000000ull,
-                 "317's <signon> %llu is not a plausible Unix timestamp: "
-                 "conn_t::signon_at was never set",
-                 signon);
-    TF_CHECK_MSG(signon <= (unsigned long long)time(NULL),
-                 "317's <signon> is in the future");
 
     member_close_peer(&asker);
     member_close_peer(&target);
