@@ -994,16 +994,17 @@ int main(void)
     }
 
     /* =======================================================================
-     * 7. #170: WHO * with 5 nicks -> 0x352 + 315; filtered masks stay capped;
-     *    WHO #chan unchanged
+     * 7. #170/#674: WHO * with 5 nicks -> 5x352 + 315; filtered masks stay
+     *    capped; WHO #chan unchanged
      * ==================================================================== */
     client_open(&eve, &node, "eve");
-    /* WHO * sweeps nothing: 315 alone even with five nicks online. */
+    /* WHO * lists every visible user: 5 nicks, 5 rows, then 315. The #170
+     * 64-row cap bounds the sweep; five rows are far below it. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO *") == 0, "tc_send failed");
     end = drain(&alice);
-    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
-                 "WHO * with 5 nicks produced %zu 352 lines, expected 0 (#170)",
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 5,
+                 "WHO * with 5 nicks produced %zu 352 lines, expected 5 (#674)",
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO * terminates with 5 nicks",
                      ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
