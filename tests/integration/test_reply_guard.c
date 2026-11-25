@@ -327,12 +327,16 @@ int main(void)
          * commands_setname.c; the same two negatives apply there (it answers
          * through reply()/send_line() only). */
         char *setname = tf_read_code("src/core/commands_setname.c", NULL);
+        /* #543 TU-32: the CHOPER handler moved verbatim to
+         * commands_choper.c; the same two negatives apply there (it answers
+         * through reply() only). */
+        char *choper = tf_read_code("src/core/commands_choper.c", NULL);
         char *rep = tf_read_code("src/core/reply.c", NULL);
         const char *at;
         const char *queue_at;
 
         TF_CHECK_MSG(cmds != NULL && rep != NULL && reg != NULL && conn != NULL &&
-                     welcome != NULL && setname != NULL,
+                     welcome != NULL && setname != NULL && choper != NULL,
                      "could not read the sources (is IRCSERVE_SRC_DIR set?)");
 
         TF_CHECK_MSG(!tf_calls(cmds, "server_queue"),
@@ -369,6 +373,13 @@ int main(void)
                      "link, which is exactly what 3 forbids");
         TF_CHECK_MSG(!tf_calls(setname, "conn_pump"),
                      "commands_setname.c calls conn_pump(): the handler has "
+                     "reached around reply() into the socket itself");
+        TF_CHECK_MSG(!tf_calls(choper, "server_queue"),
+                     "commands_choper.c calls server_queue(): the handler has "
+                     "reached around reply() and can therefore write to a peer "
+                     "link, which is exactly what 3 forbids");
+        TF_CHECK_MSG(!tf_calls(choper, "conn_pump"),
+                     "commands_choper.c calls conn_pump(): the handler has "
                      "reached around reply() into the socket itself");
         /* QUIT must go through conn_mark_closing() so the reaper stays the only
          * close site (3.4). It is asserted here rather than left to
@@ -413,6 +424,7 @@ int main(void)
         free(conn);
         free(welcome);
         free(setname);
+        free(choper);
         free(rep);
     }
 

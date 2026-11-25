@@ -188,6 +188,9 @@ add_library(irc_core STATIC
   # #543: the SETNAME family (IRCv3 `setname`) split out of commands.c.
   # The dispatch table stays there; this file holds the handler.
   core/commands_setname.c
+  # #543: the CHOPER refusal family (RFC 2812 3.4.1) split out of commands.c.
+  # The dispatch table stays there; this file holds the handler.
+  core/commands_choper.c
   # #543: the welcome burst (001-005 + MOTD) split out of commands.c.
   # commands_state_update() and handle_motd() stay there and call in.
   core/commands_welcome.c
