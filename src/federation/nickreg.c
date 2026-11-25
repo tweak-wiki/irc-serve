@@ -1048,6 +1048,40 @@ const char *fed_nickreg_render(const server_t *s, const char *nick,
     return (n > 0u) ? out : NULL;
 }
 
+int fed_nickreg_info(const server_t *s, const char *nick, const char *server,
+                     char *nick_out, size_t nick_cap, char *srv_out,
+                     size_t srv_cap, char *user_out, size_t user_cap,
+                     char *host_out, size_t host_cap, uint64_t *signon_out)
+{
+    const struct fed_rnick *e;
+
+    if (s == NULL || nick == NULL) {
+        return 0;
+    }
+    e = nickreg_find((server_t *)(uintptr_t)(const void *)s, nick, server);
+    if (e == NULL) {
+        return 0;
+    }
+    /* snprintf() truncates rather than failing, so a short cap still
+     * terminates; at the registry's own widths nothing truncates. */
+    if (nick_out != NULL && nick_cap > 0u) {
+        (void)snprintf(nick_out, nick_cap, "%s", e->nick);
+    }
+    if (srv_out != NULL && srv_cap > 0u) {
+        (void)snprintf(srv_out, srv_cap, "%s", e->server);
+    }
+    if (user_out != NULL && user_cap > 0u) {
+        (void)snprintf(user_out, user_cap, "%s", e->user);
+    }
+    if (host_out != NULL && host_cap > 0u) {
+        (void)snprintf(host_out, host_cap, "%s", e->host);
+    }
+    if (signon_out != NULL) {
+        *signon_out = e->signon;
+    }
+    return 1;
+}
+
 int fed_nickreg_local_loses(const char *local, const char *remote)
 {
     size_t i;
