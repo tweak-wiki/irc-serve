@@ -139,6 +139,10 @@ add_library(irc_core STATIC
   # membership) split out of fanout.c. Delivery and forwarding stay there;
   # this file holds the "what did this name refer to" half.
   core/fanout_resolve.c
+  # #543: the forward leg (target-set walk + the fanout_forward_* entry
+  # points) split out of fanout.c. Delivery stays there; this file holds the
+  # forward half and the two static helpers it owns.
+  core/fanout_forward.c
   core/commands.c
   # #543: the AUTHENTICATE family (SASL PLAIN exchange) split out of commands.c.
   # The dispatch table stays there; this file holds the handler and its helpers.
