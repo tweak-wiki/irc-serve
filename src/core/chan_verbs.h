@@ -84,9 +84,10 @@
  *
  * `store` is scratch of at least `dstcap` bytes and `names` receives up to
  * `max` pointers into it. Empty elements are skipped, so "JOIN #a," joins #a;
- * returns the number of names, or -1 on a bad argument, on an over-long
- * element, or on more names than `max`. A list with no names at all returns 0
- * and the caller answers it as too few.
+ * returns the number of names, or -1 on a bad argument or on more names than
+ * `max`, or -2 on an over-long element so the caller can answer 417 rather
+ * than 461. A list with no names at all returns 0 and the caller answers it
+ * as too few.
  *
  * Why in-place splitting is safe HERE and is not a general technique: a
  * parameter of a parsed message cannot contain a space (the wire grammar has no

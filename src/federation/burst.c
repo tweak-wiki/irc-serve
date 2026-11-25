@@ -492,10 +492,9 @@ static const char *burst_mid_or_dash(const char *v)
 }
 
 /* SBURSTN's <modes> is `-` ALWAYS on this build, and that is a property of the
- * node rather than of the format: commands.c says in terms that this node evaluates
- * neither umodes nor cmodes, and lists "i" only so 004 has something in it. The
- * field is on the wire because 4.3 names it, so a node that does evaluate user
- * modes fills it in without a format change. */
+ * node rather than of the format: a locally set +i does not cross the burst,
+ * and "i" is listed only so 004 has something in it. The field is on the wire
+ * because 4.3 names it, so filling it in later needs no format change. */
 #define burst_modes_token(v) burst_mid_or_dash(v)
 
 /* An account name, or `*`, for the wire. `c` is the LOCAL member whose account is

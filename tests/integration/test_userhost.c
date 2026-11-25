@@ -33,8 +33,9 @@
  * THE `*` PREFIX IS ASSERTED AS *NOT* MATCHING, AND THAT IS THE POINT
  * ---------------------------------------------------------------------------
  * RFC 2812 3.3.4: a parameter beginning with '*' matches only users who have set
- * a user mode to be invisible. This node has no user modes, so no user is
- * invisible, so `USERHOST *bob` must NOT come back with the '+' form. A node
+ * a user mode to be invisible. USERHOST does not consult the +i flag MODE <self>
+ * sets, so no user is invisible to it, so `USERHOST *bob` must NOT come back with
+ * the '+' form. A node
  * that stripped the '*' and did an ordinary lookup would answer '+' and be
  * claiming a user is invisible -- a fact it has no way of knowing and must never
  * invent. See msg_verbs.c for the argument that this is the RFC's own '*'
@@ -313,9 +314,9 @@ int main(void)
     /* =======================================================================
      * 4. The `*` invisibility prefix does NOT match a visible user
      * ==================================================================== */
-    /* This node has no user modes -- 004 advertises "i" and MODE evaluates none
-     * of it -- so no user is invisible and `*bob` must come back with the '*'
-     * marker. A node that treated the '*' as decoration and did an ordinary
+    /* MODE <self> +i exists, but USERHOST does not consult the flag -- so no user
+     * is invisible to it and `*bob` must come back with the '*' marker. A node
+     * that treated the '*' as decoration and did an ordinary
      * lookup would answer '+' here, and would be claiming a fact it cannot know.
      */
     from = mark(&alice);

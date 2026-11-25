@@ -35,8 +35,8 @@ server's non-generic features). Of those 160:
 
 | | Count |
 |---|---|
-| **Emitted on this node** | **59** |
-| Absent, and the absence is correct for this design | 91 |
+| **Emitted on this node** | **62** |
+| Absent, and the absence is correct for this design | 88 |
 | N/A — in RFC 2812 5.3 only, with no role on any server | 10 |
 | **Defined in RFC 2812 and not accounted for** | **0** |
 
@@ -170,6 +170,7 @@ conformant.
 | Code | Name | Field list | Here | Notes |
 |---|---|---|---|---|
 | 321 | RPL_LISTSTART | Obsolete. Not used. | E | Emitted as `"Channel" :Users  Name`, which is RFC 1459's form. RFC 2812 marks it obsolete, and RFC 1459 kept it; emitting both an obsolete and a modern form would be worse. **246/247 are the pre-1459 numbers and are absent — see §3.** |
+| 221 | RPL_UMODEIS | `<usermodes>` | E | Emitted by `MODE <self>` as the current set (`+i` or bare `+`); the RFC's field list has no trailing text, so the trailing parameter is empty. See §6.1. |
 | 322 | RPL_LIST | `<channel> <# visible> :<topic>` | E | ✓ |
 | 323 | RPL_LISTEND | `:End of LIST` | E | ✓ |
 | 324 | RPL_CHANNELMODEIS | `<channel> <mode> <mode params>` | E | **deviation** — two middle parameters and a trailing sentence, where the RFC has three fields and **no trailing parameter at all**. See §5.4. The missing `<mode params>` is honest (this node evaluates `b`, `o`, `v` and no mode takes an argument beyond `+b`'s mask), but Phase 11's justification — that the added text "is the RFC's free `<text>`" — was **wrong**: 324's entry in RFC 2812 5.1 contains no `:` and so names no free text. Corrected by the Phase 11b re-vet. |
@@ -253,14 +254,14 @@ conformant.
 | 485 | ERR_UNIQOPPRIVSNEEDED | `:You're not the original channel operator` | A | No `+q`/`+a`. |
 | 491 | ERR_NOOPERHOST | `:No O-lines for your host` | A | No OPER. |
 | 492 | ERR_NOSERVICEHOST | — | A | Reserved by RFC 2812 5.3; services. |
-| 501 | ERR_UMODEUNKNOWNFLAG | `:Unknown MODE flag` | A | **deviation** — see §6.8. |
-| 502 | ERR_USERSDONTMATCH | `:Cannot change mode for other users` | A | **deviation** — see §6.8. |
+| 501 | ERR_UMODEUNKNOWNFLAG | `:Unknown MODE flag` | E | Emitted by `MODE <self>` for a flag other than `i` — see §6.8. |
+| 502 | ERR_USERSDONTMATCH | `:Cannot change mode for other users` | E | Emitted by `MODE` naming another user's nick — see §6.8. |
 
 ## 3. Absent, and the absence is correct for this design
 
-One hundred and one RFC 2812 numerics are not emitted. Ninety-one of them are
-absent because the **feature** they report does not exist on this node, which is a
-design decision with a stated consequence rather than a gap. The remaining ten are
+Ninety-eight RFC 2812 numerics are not emitted. Eighty-eight of them are
+ absent because the **feature** they report does not exist on this node, which is a
+ design decision with a stated consequence rather than a gap. The remaining ten are
 in §3.2.
 
 ### 3.1 Absent because the feature is absent
@@ -271,7 +272,6 @@ in §3.2.
 | 211–219, 240–244, 250 | STATS | 3.4.4 | Same. `242 RPL_STATSUPTIME` in particular is a thing clients ask for on connect; a client that asks gets 421 rather than a number. |
 | 263 | RPL_TRYAGAIN | 3.4.2 | No throttle. The node's only back-pressure is a bounded write queue, and exceeding it drops the peer link rather than asking a client to wait — which is the correct answer for a *client*, since a client connection is not the thing under back-pressure. |
 | 231–235 | SERVICES | 3.4.6 | No services. 258 says so on the wire, which is what makes CHOPER a refusal rather than a grant. |
-| 221 | RPL_UMODEIS | 3.3.2 | This node evaluates **no** user modes (004 advertises `i`, and `MODE <nick>` never reaches a mode loop — §6.1). So there is no mode string to report. |
 | 313 | RPL_WHOISOPERATOR | 3.3.4 | No IRC operators. |
 | 314, 369, 406 | WHOWAS | 3.4.8 | No WHOWAS command and no nickname history. This node keeps none by design: a single process with no per-nick state that outlives a connection, so "was there a bob ten minutes ago" is not a question it can answer honestly. |
 | 325, 485 | UNIQOP | 2.3.1 | No `+q` or `+a` mode exists. |
@@ -549,20 +549,22 @@ replaced it, because a table that quietly deletes the defect it was written to
 track loses the reason the fix looks the way it does. **Phase 11c closed §6.11 in
 full and §6.12 in half** — §6.12's `<text>` is now the RFC's literal and its
 `<channel name>` is still absent, because §6.12 argues that filling it would require
-either a falsehood or two error numerics for one command. **§6.14 is new in Phase
-11c**, found while fixing §6.11. The remaining ten are open, and each says why;
-one of them, §6.13, is **blocked on another** rather than on a decision of its own.
+ either a falsehood or two error numerics for one command. **§6.14 is new in Phase
+ 11c**, found while fixing §6.11. **§6.1 and §6.8 were closed with the user-mode
+ routing: `MODE <nick>` reaches a user-mode path answering 221/501/502, and the
+ node evaluates `+i`.** The remaining eight are open, and each says why;
+ one of them, §6.13, is **blocked on another** rather than on a decision of its own.
 
 | | Numeric | Status |
 |---|---|---|
-| [§6.1](#61-mode-nick-is-answered-403-err_nosuchchannel) | `403` | open — needs a user-mode decision first |
+| [§6.1](#61-mode-nick-is-answered-403-err_nosuchchannel) | `403` | **fixed** — `MODE <nick>` routes to user modes |
 | [§6.2](#62-privmsg-arity-is-461-not-411-and-412) | `461` for `PRIVMSG` | open — deliberate, and a real gap |
 | [§6.3](#63-461-omitted-the-command-field--fixed-in-phase-11b) | `461` | **fixed** |
 | [§6.4](#64-464-is-not-err_passwdmismatch-for-choper-or-authenticate) | `464` | open — a mapping choice |
 | [§6.5](#65-472-sent-channel-where-the-rfc-sends-char--fixed-in-phase-11b) | `472` | **fixed** |
 | [§6.6](#66-no-ban-mask-validation-so-476-cannot-happen) | `476` | open — needs a validator |
 | [§6.7](#67-481-is-absent-the-not-privileged-family-answers-482-and-464) | `481` | open — needs an operator model |
-| [§6.8](#68-501-and-502-are-unreachable) | `501`, `502` | open — same cause as §6.1 |
+| [§6.8](#68-501-and-502-are-unreachable) | `501`, `502` | **fixed** — same change as §6.1 |
 | [§6.9](#69-version-is-not-a-command) | `351` | open — needs a new verb |
 | [§6.10](#610-time-ping-and-version-are-handled-as-commands-ctcp-is-not) | — | N/A, argued |
 | [§6.11](#611-366-has-no-channel-when-names-is-asked-with-no-argument-and-there-are-no-channels--fixed-in-phase-11c) | `366` | **fixed** in Phase 11c — §6.11 |
@@ -570,27 +572,22 @@ one of them, §6.13, is **blocked on another** rather than on a decision of its 
 | [§6.13](#613-482-has-no-channel-for-register-and-unregister--open-and-blocked-on-67) | `482` | open — **blocked on §6.7** |
 | [§6.14](#614-366s-trailing-text-is-end-of-names-list-the-rfcs-is-end-of-names-list) | `366` | open — **new in Phase 11c** |
 
-### 6.1 `MODE <nick>` is answered 403 ERR_NOSUCHCHANNEL
+### 6.1 `MODE <nick>` is answered 403 ERR_NOSUCHCHANNEL — fixed
 
 RFC 2812 3.3.2: a MODE whose parameter is a **nickname** answers `221 RPL_UMODEIS`
-for a query, or `501`/`502` for a change. This node canonicalises the first MODE
-parameter as a channel name and refuses a nickname as an unknown channel:
+for a query, or `501`/`502` for a change. This node used to canonicalise the first
+MODE parameter as a channel name and refuse a nickname as an unknown channel:
 
 ```
 :alice MODE alice
 :irc.test 403 alice ALICE :No such channel
 ```
 
-**Symptom.** A client that queries a user's modes — several do, and weechat does it
-on connect — is told "no such channel" about a user that is demonstrably connected.
-The answer is also self-contradicting: the *name* is echoed, upper-cased, which is
-something only `canonical_channel()` does to a channel.
-
-**Why not changed.** Fixing it means 221 or 501/502, and every one of them needs a
-mode string this node does not have (004 advertises user modes `i` and evaluates
-none of them). 221 with an empty string would be the RFC-shaped answer; 403 is the
-answer that is already there and it is not *wrong* so much as misfiled. It needs a
-decision about user modes before it needs a decision about numerics.
+**Fix.** `handle_mode()` routes a target that is a known nickname (and cannot be a
+channel, since `#`/`&` are illegal in nicknames) to a user-mode path. The node
+ evaluates one user mode, `+i`, kept on the connection: a query, or `MODE <self>
+ +i`/`-i`, answers 221 with the current set; any other flag is 501; any other
+modes are 502. An unknown name still falls through to the channel path's 403.
 
 ### 6.2 `PRIVMSG` arity is 461, not 411 and 412
 
@@ -761,13 +758,11 @@ operator"`. This node has no operator model, and refuses privilege with `482`
 not recognise the refusal. Only a client that sends `CHOPER`, which is not an RFC
 command, can reach it.
 
-### 6.8 `501` and `502` are unreachable
+### 6.8 `501` and `502` are unreachable — fixed
 
 They are RFC 2812's answers for a bad user-mode flag and for changing another user's
-modes. This node never evaluates a user mode and never gets past 403 on the way
-(§6.1), so neither can arise.
-
-**Symptom.** Same as §6.1 — one symptom, three numerics that would fix it.
+modes. They were unreachable while §6.1 answered 403 on the way; the user-mode path
+that closed §6.1 emits both, so neither is a deviation any more.
 
 ### 6.9 `VERSION` is not a command
 

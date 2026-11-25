@@ -1075,8 +1075,10 @@ static void test_part(nf_node_t *node)
 }
 
 /* JOIN with empty list elements: a trailing comma ("JOIN #je,") or a doubled
- * one ("JOIN #je2,,#je3") refuses the whole list with 461 (issue #493). */
-static void test_join_refuses_empty(nf_node_t *node)
+ * one ("JOIN #je2,,#je3") skips the empties and joins every valid channel
+ * (issue #661, reversing #493 per the spec's skip-and-join scenario). A list of
+ * nothing but commas still names nothing and answers 461. */
+static void test_join_skips_empty(nf_node_t *node)
 {
     client_t a;
     size_t ma;
@@ -1085,20 +1087,174 @@ static void test_join_refuses_empty(nf_node_t *node)
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je,");
     (void)send_and_drain(&a, "je-trailing");
-    expect_line(&a.c, "461 for the trailing comma",
-                ":irc.test 461 jea JOIN :Not enough parameters\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the trailing comma",
-                       " JOIN #");
+    expect_line(&a.c, "the trailing comma still joins #je",
+                ":jea!jea@127.0.0.1 JOIN #JE\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the trailing comma",
+                       " 461 ");
 
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je2,,#je3");
     (void)send_and_drain(&a, "je-double");
-    expect_line(&a.c, "461 for the doubled comma",
+    expect_line(&a.c, "the doubled comma still joins #je2",
+                ":jea!jea@127.0.0.1 JOIN #JE2\r\n");
+    expect_line(&a.c, "the doubled comma still joins #je3",
+                ":jea!jea@127.0.0.1 JOIN #JE3\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the doubled comma",
+                       " 461 ");
+
+    /* Nothing but commas names nothing: still 461. */
+    client_send(&a, "JOIN ,");
+    (void)send_and_drain(&a, "je-only-commas");
+    expect_line(&a.c, "461 for a list of only commas",
                 ":irc.test 461 jea JOIN :Not enough parameters\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the doubled comma",
+
+    tc_close(&a.c);
+}
+
+/* JOIN 0 parts every channel held (RFC 2812 3.2.1, issue #667). With nothing
+ * held it is a no-op, not an error; JOIN 0,#x is not a bare 0 and goes through
+ * the list below. */
+static void test_join_zero(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+
+    client_open(&a, node, "jza");
+    client_send(&a, "JOIN #jz0a");
+    (void)send_and_drain(&a, "jz-join-a");
+    client_send(&a, "JOIN #jz0b");
+    (void)send_and_drain(&a, "jz-join-b");
+
+    ma = tc_received(&a.c);
+    client_send(&a, "JOIN 0");
+    (void)send_and_drain(&a, "jz-zero");
+    expect_line(&a.c, "JOIN 0 parts #jz0a",
+                ":jza!jza@127.0.0.1 PART #JZ0A\r\n");
+    expect_line(&a.c, "JOIN 0 parts #jz0b",
+                ":jza!jza@127.0.0.1 PART #JZ0B\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "JOIN 0 answers no error",
+                       " 403 ");
+
+    /* Membership is really gone: re-joining recreates the channel with the
+     * joiner as creator and op. */
+    client_send(&a, "JOIN #jz0a");
+    (void)send_and_drain(&a, "jz-rejoin");
+    expect_line(&a.c, "re-join after JOIN 0 recreates as op",
+                ":irc.test 353 jza = #JZ0A @jza\r\n");
+
+    /* JOIN 0 with nothing held is a no-op. */
+    client_open(&b, node, "jzb");
+    ma = tc_received(&b.c);
+    client_send(&b, "JOIN 0");
+    (void)send_and_drain(&b, "jz-zero-empty");
+    expect_absent_from(tc_buffer(&b.c), ma, "no PART echo for an empty JOIN 0",
+                       "PART #");
+    expect_absent_from(tc_buffer(&b.c), ma, "no error for an empty JOIN 0",
+                       " 403 ");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
+
+/* An over-long channel name is 417, never 461: the input was too LONG and 461's
+ * "not enough parameters" would be the wrong complaint (issue #677). */
+static void test_join_long_name(nf_node_t *node)
+{
+    client_t a;
+    char name[72];
+    char line[80];
+    size_t ma;
+
+    client_open(&a, node, "jla");
+    name[0] = '#';
+    memset(name + 1, 'a', 70);
+    name[71] = '\0';
+    (void)snprintf(line, sizeof line, "JOIN %s", name);
+    ma = tc_received(&a.c);
+    client_send(&a, line);
+    (void)send_and_drain(&a, "jl-long");
+    expect_line(&a.c, "417 for an over-long channel name",
+                ":irc.test 417 jla :Channel name is too long\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "nothing joined for the long name",
                        " JOIN #");
 
     tc_close(&a.c);
+}
+
+/* MODE naming a nickname answers user modes: 221 for the caller, 502 for
+ * anyone else's, 501 for a flag this node does not evaluate (issue #668). */
+static void test_umode(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+
+    client_open(&a, node, "uma");
+    client_open(&b, node, "umb");
+
+    client_send(&a, "MODE uma");
+    (void)send_and_drain(&a, "um-query0");
+    expect_line(&a.c, "221 for own modes, none set",
+                ":irc.test 221 uma + :\r\n");
+
+    client_send(&a, "MODE uma +i");
+    (void)send_and_drain(&a, "um-set");
+    expect_line(&a.c, "221 updated after +i",
+                ":irc.test 221 uma +i :\r\n");
+
+    client_send(&a, "MODE uma -i");
+    (void)send_and_drain(&a, "um-clear");
+    expect_line(&a.c, "221 updated after -i",
+                ":irc.test 221 uma + :\r\n");
+
+    client_send(&a, "MODE uma +z");
+    (void)send_and_drain(&a, "um-unknown");
+    expect_line(&a.c, "501 for an unknown user-mode flag",
+                ":irc.test 501 uma :Unknown MODE flag\r\n");
+
+    client_send(&a, "MODE umb");
+    (void)send_and_drain(&a, "um-other");
+    expect_line(&a.c, "502 for another user's modes",
+                ":irc.test 502 uma :Cannot change mode for other users\r\n");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
+
+/* MODE with surplus parameters answers 461 and changes nothing (issue #662).
+ * Uniform with every sibling verb: the exact shape still applies. */
+static void test_mode_surplus(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+
+    client_open(&a, node, "msa");
+    client_open(&b, node, "msb");
+    client_send(&a, "JOIN #ms");
+    (void)send_and_drain(&a, "ms-join-a");
+    client_send(&b, "JOIN #ms");
+    (void)send_and_drain(&b, "ms-join-b");
+
+    /* Exact shape first, as the control: b becomes an op. */
+    client_send(&a, "MODE #ms +o msb");
+    (void)send_and_drain(&a, "ms-exact");
+    expect_line(&a.c, "exact MODE +o applies",
+                ":msa!msa@127.0.0.1 MODE #MS +o msb\r\n");
+
+    /* Drain b as well: the +o echo above is fanned out to b asynchronously and
+       must not fall inside the surplus window below. */
+    (void)send_and_drain(&b, "ms-drain-b");
+    ma = tc_received(&b.c);
+    client_send(&b, "MODE #ms +v msa extra-garbage");
+    (void)send_and_drain(&b, "ms-surplus");
+    expect_line(&b.c, "461 for surplus MODE parameters",
+                ":irc.test 461 msb MODE :Not enough parameters\r\n");
+    expect_absent_from(tc_buffer(&b.c), ma, "surplus MODE applies nothing",
+                       " MODE #");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
 }
 
 /* NAMES and LIST, on a channel and on one that does not exist, and the decision
@@ -2259,10 +2415,14 @@ int main(void)
     test_topic(&node);
     test_kick_authority(&node);
     test_part(&node);
-    test_join_refuses_empty(&node);
+    test_join_skips_empty(&node);
+    test_join_zero(&node);
+    test_join_long_name(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
+    test_mode_surplus(&node);
+    test_umode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);
 

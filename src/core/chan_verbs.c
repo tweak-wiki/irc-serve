@@ -76,11 +76,24 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
         size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
 
         if (len == 0) {
-            return -1; /* empty element names no channel: JOIN #a,,#b refused */
+            /* #661: empty elements are skipped, so JOIN #a,,#b joins #a and
+               #b. A list of nothing but commas yields no names and the caller
+               answers it as too few. */
+            if (comma == NULL) {
+                break;
+            }
+            p = comma + 1;
+            continue;
         }
-        if (n >= max || len >= stride) {
-            /* An over-long element or more names than `max` still refuses the
-            * whole list, because the caller cannot honour it in part. */
+        if (len >= stride) {
+            /* An over-long element refuses the whole list, distinctly from
+               every other refusal: the caller answers 417 rather than 461, so
+               a name that is too LONG is never reported as too FEW (#677). */
+            return -2;
+        }
+        if (n >= max) {
+            /* More names than max still refuses the whole list, because the
+               caller cannot honour it in part. */
             return -1;
         }
         memcpy(store + (size_t)n * stride, p, len);
@@ -783,6 +796,55 @@ static void refuse_join_too_many(server_t *s, conn_t *c, const char *name)
            shown, c->nick, c->nchans, CONN_MAX_CHANNELS);
 }
 
+/* One channel departure: the authority question, the forward arm, the local
+   write, the detach and the disposal. PART runs it once per resolved channel
+   and JOIN 0 runs it once per channel held (#667); the two calls cannot differ
+   in what "leave" means, so they share the function rather than the shape. */
+static void part_one_channel(server_t *s, conn_t *c, chan_t *ch,
+                             const char *reason, size_t kept_reason,
+                             size_t raw_reason_len)
+{
+    char prefix[CONN_HOSTMASK_MAX];
+    const char *params[1];
+    chan_verdict_t verdict;
+
+    verdict = authority_ok(s, c, ch, "PART", 1);
+    if (verdict == CHAN_VERDICT_REFUSED) {
+        return; /* 437 already sent */
+    }
+    if (verdict == CHAN_VERDICT_FORWARD) {
+        /* No local write, and the client is NOT told: it left a channel it
+           was on, locally, and that is a fact about this node's membership
+           that no origin can undo. What differs on a non-owned channel is the
+           forward: the departure has to reach the origin too, or its roster
+           keeps a member this node no longer has. */
+        if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
+            return;
+        }
+        params[0] = (reason != NULL) ? reason : c->nick;
+        deliver_state_change(s, c, ch, "PART", prefix, params,
+                             (reason != NULL) ? 1 : 0);
+    }
+    /* The echo reaches the parting client too because it is still a usable
+       connection and RFC 1459 2.3.1 has it see its own departure. */
+    chan_member_leave(s, ch, c, 1, reason);
+    (void)chan_detach_conn(c, ch);
+    if (kept_reason != raw_reason_len) {
+        /* Once per channel the client left, and only when something was
+           dropped. A client that names five channels in one PART gets five
+           lines, which is the right count: each is a separate channel's
+           departure and each was a separate relay. */
+        printf("[observable] chan_part_stripped: channel=%s nick=%s in_len=%zu "
+               "kept_len=%zu reason=CONTROL_BYTES\n",
+               ch->name, c->nick, raw_reason_len, kept_reason);
+    }
+    /* Disposal AFTER the departure. A channel with no local members AND no
+       remote members has nothing left to be authoritative about; one with
+       remote members survives, which is the servers[] cache earning its
+       place. */
+    (void)chan_dispose_if_empty(s, ch);
+}
+
 /* ---------------------------------------------------------------------------
  * JOIN
  * ---------------------------------------------------------------------------
@@ -817,14 +879,30 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
+    if (m->params[0][0] == '0' && m->params[0][1] == '\0') {
+        /* RFC 2812 3.2.1: a bare JOIN 0 parts every channel the client is on.
+           Only the exact single parameter counts: JOIN 0,#x still goes through
+           the list below, where 0 fails validation per element (#667). */
+        while (c->nchans > 0) {
+            part_one_channel(s, c, c->chans[c->nchans - 1], NULL, 0, 0);
+        }
+        return;
+    }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
+    if (n == -2) {
+        /* An over-long element: the input was too LONG, so 461's "not enough
+           parameters" would be the wrong complaint (#677). */
+        (void)reply_refused(s, c, "JOIN", NULL, "417", NULL, 0,
+                            "Channel name is too long");
+        return;
+    }
     if (n <= 0) {
         /* ALSO "TOO FEW", and deliberately NOT a different code: a bare `:` names
-         * no channel, so from the client's side it sent nothing usable and
-         * NEED_MORE_PARAMS is the true statement. Splitting it would invent a
-         * distinction between "no parameters" and "an empty one" that this node
-         * has no reason to make. */
+           no channel, so from the client's side it sent nothing usable and
+           NEED_MORE_PARAMS is the true statement. Splitting it would invent a
+           distinction between "no parameters" and "an empty one" that this node
+           has no reason to make. */
         (void)reply_refused(s, c, "JOIN", NULL, "461", NULL, 0,
                             "Not enough parameters");
         return;
@@ -1271,6 +1349,13 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
     }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
+    if (n == -2) {
+        /* An over-long element names no channel the splitter could hand back,
+           so like JOIN it is answered 417 rather than 461 (#677). */
+        (void)reply_refused(s, c, "PART", NULL, "417", NULL, 0,
+                            "Channel name is too long");
+        return;
+    }
     if (n <= 0) {
         (void)reply_refused(s, c, "PART", NULL, "461", NULL, 0,
                             "Not enough parameters");
@@ -1279,54 +1364,11 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
 
     for (int i = 0; i < n; i++) {
         chan_t *ch = resolve_joined(s, c, names[i]);
-        char prefix[CONN_HOSTMASK_MAX];
-        const char *params[1];
-        chan_verdict_t verdict;
 
         if (ch == NULL) {
             continue;
         }
-        verdict = authority_ok(s, c, ch, "PART", 1);
-        if (verdict == CHAN_VERDICT_REFUSED) {
-            continue; /* 437 already sent */
-        }
-        if (verdict == CHAN_VERDICT_FORWARD) {
-            /* No local write, and the client is NOT told: it left a channel it
-             * was on, locally, and that is a fact about this node's membership
-             * that no origin can undo. A PART is not a state change to the
-             * channel's state -- it is a withdrawal from it -- and 2.2's
-             * single-writer rule is about the channel's state, so the local half
-             * runs on both paths. What differs is the forward: on a non-owned
-             * channel the departure has to reach the origin too, or its roster
-             * keeps a member this node no longer has. */
-            if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
-                continue;
-            }
-            params[0] = (reason != NULL) ? reason : c->nick;
-            deliver_state_change(s, c, ch, "PART", prefix, params,
-                                 (reason != NULL) ? 1 : 0);
-        }
-        /* The echo reaches the parting client too because it is still a usable
-         * connection and RFC 1459 2.3.1 has it see its own departure -- which is
-         * the SAME emission the origin gets, so the local write is the forwarding
-         * row's write on an owned channel and this explicit one on a non-owned
-         * one, where 3.1 forbids a second pass through the table. */
-        chan_member_leave(s, ch, c, 1, reason);
-        (void)chan_detach_conn(c, ch);
-        if (kept_reason != raw_reason_len) {
-            /* Once per channel the client left, and only when something was
-             * dropped. A client that names five channels in one PART gets five
-             * lines, which is the right count: each is a separate channel's
-             * departure and each was a separate relay. */
-            printf("[observable] chan_part_stripped: channel=%s nick=%s in_len=%zu "
-                   "kept_len=%zu reason=CONTROL_BYTES\n",
-                   ch->name, c->nick, raw_reason_len, kept_reason);
-        }
-        /* Disposal AFTER the departure, and this is the only place a PART frees
-         * a channel. A channel with no local members AND no remote members has
-         * nothing left to be authoritative about; one with remote members
-         * survives, which is the servers[] cache earning its place. */
-        (void)chan_dispose_if_empty(s, ch);
+        part_one_channel(s, c, ch, reason, kept_reason, raw_reason_len);
     }
 }
 
@@ -2231,6 +2273,57 @@ static void send_ban_list(server_t *s, conn_t *dst, const chan_t *ch)
            dst->nick, ch->nbans);
 }
 
+/* MODE naming a nickname: RFC 2812 3.3.2's user modes (#668). The node evaluates
+   one user mode, +i (invisible), kept on the connection and reported by 221.
+   Anything else it does not evaluate is 501; anyone else's modes are 502, query
+   included, because there is nothing here another user may change or read. */
+static void handle_user_mode(server_t *s, conn_t *c, const message_t *m)
+{
+    conn_t *target;
+    char modes[3];
+
+    target = server_nick_lookup(s, m->params[0]);
+    if (target != c) {
+        /* Others' modes are neither shown nor changed. The lookup is folded, so
+           a different case of the caller's own nick still lands on c. */
+        (void)reply(s, c, "502", NULL, 0, "Cannot change mode for other users");
+        return;
+    }
+    if (m->nparams > 2) {
+        (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
+    if (m->nparams == 2) {
+        if (m->params[1][0] != '+' && m->params[1][0] != '-') {
+            (void)reply(s, c, "501", NULL, 0, "Unknown MODE flag");
+            return;
+        }
+        for (size_t k = 1; m->params[1][k] != '\0'; k++) {
+            if (m->params[1][k] != 'i') {
+                (void)reply(s, c, "501", NULL, 0, "Unknown MODE flag");
+                return;
+            }
+        }
+        if (m->params[1][1] == '\0') {
+            /* A lone sign names no flag: like the channel path's empty mode
+               string, this is a too-FEW case rather than an unknown one. */
+            (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                                "Not enough parameters");
+            return;
+        }
+        c->user_invisible = (m->params[1][0] == '+') ? 1 : 0;
+    }
+    /* 221 carries the current set, always signed: "+" with nothing set is the
+       honest rendering of no modes rather than an empty middle parameter. The
+       367 precedent is why the trailing text is empty: the RFC gives 221 no
+       trailing field, and an invented one would be a field clients read. */
+    modes[0] = '+';
+    modes[1] = (char)(c->user_invisible ? 'i' : '\0');
+    modes[2] = '\0';
+    (void)reply(s, c, "221", (const char *const[]){ modes }, 1, "%s", "");
+}
+
 void handle_mode(server_t *s, conn_t *c, const message_t *m)
 {
     chan_t *ch;
@@ -2242,6 +2335,16 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     if (m->nparams < 1) {
         (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
                             "Not enough parameters");
+        return;
+    }
+    /* #668: a MODE naming a nickname is a USER mode, answered 221/501/502 --
+       never 403. '#' and '&' cannot appear in a nickname, so a target starting
+       with either is a channel; anything else is looked up in the nick table,
+       and only a hit routes here. An unknown name falls through to the channel
+       path and its 403, exactly as before. */
+    if (m->params[0][0] != '#' && m->params[0][0] != '&' &&
+        server_nick_lookup(s, m->params[0]) != NULL) {
+        handle_user_mode(s, c, m);
         return;
     }
     ch = resolve_joined(s, c, m->params[0]);
@@ -2345,6 +2448,35 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
     }
     plus = (m->params[1][0] == '+');
 
+    /* #662: surplus parameters are refused with 461 BEFORE anything is applied,
+       so a typo applies nothing instead of a prefix. The count is derived from
+       the letters -- one per o/v/b -- because the shape varies; a letter this
+       node does not implement is left to the loop's 472 below. The bare single
+       +b/-b query consumes nothing, which is why it is exempted. */
+    {
+        size_t need = 0;
+        int unknown = 0;
+
+        if (!((m->params[1][1] == 'b' && m->params[1][2] == '\0') &&
+              m->nparams == 2)) {
+            for (size_t k = 1; m->params[1][k] != '\0'; k++) {
+                char lm = m->params[1][k];
+
+                if (lm == 'o' || lm == 'v' || lm == 'b') {
+                    need++;
+                } else {
+                    unknown = 1;
+                    break;
+                }
+            }
+        }
+        if (!unknown && (size_t)(m->nparams - 2) > need) {
+            (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
+                                "Not enough parameters");
+            return;
+        }
+    }
+
     /* A multi-letter mode string is legal ("+ovb"), so this is a loop and not a
      * single-letter parse, and each letter is applied in the order given. Each
      * letter that takes a parameter consumes the NEXT one: params[2] serves the
@@ -2431,6 +2563,14 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             in_len += strlen(arg);
             fwd[nfwd] = clean[idx];
             nfwd++;
+        }
+        /* #662: parameters beyond what the letters consume are refused with
+           461 and nothing is forwarded. nfwd - 1 is the consumed count: fwd[0]
+           is the mode string and each taken letter appended one argument. */
+        if ((size_t)(m->nparams - 2) > (size_t)(nfwd - 1)) {
+            (void)reply_refused(s, c, "MODE", "TOO_MANY_PARAMS", "461", NULL, 0,
+                                "Not enough parameters");
+            return;
         }
         deliver_state_change(s, c, ch, "MODE", prefix, fwd, nfwd);
         /* The actor's own echo (3.1): the forward reached no local member. */

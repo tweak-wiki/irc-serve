@@ -19,7 +19,7 @@
  *
  *   - There is no OPERATOR anywhere in the tree. conn_t (2.1) has no operator
  *     field, `struct member` (2.2) carries +o and +v and those are CHANNEL
- *     privileges, and 004's user-mode set is "i" with nothing evaluating it.
+ *     privileges, and 004's user-mode set is "i", evaluated only by MODE <self>.
  *   - There is no CREDENTIAL STORE. handle_pass() above is the honest version of
  *     this: PASS is recorded and never checked, and s->n_pass_seen is the whole
  *     of the record. A node with nothing to compare a password against cannot

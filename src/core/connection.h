@@ -920,6 +920,7 @@ typedef struct conn {
      * struct's Phase 2 layout is untouched and the new field is set in exactly
      * one place, `handle_user()`, on the same path that stores the ident. */
     int         user_seen;         /* a USER command arrived; ident may be empty */
+    int         user_invisible;  /* user mode +i, via MODE <self>; 221 reports */
     char        away[CONN_MAX_AWAY + 1];
     time_t      signon_at;         /* accept time; 317's <signon time> */
     uint64_t    last_active_ms;  /* last byte read, monotonic ms; 317's <idle> */
