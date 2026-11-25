@@ -530,6 +530,20 @@ typedef enum {
     FED_TLS_REQUIRED     /* plaintext claim for a TLS-required peer            */
 } fed_federate_result_t;
 
+/* The number of members of fed_federate_result_t, and so the width of the
+ * per-reason rejection counters. Moved here from link.c (issue #543 TU-36)
+ * so the accept half in federation/link_accept.c shares the one count: it is
+ * a number rather than a compile-time assertion on purpose (-Wpre-c11-compat
+ * objects to _Static_assert; see the warning block in the top-level
+ * CMakeLists.txt). Every write into the array is bounds-checked against this
+ * number, so a reason added to the enum without a counter here is a reason
+ * that is counted nowhere rather than a reason that writes past the array. */
+#define FED_RESULT_COUNT 12
+
+#if FED_RESULT_COUNT != IRC_FED_REJECT_REASONS
+#error "link.h's FED_RESULT_COUNT and server.h's IRC_FED_REJECT_REASONS disagree"
+#endif
+
 /* The stable spelling of a verdict, for the observable line and for tests.
  * Never NULL: an int that is not a member of the enum is reported as
  * "UNKNOWN" rather than as a NULL %s. */
@@ -762,6 +776,12 @@ void fed_link_set_state(server_link_t *link, handshake_state_t state);
  * federation/tick.c (issue #543). Extern for the same reason
  * fed_link_set_state() above is: one implementation, two files. */
 server_link_t *fed_link_of_conn(const server_t *s, const conn_t *c);
+
+/* The link constructor. Defined in link.c; extern so the accept half in
+ * federation/link_accept.c can create the link for a claim that arrived on
+ * the listener (issue #543 TU-36). */
+server_link_t *fed_link_new(server_t *s, const char *name, int initiator);
+
 int fed_queue_federate(server_t *s, server_link_t *link, conn_t *c);
 void fed_refuse(server_t *s, server_link_t *link, conn_t *c,
                 const char *claim, const char *why);
