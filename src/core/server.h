@@ -171,12 +171,14 @@ struct burst_shadow;
  * system -- Phase 6 owns that, and it will want a real version/identity
  * surface -- it is the single constant the Phase 3 numerics need.
  *
- * 0.2.0, not 0.1.x: the 4.3 extension (#563) changes SJOIN's frozen arity and
- * adds three verbs, so a 0.1.x node and a 0.2.0 node cannot share a link. The
- * bump is what keeps that refusal at the handshake (FED_BAD_VERSION, counted,
- * link never established) instead of letting it surface as malformed S-lines
- * on an established link. Additive-only changes (SNICK was one) do not bump. */
-#define IRC_SERVE_VERSION "irc-serve-0.2.0"
+ * 0.8.0: the federation-integration release. No wire change since 0.2.0's 4.3
+ * extension (SJOIN arity + SSETNAME/SAWAY/SINVITE are all in, additive since),
+ * so the handshake still refuses anything but this exact string — and every
+ * 0.2.0 node already does the same, which is why the number moves with the
+ * release rather than the wire: it names the oldest peer this binary was
+ * integration-tested against. Additive-only changes still do not bump alone;
+ * a release that SHIPS them does. */
+#define IRC_SERVE_VERSION "irc-serve-0.8.0"
 
 /* Issue #173: the federation secret bound. The DOCUMENTED bound lives in
  * federation/link.h (why 128, why refused-not-truncated); this is the same
