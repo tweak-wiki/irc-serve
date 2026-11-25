@@ -288,6 +288,11 @@ add_library(irc_core STATIC
   # split out of link.c (issue #543). Listed beside link.c; the verdict
   # stays declared in federation/link.h.
   federation/link_guard.c
+  # The accept half (fed_reject + fed_link_established + fed_refuse +
+  # fed_claim_accepted + fed_on_federate + fed_dispatch_hook), split out of
+  # link.c (issue #543). Listed beside link.c; the seam stays declared in
+  # federation/link.h.
+  federation/link_accept.c
   # The departure half: the SQUIT announcement, the link teardown, the clean-leave
   # latch, the shutdown drain and the operator's reset door, split out of link.c
   # (issue #543). Listed beside link.c; link.c reaches fed_link_down() through
