@@ -820,6 +820,36 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
     if (n <= 0) {
+        /* An over-long element fails the split exactly like an empty one, but
+         * 461 ("not enough") lies about a name that was too LONG (#677). The
+         * bound is CHAN_MAX_NAME, the same one chan_name_valid() enforces, so
+         * the scan below and the per-name check cannot disagree about which
+         * names fit. Anything else that failed the split -- empty elements,
+         * more names than the list holds -- keeps its 461 below. */
+        const char *p = m->params[0];
+        size_t over_len = 0;
+
+        for (;;) {
+            const char *comma = strchr(p, ',');
+            size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
+
+            if (len > (size_t)CHAN_MAX_NAME) {
+                over_len = len;
+                break;
+            }
+            if (comma == NULL) {
+                break;
+            }
+            p = comma + 1;
+        }
+        if (over_len > 0) {
+            (void)reply_refused(s, c, "JOIN", NULL, "417", NULL, 0,
+                                "Channel name is too long");
+            printf("[observable] chan_join_refused: nick=%s reason=name_too_long "
+                   "len=%zu max=%d\n",
+                   c->nick, over_len, CHAN_MAX_NAME);
+            return;
+        }
         /* ALSO "TOO FEW", and deliberately NOT a different code: a bare `:` names
          * no channel, so from the client's side it sent nothing usable and
          * NEED_MORE_PARAMS is the true statement. Splitting it would invent a

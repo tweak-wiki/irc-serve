@@ -1101,6 +1101,43 @@ static void test_join_refuses_empty(nf_node_t *node)
     tc_close(&a.c);
 }
 
+/* JOIN with an over-long channel name: 417, never 461 (issue #677). The input
+ * was too LONG, so "not enough parameters" is the wrong complaint; 417 is
+ * the numeric this node already answers for every other over-long stored
+ * parameter (PART reason above, KICK reason, topic, away). Nothing is joined:
+ * a valid JOIN afterwards reaches the channel. */
+static void test_join_refuses_long_name(nf_node_t *node)
+{
+    client_t a;
+    /* 70 x's after the sigil: over CHAN_MAX_NAME (63), inside the wire line. */
+    char name[72];
+    char line[80];
+    size_t k;
+    size_t ma;
+
+    client_open(&a, node, "jla");
+    name[0] = '#';
+    for (k = 1; k + 1u < sizeof name; k++) {
+        name[k] = 'x';
+    }
+    name[k] = '\0';
+    (void)snprintf(line, sizeof line, "JOIN %s", name);
+    ma = tc_received(&a.c);
+    client_send(&a, line);
+    (void)send_and_drain(&a, "jl-long");
+    expect_line(&a.c, "417 for the over-long channel name",
+                ":irc.test 417 jla :Channel name is too long\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the long name",
+                       " JOIN #");
+    /* Still outside: a valid JOIN afterwards works. */
+    client_send(&a, "JOIN #jl-ok");
+    (void)send_and_drain(&a, "jl-ok");
+    expect_line(&a.c, "the valid JOIN after a refusal",
+                ":jla!jla@127.0.0.1 JOIN #JL-OK\r\n");
+
+    tc_close(&a.c);
+}
+
 /* NAMES and LIST, on a channel and on one that does not exist, and the decision
  * that LIST enumerates channels the requester has not joined. */
 static void test_names_and_list(nf_node_t *node)
@@ -2343,6 +2380,7 @@ int main(void)
     test_kick_authority(&node);
     test_part(&node);
     test_join_refuses_empty(&node);
+    test_join_refuses_long_name(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
