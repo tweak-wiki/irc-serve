@@ -15,6 +15,7 @@
 #include "core/server.h"
 #include "federation/link.h"
 #include "federation/nickreg.h"
+#include "federation/state.h"
 
 /* Parse the SJOIN flags token back into a flag word. The token is 4.3's frozen
  * single token (see fed_flag_token()), so this is a two-letter scan and not a
@@ -183,6 +184,9 @@ void fed_in_sjoin(server_t *s, server_link_t *link, chan_t *ch,
      * the convergence fed_nickreg_local_loses() exists to make possible. */
     (void)fed_nickreg_resolve_local(s, params[1], server_now_ms());
     fed_touch_server(ch, link->name, 1);
+    /* Issue #663: the member is back, so a quit announced earlier must not
+    * swallow the next one -- the dedup mark dies on rejoin. */
+    fed_quit_unmark(s, link->name, params[1]);
     fed_obs("[observable] fed_sjoin: channel=%s member=%s server=%s flags=%u "
            "local=%zu remote=%zu origin=%s owned=%d member_len=%zu member_bad_bytes=%zu\n",
            ch->name, params[1], link->name, flags, ch->nmembers, ch->nremotes,

@@ -305,13 +305,20 @@ int fed_sverb_params(const char *client_verb, const char *target,
     if (strcmp(client_verb, "PART") == 0) {
         /* <member> <channel> [<reason>]: the member comes FIRST, so the channel
          * is not in a fixed position and a reader cannot assume it. */
-        if (nparams > 1 || (nparams == 1 && params[0] == NULL) || cap < 3) {
+        if (nparams > 1 || (nparams == 1 && params[0] == NULL) || cap < 4) {
             return -1;
         }
         out[0] = member;
         out[1] = target;
         n = 2;
         if (nparams == 1) {
+            /* Issue #663: a bare reason of `quit` would parse as the quit
+            * marker below, so it takes the explicit four-parameter PART
+            * form. Every other reason keeps the frozen three-parameter
+            * shape an old peer still reads. */
+            if (strcmp(params[0], "quit") == 0) {
+                out[n++] = "part";
+            }
             out[n++] = params[0];
         }
         return n;

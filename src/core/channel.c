@@ -1295,20 +1295,28 @@ void chan_conn_gone(server_t *s, conn_t *c)
          * with remote presence covers every closer. Forward-only: the local
          * members get their PART from chan_member_leave() below (or the QUIT
          * from handle_quit() on the quit_announced path), and a second write
-         * through fanout_deliver() would send it twice. No reason: a QUIT
-         * reason is not stored (there is no quit cache until Phase 9) and a
-         * hangup has none. Before the leave/drop below, because the dispose
-         * after them may free ch. Runs on the quit_announced path too: that
-         * skip is local-only, and the peer still needs the SPART. */
+         * through fanout_deliver() would send it twice. Before the leave/drop
+         * below, because the dispose after them may free ch. Runs on the
+         * quit_announced path too: that skip is local-only, and the peer
+         * still needs the SPART. */
+        /* Issue #663: every departure here is a QUIT of the whole connection,
+         * never a leave of one channel, so the SPART carries the quit marker:
+         * `SPART <nick> <chan> quit [<reason>]`. The far node renders one
+         * QUIT (union semantics, like the local path) instead of one PART per
+         * channel. The reason is handle_quit()'s stash -- empty on a hangup,
+         * which renders a bare QUIT. An explicit PART never passes through
+         * here, so the two stay distinguishable. */
         if (ch->nremotes > 0 || ch->nservers > 0) {
             char prefix[CONN_HOSTMASK_MAX];
-            const char *sp[2];
+            const char *sp[4];
 
             sp[0] = c->nick;
             sp[1] = ch->name;
+            sp[2] = "quit";
+            sp[3] = c->quit_reason;
             if (conn_hostmask(c, prefix, sizeof prefix) != 0) {
                 (void)fanout_forward_channel_sverb(s, ch, FANOUT_STATE_CHANGE,
-                                                   "SPART", prefix, sp, 2, NULL);
+                                                   "SPART", prefix, sp, 4, NULL);
             }
         }
         /* Issue #609: a graceful QUIT already reached the union of this

@@ -93,9 +93,10 @@ static void fed_in_message(server_t *s, fanout_target_t *t, const char *prefix,
  * run time.
  *
  * `min`/`max` are the parameter bounds, and they are the FROZEN shapes' bounds
- * rather than a range: an SJOIN is always six parameters, an SPART is two or
- * three, and a verb arriving with a different count is a peer running a
- * different format and is REFUSED rather than guessed at. Refusing is the safe
+ * rather than a range: an SJOIN is always six parameters, an SPART is two to
+ * four (issue #663's quit marker and reason extend the frozen two-or-three),
+ * and a verb arriving with a different count is a peer running a different
+ * format and is REFUSED rather than guessed at. Refusing is the safe
  * direction because the alternative -- reading params[1] of a two-parameter
  * SPRIVMSG -- is a read of a field that does not exist.
  */
@@ -111,7 +112,7 @@ static const struct {
     { "SPRIVMSG", 2, 2, NULL, FANOUT_MESSAGE,  "PRIVMSG" },
     { "SNOTICE",  2, 2, NULL, FANOUT_MESSAGE,  "NOTICE"  },
     { "SJOIN",    6, 6, NULL, FANOUT_STATE_CHANGE, "JOIN"  },
-    { "SPART",    2, 3, NULL, FANOUT_STATE_CHANGE, "PART"  },
+    { "SPART",    2, 4, NULL, FANOUT_STATE_CHANGE, "PART"  },
     { "STOPIC",   3, 3, NULL, FANOUT_STATE_CHANGE, "TOPIC" },
     { "SMODES",   3, 4, NULL, FANOUT_STATE_CHANGE, "MODE"  },
     { "SKICK",    3, 4, NULL, FANOUT_STATE_CHANGE, "KICK"  }

@@ -41,6 +41,11 @@ void fed_in_skick(server_t *s, server_link_t *link, chan_t *ch,
                   const char *prefix, const irc_serve_tags_t *tags,
                   const char *const *params, int nparams);
 
+/* Issue #663: forget a quit announcement for (server, nick) -- called when the
+ * member rejoins (live SJOIN and burst install), so a later quit announces
+ * again instead of being swallowed by the dedup set. */
+void fed_quit_unmark(server_t *s, const char *server, const char *nick);
+
 /* SQUIT: <server> [<reason>]. */
 void fed_in_squit(server_t *s, server_link_t *link,
                   const irc_serve_tags_t *tags, const char *const *params,
