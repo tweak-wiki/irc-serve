@@ -159,6 +159,9 @@ static void fed_dial_expired(server_t *s, size_t i, uint64_t now_ms)
     s->dials[i].fd = -1;
     s->dials[i].state = DIAL_FAILED;
     s->n_dial_failed++;
+    /* Consumed here rather than by T1b below: the expiry already armed, so a
+     * name left on the slot would arm a second time for the same failure. */
+    s->dials[i].peer_name[0] = '\0';
     /* A CONNECT THAT NEVER COMPLETED IS THE FAILURE A RETRY BUDGET IS MOST
      * OBVIOUSLY FOR, and T1 is the only arm that reaches it: a black-holed host
      * produces no FIN, no ESTABLISHED, and therefore no T4, so a peer that is
@@ -404,6 +407,30 @@ void fed_tick(server_t *s, uint64_t now_ms)
         if (s->dials[i].state == DIAL_CONNECTING &&
             (uint64_t)(now_ms - s->dials[i].started_ms) >= s->fed_dial_ms) {
             fed_dial_expired(s, i, now_ms);
+            continue;
+        }
+        /* --- T1b: dials the kernel already refused (#666) --------------- */
+        /* server_dial_progress() retires a refused connect() as DIAL_FAILED,
+         * and nothing armed the retry for it: the sync failure arms
+         * DIAL_REFUSED in T7's else, the expiry arms DIAL_TIMEOUT in T1, the
+         * handshake arms in T2 and the silence arms in T4 -- but a RST that
+         * arrives between two ticks armed nothing, so a refused peer was
+         * re-dialled on every tick for ever. The clean-leave suppression used
+         * to hide this for SHUTDOWN peers; genuinely-gone peers looped
+         * regardless. One arm per failed dial, consumed by clearing the
+         * slot's name: without the consume, a later INIT return would re-arm
+         * for a failure that already cost budget, and without the INIT guard
+         * a dial that lost a race with an inbound accept would spend budget
+         * on a link the establishment already refilled. */
+        if (s->dials[i].state == DIAL_FAILED &&
+            s->dials[i].peer_name[0] != '\0') {
+            server_link_t *flink =
+                server_find_link(s, s->dials[i].peer_name);
+
+            if (flink != NULL && flink->state == (int)INIT) {
+                fed_retry_arm(s, flink, now_ms, "DIAL_REFUSED");
+            }
+            s->dials[i].peer_name[0] = '\0';
         }
     }
 
@@ -434,7 +461,7 @@ void fed_tick(server_t *s, uint64_t now_ms)
         switch (link->state) {
         case (int)INIT:
             /* --- T7: dial it, if the schedule says so ------------------- */
-            /* FIVE CONDITIONS, AND EVERY ONE OF THEM IS LOAD-BEARING. The
+            /* FOUR CONDITIONS, AND EVERY ONE OF THEM IS LOAD-BEARING. The
              * count is the price of replacing a single latch with a policy.
              *
              *   initiator        an ACCEPTED link has no address, and
@@ -460,21 +487,18 @@ void fed_tick(server_t *s, uint64_t now_ms)
              *                   The backoff does not fix this -- the schedule
              *                   says the link is due and it stays due until the
              *                   attempt resolves.
-             *   clean_leave == 0  PHASE 9 ITEM 4, and it is checked HERE and not
-             *                   inside fed_retry_arm() for a reason that is about
-             *                   direction rather than placement: this arm is the
-             *                   only place a link becomes DIALABLE, so a flag set
-             *                   anywhere in the module has to be cleared here for
-             *                   the suppression to be complete. A peer that sent
-             *                   SHUTDOWN said goodbye, and dialling it would spend
-             *                   a budget of three attempts and a two-minute
-             *                   ceiling rediscovering a message that already
-             *                   arrived -- and would leave a link that looks
-             *                   retryable in the dump, so an operator reading it
-             *                   would go looking for a flaky peer where there is a
-             *                   departed one. An operator who resets the link gets
-             *                   the dial back, because fed_link_reset() clears the
-             *                   flag and nothing else does.
+             *   clean_leave == 0  REMOVED by #666: a peer that sent SHUTDOWN and
+             *                   then RESTARTED is the most routine federation event,
+             *                   and suppressing the redial until an operator reset
+             *                   a link -- with no operator reset path in the
+             *                   shipped binary -- partitioned the mesh until this
+             *                   node itself restarted. The budget below is what
+             *                   bounds the redial instead: a peer that never comes
+             *                   back costs three attempts and an exhausted report,
+             *                   and a peer that restarted answers inside one
+             *                   backoff window. Dialling a departed peer spends a
+             *                   bounded budget rediscovering a goodbye; never
+             *                   dialling it spends the whole link.
              *
              * created_ms is stamped here and is NOT read as a latch any more
              * (the header retracts that claim); what it is for now is T2's
@@ -482,7 +506,6 @@ void fed_tick(server_t *s, uint64_t now_ms)
              * "when did this attempt begin" is one of the two numbers an
              * operator needs to tell a slow handshake from a dead link. */
             if (link->initiator != 0 && link->addrlen != 0 && link->gave_up == 0 &&
-                link->clean_leave == 0 &&
                 (link->retry_at_ms == 0u || now_ms >= link->retry_at_ms) &&
                 fed_dial_for(s, link->name) == NULL) {
                 /* Gate, don't encrypt (#167): a link with require_tls is never

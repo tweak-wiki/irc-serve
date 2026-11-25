@@ -29,17 +29,18 @@ static void fed_emit_departure_quits(server_t *s, const char *gone,
  * "I am leaving DELIBERATELY", and the whole of the handler is about what that
  * sentence is NOT allowed to mean. The three things it must not do:
  *
- *   1. IT MUST NOT ARM THE RETRY POLICY. A peer that went away is a peer whose
- *      socket closed, and item 1's T4 turns that into a backoff and a budget and
- *      a redial. A node that shut down on purpose is not going to answer those
- *      dials, and the policy would spend a budget of three attempts and a
- *      two-minute ceiling discovering that -- and, worse, would leave a link that
- *      looks retryable in a dump, so an operator reading it would be looking for a
- *      flaky peer where there is a departed one. So fed_mark_clean_leave() is
- *      called FIRST and the T7 dial arm refuses a link with it set. The
- *      distinction is in a FIELD rather than in a new handshake state, because
- *      the handshake FSM is 2.1's frozen four states and adding a fifth to it
- *      would be a change to a spec this phase does not own.
+ *   1. IT MUST NOT LEAVE A LINK THAT LOOKS RETRYABLE FOR EVER. A peer that went
+ *      away is a peer whose socket closed, and item 1's T4 turns that into a
+ *      backoff and a budget and a redial -- BOUNDED (#666): a peer that restarted
+ *      answers inside one backoff window, and a peer that never comes back costs
+ *      three attempts and an exhausted report. Suppressing the redial until an
+ *      operator reset the link partitioned the mesh on every peer restart, and
+ *      there is no operator reset path in the shipped binary. So
+ *      fed_mark_clean_leave() records the graceful departure for the log and the
+ *      dump, and the retry budget is what bounds the redial.
+ *      The distinction is in a FIELD rather than in a new handshake state,
+ *      because the handshake FSM is 2.1's frozen four states and adding a
+ *      fifth to it would be a change to a spec this phase does not own.
  *
  *   2. IT MUST NOT LEAVE THE MESH HOLDING STATE FOR A SERVER THAT IS GONE. The
  *      same purge a SQUIT performs, keyed on this peer, and for the same reason:
@@ -57,8 +58,8 @@ static void fed_emit_departure_quits(server_t *s, const char *gone,
  *      for it. Silence there is the symptom #559 was filed for. What the
  *      surviving node does instead is three things an operator
  *      can act on: it prints the line with the peer and the reason, it tells
- *      its OTHER peers (below), and it leaves the dump saying why the link is
- *      not being dialled.
+ *      its OTHER peers (below), and it leaves the dump saying the departure
+ *      was graceful and what the bounded redial decided.
  *
  * AND IT IS TOLD ONWARD, which is the half that makes it a mesh feature rather
  * than a local one. The forwarding is a `SQUIT <peer>` -- not a `SHUTDOWN`, and

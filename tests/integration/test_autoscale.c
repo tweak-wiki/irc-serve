@@ -69,11 +69,13 @@
  *      node's own `link_clean_leave:` and
  *      `fed_shutdown: ... clean_leave=1 retried=0`, and the relay a node TWO HOPS away
  *      sees.
- *   2. A CLEAN LEAVE ARMS NO RETRY, AND THIS IS THE HALF WITH TEETH (case 1).
- *      Asserted on COUNTS OF SOCKETS AND SCHEDULES, never on the log's own claim:
- *      exactly one `link_dial:` to the departed peer for the life of the node, and
- *      exactly one `link_retry:` -- the second is the more interesting half, because
- *      "one arm" is what makes the zero redials a DECISION rather than an inert link.
+ *   2. A CLEAN LEAVE IS RE-DIALLED, THEN GIVEN UP ON (#666), AND THIS IS THE
+ *      HALF WITH TEETH (case 1). Asserted on COUNTS OF SOCKETS AND SCHEDULES,
+ *      never on the log's own claim: four `link_dial:` to the departed peer
+ *      for the life of the node (one to open it, three bounded redials), three
+ *      `link_retry:`, and then link_retry_exhausted: -- the last two are the
+ *      more interesting half, because arms plus exhaustion is what makes the
+ *      four dials a POLICY rather than a loop.
  *   3. THE LOAD FIGURE PROPAGATES, AND CROSSING A THRESHOLD IS REPORTED WITHOUT
  *      ANYTHING BEING MOVED (cases 1, 2 and 3's node).
  *      `fed_advertise: peer=... load=N%` on the receiver is the inbound half and
@@ -93,13 +95,11 @@
  *      the framing fix from the loop left every assertion in this file passing.
  *
  * ---------------------------------------------------------------------------
- * NO FIXED sleep() ANYWHERE (6.3)
- * ---------------------------------------------------------------------------
  * Every wait is a deadline: nf_expect()/nf_expect_u64_ge() over a child's output,
  * or poll() with a deadline over this test's own socket. That is not only the style
- * rule here -- claim 2 is an ABSENCE, and an absence needs a window measured on the
- * node's own clock rather than on how fast this test can issue commands. The
- * arithmetic for both windows is stated where the numbers are set.
+ * rule here -- claim 2 ends in an exhaustion, and the exhaustion needs a deadline
+ * wait on the node's own clock rather than on how fast this test can issue
+ * commands. The arithmetic for both windows is stated where the numbers are set.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS SHORTENED, AND WHY THE SHORTENED TEST IS STILL A REAL TEST
@@ -111,10 +111,9 @@
  *   RETRY_BASE_MS / RETRY_MAX_MS  the shipped ladder starts at IRC_FED_DEAD_MS
  *       (90 s), so a case that waited out even the first rung would take minutes.
  *       What the test preserves is the ladder's SHAPE -- base x 2 per attempt,
- *       capped, bounded by a budget of 3 -- and the single T7 condition that refuses
- *       a diallable link. That condition is the claim; the scale is not. Stated as a
- *       cost, because a test that sets a 60 ms base proves the policy's shape and
- *       says nothing about how 90 s behaves in a field.
+ *       capped, bounded by a budget of 3 that reports. The scale is not the
+ *       claim. Stated as a cost, because a test that sets a 60 ms base proves
+ *       the policy's shape and says nothing about how 90 s behaves in a field.
  *   DEAD_MS  WAS in that list and IS NOT ANY MORE, and it was there on a false
  *       premise: this file claimed the ladder is armed by T4 firing inside the dead
  *       threshold, and scaling the threshold is what made that happen. It is not what
@@ -141,8 +140,8 @@
  *
  * NOT SHORTENED, and these are the claims: the ORDER of the guard chain, the shape
  * of the ADVERTISE verb, the latch semantics of the shed report (once per crossing,
- * not once per tick), the single T7 condition, and the requirement that the leave
- * reaches the wire BEFORE the socket closes.
+ * not once per tick), the bounded redial (three redials, then exhaustion), and the
+ * requirement that the leave reaches the wire BEFORE the socket closes.
  */
 #include <errno.h>
 #include <netinet/in.h>
@@ -222,18 +221,21 @@
  * a 240 ms ceiling keeps the ladder's SHAPE (base x 2^attempt, capped, budget 3) and
  * changes only its scale.
  *
- * AN UNSUPPRESSED CLEAN LEAVE WOULD BE RE-DIALLED AT
+ * A CLEAN LEAVE IS RE-DIALLED AT (#666), and the budget is what stops it:
  *
  *      60 ms     first rung, from the arm the clean-leave path makes
  *      180 ms    second
  *      420 ms    third, at the ceiling
+ *      660 ms    fourth -- and the budget is 3, so this one does not happen;
+ *                 the node prints link_retry_exhausted: instead and dials no more
  *
  * and the observation window is " WINDOW_LINES " inbound lines at KEEPALIVE_MS, which is
- * " WINDOW_MS ". That is past every rung above by a wide margin, so an unsuppressed leave
- * would have dialled three times inside a window in which the assertion requires none.
+ * " WINDOW_MS ". That is past every rung above by a wide margin, so the leave
+ * dials three times and exhausts inside a window the old assertion required
+ * to show none.
  *
  * The dead threshold is NOT in that arithmetic, and the two comments above used to say
- * it was. It was not: the arm that makes `arms == 1` below is made by the CLEAN-LEAVE
+ * it was. It was not: the arm that makes `arms == 3` below is made by the CLEAN-LEAVE
  * PATH, which declares the departed link dead at `silent_ms=0` -- the socket is already
  * closed when the SHUTDOWN is processed, so there is no silence to wait out. Measured,
  * on a node whose dead threshold was raised from 150 ms to 5000 ms:
@@ -241,9 +243,8 @@
  *      [observable] link_dead: peer=irc.stay silent_ms=0
  *      [observable] link_retry: peer=irc.stay attempt=1/3 delay_ms=60 after=DEAD
  *
- * ...and the case still passed, `arms == 1` still held. So the ladder was already armed
- * at zero silence and DEAD_MS was governing something else entirely. See the constant
- * below.
+ * ...and the arm still happened at zero silence, so DEAD_MS was governing something
+ * else entirely -- the window's own clock. See the constant below.
  *
  * The boundary is INBOUND LINES ON THE NODE UNDER TEST -- the fourth node's keepalive
  * PINGs, which arrive as inbound lines and move `lines=` on a real timer. Two things
@@ -727,12 +728,12 @@ static void peer_answer_claim(peer_t *p)
  *           THE DIRECTION IS THE WHOLE OF CLAIM 2 AND IT IS THE OPPOSITE OF WHAT IT
  *           LOOKS LIKE: T7's dial arm is guarded by `initiator != 0 && addrlen != 0`
  *           because an ACCEPTED link has no address and could never be dialled, so a
- *           clean-leave SUPPRESSION is untestable from the accepting side -- a node
- *           that let the ladder reach T7 there would look identical to one that
- *           suppressed it, and the test would pass against a node with no suppression
- *           at all. So the node that must NOT redial is the one that DID dial.
+ *           redial policy is untestable from the accepting side -- a node that let
+ *           the ladder reach T7 there would look identical to one that never
+ *           re-dialled at all, and the test would pass against a node that had no
+ *           redial. So the node that MUST redial is the one that DID dial.
  *
- *           It is also the CLOCK the absence window is measured on -- its 60 ms
+ *           It is also the CLOCK the observation window is measured on -- its 60 ms
  *           keepalive produces the inbound lines that open the window.
  *
  *   " NAME_FOURTH "  the node the departure is relayed ONWARD to, two hops from the
@@ -838,13 +839,14 @@ static void peer_answer_claim(peer_t *p)
      *   still happened, still printed `link_retry: … after=DEAD`, and the case still
      *   passed.
      *
-     * So the claim this case makes -- a clean leave arms no retry -- is NOT vacuous
-     * without a short dead threshold, which is what the old comment here asserted,
-     * and the ladder being armed is established by the `arms == 1` assertion below
-     * rather than by a timer being short. T7's `clean_leave == 0` is still the single
-     * thing standing between an armed schedule and a socket, and the assertion is
-     * still a PAIR for the same reason: one `link_retry:` (the schedule was armed)
-     * and one `link_dial:` (no socket came of it).
+     * So the claim this case makes -- a clean leave is re-dialled, then given up
+     * on -- is NOT vacuous without a short dead threshold, which is what the old
+     * comment here asserted, and the ladder being armed is established by the
+     * `arms == 3` assertion below rather than by a timer being short. The budget
+     * is what stands between an armed schedule and an endless one, and the
+     * assertion is still a PAIR for the same reason: three `link_retry:` (the
+     * schedule was armed, then re-armed per failed redial) and four `link_dial:`
+     * (three sockets came of it, then the budget said stop).
      *
      * What the scaling of the base preserves is the ladder's SHAPE -- base x 2 per
      * attempt, capped, bounded by a budget of three -- and what it costs is stated in
@@ -1074,7 +1076,7 @@ static void peer_answer_claim(peer_t *p)
                  "that is gone: %s",
                  fourth.out);
 
-    /* --- CLAIM 2: NO RETRY, AND NO DIALS ----------------------------------- */
+    /* --- CLAIM 2: A BOUNDED REDIAL, THEN EXHAUSTION ---------------------------- */
     /* The decision first, because the implementation prints it first: a log reader
      * has to see the decision before the consequences of it. This is the WEAKER of
      * the two claims -- a node can print a flag it did not honour -- and the counts
@@ -1219,43 +1221,46 @@ static void peer_answer_claim(peer_t *p)
                  "DEAD_MS for the whole mechanism: %s",
                  third.out);
 
-    /* THE ASSERTION WITH TEETH. Exactly one dial to " NAME_STAY " in the surviving
-     * node's whole life. A retrying goodbye prints a second link_dial: line inside
-     * this window and fails this, which is the failure the case exists to catch: a
-     * planned restart spent as three dials, three rungs of backoff, and a link in a
-     * dump that looks retryable.
+    /* THE ASSERTION WITH TEETH. The goodbye IS re-dialled, and the budget is
+     * what stops it (#666): one dial opened this link, three more are the
+     * budget's three attempts, and the fourth arm spends the budget instead of
+     * dialling. A node that never re-dialled would still show one dial here --
+     * the partition #666 reported -- and a node with no budget would dial past
+     * this window for ever.
      *
      * This is a COUNT OF SOCKETS THE NODE ACTUALLY OPENED, which is the whole reason
      * it is here rather than the `retried=0` field above. A node can print
-     * `retried=0` and then dial; a node cannot print a second `link_dial:` without
-     * having dialled. */
+     * `retried=0` and then dial; a node cannot print a fourth `link_dial:` without
+     * having dialled, and cannot print link_retry_exhausted: without having
+     * stopped. The exhausted wait is deadline-based, so a slow loop still
+     * converges; the counts after it are exact. */
+    TF_CHECK_MSG(nf_expect(&third, "link_retry_exhausted: peer=" NAME_STAY,
+                           T_IO_MS) == 0,
+                 NAME_THIRD " never reported exhausting its retry budget for "
+                 "departed peer " NAME_STAY ", so either it is still retrying for "
+                 "ever or it stopped without saying so. The budget is the whole "
+                 "of what makes a failed link a bounded cost rather than a "
+                 "leak: %s",
+                 third.out);
     dials = tf_count(third.out, "link_dial: peer=" NAME_STAY);
-    TF_CHECK_MSG(dials == 1u,
-                 NAME_THIRD " dialled peer " NAME_STAY " %llu times. It dialled it "
-                 "once to open this link, and a peer that said SHUTDOWN must never be "
-                 "dialled again without an operator resetting it: %s",
+    TF_CHECK_MSG(dials == 4u,
+                 NAME_THIRD " dialled peer " NAME_STAY " %llu times. One dial opened "
+                 "this link and the budget allows three redials, so four is the "
+                 "number a bounded redial produces: %s",
                  (unsigned long long)dials, third.out);
 
-    /* AND THE LADDER WAS STILL ARMED, exactly once. This is what makes the count
-     * above an assertion about the clean-leave guard rather than about a link that
-     * had nothing to retry: T4 armed the schedule on the closure, the schedule was
-     * live and expiring, and T7's `clean_leave == 0` is the only thing standing
-     * between it and a socket. A node that never armed the ladder at all would pass
-     * the line above for the wrong reason, which is why this one is here and not
-     * optional. */
+    /* AND THE LADDER WAS ARMED exactly three times. This is what makes the count
+     * above an assertion about the retry policy rather than about a link that
+     * had nothing to retry: the clean-leave path armed the schedule on the
+     * closure and each failed redial re-armed it, up to the budget. A node that
+     * never armed the ladder at all would still show the first dial above for
+     * the wrong reason, which is why this one is here and not optional. */
     arms = tf_count(third.out, "link_retry: peer=" NAME_STAY);
-    TF_CHECK_MSG(arms == 1u,
+    TF_CHECK_MSG(arms == 3u,
                  NAME_THIRD " armed the retry ladder %llu times for a link that had "
-                 "cleanly departed, expected the single arm T4 makes when the socket "
-                 "closed: %s",
+                 "cleanly departed, expected three arms: the closure's and one per "
+                 "failed redial: %s",
                  (unsigned long long)arms, third.out);
-    /* AND THE BUDGET WAS NOT SPENT, which is the cost clean_leave exists to avoid:
-     * three dials and a two-minute ceiling rediscovering a message that already
-     * arrived. */
-    TF_CHECK_MSG(strstr(third.out, "link_retry_exhausted: peer=" NAME_STAY) == NULL,
-                 NAME_THIRD " spent a whole retry budget on a peer that said it was "
-                 "leaving, which is exactly the failure the suppression is for: %s",
-                 third.out);
 
     /* EXACTLY ONE SHED REPORT ABOUT THE DEPARTED PEER, AND THE COUNT IS THE CLAIM.
      *
