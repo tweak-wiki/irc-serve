@@ -11,7 +11,7 @@ client tests, it is the peer path being a different path.
 """
 from util import apply_fault
 
-p = "src/federation/verbs.c"
+p = "src/federation/state.c"
 old = """            verdict = chan_mode_implemented(m);
             if (verdict == 0) {"""
 new = """            verdict = 1;
