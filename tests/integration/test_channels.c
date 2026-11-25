@@ -1074,8 +1074,9 @@ static void test_part(nf_node_t *node)
     tc_close(&b.c);
 }
 
-/* JOIN with empty list elements: a trailing comma ("JOIN #je,") or a doubled
- * one ("JOIN #je2,,#je3") refuses the whole list with 461 (issue #493). */
+/* JOIN with empty list elements: empties are skipped and every valid channel
+ * is joined (spec channels, Verb arity; issue #661). A wholly-empty list
+ * still refuses with 461. */
 static void test_join_refuses_empty(nf_node_t *node)
 {
     client_t a;
@@ -1085,17 +1086,27 @@ static void test_join_refuses_empty(nf_node_t *node)
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je,");
     (void)send_and_drain(&a, "je-trailing");
-    expect_line(&a.c, "461 for the trailing comma",
-                ":irc.test 461 jea JOIN :Not enough parameters\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the trailing comma",
-                       " JOIN #");
+    expect_line(&a.c, "trailing comma still joins #je",
+                ":jea!jea@127.0.0.1 JOIN #JE\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the trailing comma",
+                       " 461 ");
 
     ma = tc_received(&a.c);
     client_send(&a, "JOIN #je2,,#je3");
     (void)send_and_drain(&a, "je-double");
-    expect_line(&a.c, "461 for the doubled comma",
+    expect_line(&a.c, "doubled comma joins #je2",
+                ":jea!jea@127.0.0.1 JOIN #JE2\r\n");
+    expect_line(&a.c, "doubled comma joins #je3",
+                ":jea!jea@127.0.0.1 JOIN #JE3\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no 461 for the doubled comma",
+                       " 461 ");
+
+    ma = tc_received(&a.c);
+    client_send(&a, "JOIN ,");
+    (void)send_and_drain(&a, "je-only-empty");
+    expect_line(&a.c, "461 for the wholly-empty list",
                 ":irc.test 461 jea JOIN :Not enough parameters\r\n");
-    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the doubled comma",
+    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the empty list",
                        " JOIN #");
 
     tc_close(&a.c);
