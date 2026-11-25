@@ -1212,9 +1212,10 @@ static void test_names_and_list(nf_node_t *node)
 
 /* #220: a bare LIST / bare NAMES stops at CHAN_ENUM_MAX channels and says so.
  * Joins CHAN_ENUM_MAX + 6 channels, so the truncation comes from this test's
- * own channels alone rather than from whatever earlier tests left behind. The
- * reply still closes normally (323, per-channel 366s); the truncation is the
- * node's own observable, the same shape as WHO's who_truncated. */
+ * own channels alone rather than from whatever earlier tests left behind. #660:
+ * the cap is wire-visible -- a flagged 323, a flagged final 366 -- while every
+ * other close stays byte-identical; the truncation is also the node's own
+ * observable, the same shape as WHO's who_truncated. */
 static void test_list_names_truncation(nf_node_t *node)
 {
     enum { EXTRA = 6 };
@@ -1263,8 +1264,10 @@ static void test_list_names_truncation(nf_node_t *node)
     TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
                  "a bare LIST over %d channels drew %zu 322s, not %d",
                  CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
-    expect_line(&c.c, "323 closing a truncated LIST",
-                ":irc.test 323 lte :End of LIST\r\n");
+    /* #660: the 323 close carries the flag, so a client can tell a capped
+     * reply from a complete one. */
+    expect_line(&c.c, "323 closing a truncated LIST carries the flag",
+                ":irc.test 323 lte :End of LIST (truncated)\r\n");
     TF_CHECK_MSG(nf_expect(node, "list_truncated:", T_IO_MS) == 0,
                  "the node never reported list_truncated for a LIST past the cap");
 
@@ -1281,6 +1284,10 @@ static void test_list_names_truncation(nf_node_t *node)
     TF_CHECK_MSG(found == (size_t)CHAN_ENUM_MAX,
                  "a bare NAMES over %d channels drew %zu 366s, not %d",
                  CHAN_ENUM_MAX + EXTRA, found, CHAN_ENUM_MAX);
+    /* #660: the LAST 366 carries the flag; the earlier CHAN_ENUM_MAX - 1 are
+     * byte-identical to uncapped closes. */
+    TF_CHECK_MSG(strstr(buf + mark, " :End of /NAMES list (truncated)\r\n") != NULL,
+                 "no 366 in a NAMES past the cap carried the truncation flag");
     TF_CHECK_MSG(nf_expect(node, "names_truncated:", T_IO_MS) == 0,
                  "the node never reported names_truncated for a NAMES past the cap");
 
