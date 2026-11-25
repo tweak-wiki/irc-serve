@@ -248,8 +248,8 @@ add_library(irc_core STATIC
   # tree has had a reason to depend on more than one module under federation/.
   federation/link.c
   # The tick: the dial/retry arms and fed_tick() itself, split out of link.c
-  # (issue #543). Listed beside link.c; the exchange half stays declared in
-  # federation/link.h, which is the only header this module reads.
+  # (issue #543). Listed beside link.c; the exchange half it reaches stays
+  # declared in federation/link.h.
   federation/tick.c
   # The handshake FSM: the caller-owned-context transition rules, split out of
   # link.c (issue #543). It is listed here, beside its only production caller,
