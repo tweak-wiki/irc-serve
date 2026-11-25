@@ -26,7 +26,6 @@
 #define NAME_B "irc.b"
 
 static int g_peer_port;
-static int g_is_b;
 
 /* The federation dial, handshake and resync all run off the tick; an inline
  * child with no tick hook never dials. */
@@ -85,13 +84,11 @@ int main(void)
     memset(&b, 0, sizeof b);
 
     g_peer_port = 0;
-    g_is_b = 0;
     TF_CHECK_MSG(nf_spawn_inline_named(&a, NAME_A, child_setup) == 0,
                  "could not spawn node A");
     TF_CHECK_MSG(a.port > 0, "node A reported no port");
 
     g_peer_port = a.port;
-    g_is_b = 1;
     TF_CHECK_MSG(nf_spawn_inline_named(&b, NAME_B, child_setup) == 0,
                  "could not spawn node B");
 
