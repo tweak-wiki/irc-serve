@@ -209,6 +209,10 @@ add_library(irc_core STATIC
   # The frozen S-verb shapes: the per-verb parameter encoders, split out of
   # verbs.c (issue #543). Listed beside verbs.c, whose header declares them.
   federation/shapes.c
+  # The outbound encode half (S_VERBS map + fed_sverb_for + fed_queue_why_name +
+  # fed_queue_line + fed_send_sverb with its fed_relay_clean filter), split out of
+  # verbs.c (issue #543). Listed beside verbs.c, whose header declares them.
+  federation/encode.c
   # The ADVERTISE store: what a peer advertises and the collision check, split
   # out of verbs.c (issue #543). Listed beside verbs.c; the store readers stay
   # declared in federation/link.h.
