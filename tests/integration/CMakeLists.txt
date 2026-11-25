@@ -389,6 +389,9 @@ irc_add_integration_test(test_ping_pong test_ping_pong.c)
 
 # 3.4 + Phase 3: QUIT closes through the reaper, and the nickname is released.
 irc_add_integration_test(test_quit test_quit.c)
+# Issue #609: a local QUIT renders as QUIT (not PART) to channel members,
+# and a renamer gets its own NICK echo plus channel/mesh fan-out.
+irc_add_integration_test(test_quit_nick_echo test_quit_nick_echo.c)
 
 # Issue #102: a client that disconnects WITHOUT QUIT -- the ordinary end of a
 # connection, and the path QUIT's test cannot reach -- must leave nothing behind

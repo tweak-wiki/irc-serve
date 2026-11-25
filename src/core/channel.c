@@ -1269,12 +1269,22 @@ void chan_conn_gone(server_t *s, conn_t *c)
         if (ch == NULL) {
             continue;
         }
-        /* Silent to the departing conn: it is going away, and the reply module
-         * would refuse the emission and count a refusal. No reason either: a
-         * QUIT reason is not stored (there is no quit cache until Phase 9) and
-         * a hangup has none, so there is nothing to pass and inventing one
-         * would put a word on the wire the client never wrote. */
-        chan_member_leave(s, ch, c, 0, NULL);
+        /* Issue #609: a graceful QUIT already reached the union of this
+        * connection's channels from handle_quit() -- as QUIT, with the reason.
+        * Emitting PART here too would tell every member both, so the
+        * membership is dropped silently. A hangup never announced, and keeps
+        * the PART below. */
+        if (c->quit_announced != 0) {
+            member_drop(ch, c);
+            (void)chan_dispose_if_empty(s, ch);
+            continue;
+        }
+         /* Silent to the departing conn: it is going away, and the reply module
+          * would refuse the emission and count a refusal. No reason either: a
+          * QUIT reason is not stored (there is no quit cache until Phase 9) and
+          * a hangup has none, so there is nothing to pass and inventing one
+          * would put a word on the wire the client never wrote. */
+         chan_member_leave(s, ch, c, 0, NULL);
         (void)chan_dispose_if_empty(s, ch);
     }
     c->nchans = 0; /* conn_free() releases the array; the count goes with it */
