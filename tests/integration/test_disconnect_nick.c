@@ -363,7 +363,9 @@ int main(void)
     /* --- the shape of the fix, asserted by inspection --- */
     {
         size_t len = 0;
-        char *code = tf_read_code("src/core/server.c", &len);
+        /* #543 TU-12: server_close_conn() moved verbatim from server.c to
+         * server_conns.c; the shape asserted below is unchanged. */
+        char *code = tf_read_code("src/core/server_conns.c", &len);
         char *cmds = tf_read_code("src/core/commands.c", &len);
         const char *fn;
         const char *fn_end;
@@ -371,8 +373,8 @@ int main(void)
         size_t body_len;
 
         TF_CHECK_MSG(code != NULL,
-                     "could not read src/core/server.c (is IRCSERVE_SRC_DIR "
-                     "set?)");
+                     "could not read src/core/server_conns.c (is "
+                     "IRCSERVE_SRC_DIR set?)");
         TF_CHECK_MSG(cmds != NULL,
                      "could not read src/core/commands.c (is IRCSERVE_SRC_DIR "
                      "set?)");
@@ -383,7 +385,7 @@ int main(void)
          * what made it a bug is that the two halves were separate calls. */
         fn = strstr(code, "server_close_conn(server_t");
         TF_CHECK_MSG(fn != NULL,
-                     "could not find server_close_conn() in server.c");
+                     "could not find server_close_conn() in server_conns.c");
         fn_end = strstr(fn, "\n}\n");
         TF_CHECK_MSG(fn_end != NULL,
                      "could not find the end of server_close_conn()");

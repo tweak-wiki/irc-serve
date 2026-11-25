@@ -133,6 +133,10 @@ add_library(irc_core STATIC
   # #543: the writer pool (demand-steal drain threads) split out of server.c.
   # The lifecycle, registries and shutdown stay there; this file holds the pool.
   core/server_writers.c
+  # #543: the fd-indexed connection registry (accept/lookup/queue/reap) split
+  # out of server.c. The lifecycle, nick/channel registries and shutdown stay
+  # there; this file holds the registry.
+  core/server_conns.c
   core/channel.c
   core/poll_loop.c
   core/reply.c

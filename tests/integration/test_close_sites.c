@@ -35,14 +35,15 @@
  *                          has no business deciding that a descriptor dies.
  *   src/core/commands.c     NONE, same reason: a handler states what it wants
  *                          to say, never what happens to the socket.
- *   src/core/server.c       The registry close in server_close_conn() -- the one
+ *   src/core/server_conns.c The registry close in server_close_conn() -- the one
  *                          place a conn_t's descriptor is closed. Plus: the
  *                          accept whose descriptor was >= FD_SETSIZE and so
  *                          could never become a conn_t (by_fd is indexed BY
- *                          descriptor, so the reaper cannot own it); a
- *                          bind/listen failure before the listener is reachable;
- *                          the listener at shutdown; and dials that never became
- *                          connections.
+ *                          descriptor, so the reaper cannot own it).
+ *   src/core/server.c       A bind/listen failure before the listener is
+ *                          reachable; the listener at shutdown; and dials that
+ *                          never became connections (server_dial_progress()'s
+ *                          DIAL_FAILED arms and the shutdown walk).
  *   everything else         NONE.
  *
  * ---------------------------------------------------------------------------
@@ -203,9 +204,11 @@ int main(void)
     /* Two lists, because the rule is not the same for both. `never` is every
      * file that must not touch the close() syscall. `no_destroy` is every file
      * that must not DESTROY a connection, which is the stronger property: not
-     * the registry that owns it, and not the destructor. connection.c and
-     * server.c are absent from the second list because each is one of the two
-     * places where destruction legitimately happens. */
+     * the registry that owns it, and not the destructor. connection.c,
+     * server.c and server_conns.c are absent from the second list because
+     * each is one of the places where destruction legitimately happens
+     * (#543 TU-12: the registry, server_close_conn() included, moved from
+     * server.c to server_conns.c). */
     static const char *const no_destroy[] = {
         "src/core/poll_loop.c", "src/core/message.c", "src/core/reply.c",
         "src/core/commands.c", "src/node_main.c",
@@ -221,9 +224,9 @@ int main(void)
     for (i = 0; i < sizeof never / sizeof never[0]; i++) {
         load_into(code, sizeof code, never[i]);
         TF_CHECK_MSG(!tf_calls(code, "close"),
-                     "%s calls close(). Only the reaper in server.c may close "
-                     "a connection descriptor; everything else marks CLOSING "
-                     "and lets the reaper do it.", never[i]);
+                     "%s calls close(). Only the reaper in server_conns.c may "
+                     "close a connection descriptor; everything else marks "
+                     "CLOSING and lets the reaper do it.", never[i]);
     }
 
     for (i = 0; i < sizeof no_destroy / sizeof no_destroy[0]; i++) {
@@ -254,19 +257,22 @@ int main(void)
                      "has to be able to release a conn_t's buffers");
     }
 
-    load_into(code, sizeof code, "src/core/server.c");
+    /* #543 TU-12: the reaper (server_close_conn/server_reap) and the
+     * FD_SETSIZE accept rejection moved verbatim from server.c to
+     * server_conns.c, so the close-site assertions below read the new file. */
+    load_into(code, sizeof code, "src/core/server_conns.c");
 
     /* The reaper's close must be there. Without this, "no stray close" could be
      * satisfied by deleting the legitimate one and leaving every connection
      * leaking, which the runtime test would then catch only as a hung test. */
     TF_CHECK_MSG(tf_calls(code, "close"),
-                 "server.c no longer calls close() at all: the reaper must be "
-                 "the place a connection descriptor is closed");
+                 "server_conns.c no longer calls close() at all: the reaper "
+                 "must be the place a connection descriptor is closed");
 
     /* And it must be inside server_close_conn(), not merely somewhere in the
      * file. This is the assertion that names the single close site. */
     fn = strstr(code, "server_close_conn(server_t");
-    TF_CHECK_MSG(fn != NULL, "could not find server_close_conn() in server.c");
+    TF_CHECK_MSG(fn != NULL, "could not find server_close_conn() in server_conns.c");
     end = strstr(fn, "\n}\n");
     TF_CHECK_MSG(end != NULL, "could not find the end of server_close_conn()");
     rc = calls_between("close", fn, end);
@@ -283,7 +289,7 @@ int main(void)
     fn = strstr(code, "if (fd >= FD_SETSIZE)");
     TF_CHECK_MSG(fn != NULL,
                  "the explicit fd >= FD_SETSIZE check is gone from "
-                 "server.c: 3.4 requires it explicitly at every accept/dial "
+                 "server_conns.c: 3.4 requires it explicitly at every "
                  "site, and its absence is silent corruption rather than a "
                  "graceful degradation");
     end = strstr(fn, "n_rejected_fd");
@@ -295,13 +301,13 @@ int main(void)
                  "descriptor (found %d close() calls): it would leak one "
                  "descriptor per refused connection", rc);
 
-    /* federation/link.c: the one file outside server.c that may call close(),
-     * and it may call it for exactly one reason. Two assertions, and both are
-     * needed: the first says there is only the one, the second says which one
-     * it is. Together they are stronger than membership in `never` would have
-     * been, because `never` would have said "this file never closes" -- which
-     * is false -- and a list entry that is false takes the file's real
-     * protection with it. */
+    /* federation/link.c: the one file outside the server core (server.c and
+     * server_conns.c) that may call close(), and it may call it for exactly
+     * one reason. Two assertions, and both are needed: the first says there
+     * is only the one, the second says which one it is. Together they are
+     * stronger than membership in `never` would have been, because `never`
+     * would have said "this file never closes" -- which is false -- and a
+     * list entry that is false takes the file's real protection with it. */
     {
         int n;
 
