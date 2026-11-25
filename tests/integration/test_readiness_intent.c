@@ -327,25 +327,25 @@ static void case_fill_publish_snapshot(void)
  * ASSERTED BY INSPECTION and labelled as such: the drain runs during teardown and
  * its effect is not a wire line. The search is over CODE (comments and literals
  * stripped, by test_util.h's helper), which is what makes "no raw recv(" a
- * statement about the program rather than about its prose -- link.c's drain block
- * has a nine-line comment that names recv() twice. */
+ * statement about the program rather than about its prose -- departure.c's drain
+ * block has a nine-line comment that names recv() twice. */
 static void case_drain_uses_transport(void)
 {
     size_t len = 0;
-    char *code = tf_read_code("src/federation/link.c", &len);
+    char *code = tf_read_code("src/federation/departure.c", &len);
 
     if (code == NULL) {
-        check(0, "read src/federation/link.c",
+        check(0, "read src/federation/departure.c",
               "tf_read_code() failed (is IRCSERVE_SRC_DIR set?)");
         return;
     }
     check(tf_calls(code, "transport_recv") == 1,
           "fed_send_shutdown()'s drain reads through transport_recv()",
-          "link.c must not recv() a peer socket directly: on a TLS link that "
+          "departure.c must not recv() a peer socket directly: on a TLS link that "
           "reads ciphertext and counts it as bytes drained");
     check(tf_calls(code, "recv") == 0,
-          "link.c's CODE calls no recv() at all, with comments stripped",
-          "a raw recv( in link.c means the drain has a second implementation");
+          "departure.c's CODE calls no recv() at all, with comments stripped",
+          "a raw recv( in departure.c means the drain has a second implementation");
     free(code);
 }
 

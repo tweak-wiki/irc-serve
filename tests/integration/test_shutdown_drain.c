@@ -226,22 +226,22 @@ int main(void)
         char code[TF_SRC_MAX];
         size_t len = 0;
         long got = tf_read_code_into(code, sizeof code,
-                                     "src/federation/link.c", &len);
+                                     "src/federation/departure.c", &len);
         const char *fn;
         const char *drain;
         const char *lock;
         const char *unlock;
 
         TF_CHECK_MSG(got >= 0,
-                     "could not read src/federation/link.c (is "
+                     "could not read src/federation/departure.c (is "
                      "IRCSERVE_SRC_DIR set?)");
         fn = strstr(code, "fed_send_shutdown(server_t");
         TF_CHECK_MSG(fn != NULL,
-                     "could not find fed_send_shutdown() in link.c");
+                     "could not find fed_send_shutdown() in departure.c");
         drain = strstr(fn, "transport_recv(c, sink, sizeof sink)");
         TF_CHECK_MSG(drain != NULL,
                      "could not find the shutdown drain's transport_recv in "
-                     "link.c");
+                     "departure.c");
         lock = strstr(fn, "pthread_mutex_lock(&c->wq_lock)");
         TF_CHECK_MSG(lock != NULL && lock < drain,
                      "the shutdown drain does not run under c->wq_lock: "
@@ -300,7 +300,7 @@ int main(void)
             const char *un;
 
             TF_CHECK_MSG(hfn != NULL && hfn < drain,
-                         "could not find fed_drain_writes() in link.c");
+                         "could not find fed_drain_writes() in departure.c");
             wd = strstr(hfn, "conn_write_pending_held(c)");
             TF_CHECK_MSG(wd != NULL && wd < drain,
                          "the shutdown goodbye does not wait on a saturated "
