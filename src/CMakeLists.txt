@@ -185,6 +185,9 @@ add_library(irc_core STATIC
   # #543: the connection-lifecycle handlers (PING/PONG/QUIT) split out of
   # commands.c. The dispatch table stays there; this file holds the handlers.
   core/commands_conn.c
+  # #543: the welcome burst (001-005 + MOTD) split out of commands.c.
+  # commands_state_update() and handle_motd() stay there and call in.
+  core/commands_welcome.c
   # Phase 10.1: the account IDENTITY on a connection. It is a module of its own
   # for the reason core/cap.c is -- the predicate every consumer asks must have
   # one home, or two callers will each write `c->logged_in && c->account[0]` and
