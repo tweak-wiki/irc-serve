@@ -158,8 +158,10 @@ jobs:
           # (usage spec: one-direction dialing). The reference units encode
           # A-dials/B-accepts; fail here — before touching anything — if the
           # live units drifted, rather than deploying onto a wedge.
-          peers_a=$(sudo systemctl show irc-serve-fed-a --property=ExecStart | grep -o "\-\-peer " | wc -l)
-          peers_b=$(sudo systemctl show irc-serve-fed-b --property=ExecStart | grep -o "\-\-peer " | wc -l)
+          # Reads the unit FILES (world-readable), not `systemctl show`:
+          # `show` is not in the sudoers allowlist and fails the job.
+          peers_a=$(grep -o -- '--peer ' /etc/systemd/system/irc-serve-fed-a.service | wc -l)
+          peers_b=$(grep -o -- '--peer ' /etc/systemd/system/irc-serve-fed-b.service | wc -l)
           [ "$((peers_a + peers_b))" = 1 ] || { echo "dial direction broken: fed-a declares $peers_a --peer, fed-b declares $peers_b (want exactly 1 total). Fix the unit files by hand (DEPLOY.md step 0)."; exit 1; }
           # ORDERED restart, acceptor first: B must be listening before A
           # dials, or A's first attempt hits a closed port and burns retry
