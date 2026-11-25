@@ -5,8 +5,8 @@
  * inbound_index(), the DEFERRED table, is_deferred() and fed_dispatch() moved
  * verbatim and fed_dispatch() is extern so the client dispatch in
  * core/commands.c can reach it. The vocabulary the chain reports through
- * (fed_obs(), the n_fed_* counters, fed_queue_line()) stays in verbs.c and
- * is extern via federation/verbs.h.
+ * (fed_obs(), the n_fed_* counters, fed_queue_line()) stays declared in
+ * federation/verbs.h (the encoder lives in federation/encode.c).
  */
 #ifndef IRC_FEDERATION_DISPATCH_H
 #define IRC_FEDERATION_DISPATCH_H
