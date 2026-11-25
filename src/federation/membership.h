@@ -4,8 +4,8 @@
  * handlers as static (fed_in_sjoin() is its only caller); fed_in_channel(),
  * fed_in_sjoin() and fed_in_snick() moved verbatim and are extern so
  * fed_dispatch() in dispatch.c can reach them. fed_touch_server(),
- * fed_actor_prefix(), fed_local_emit() and fed_obs() stay in verbs.c and are
- * extern via federation/verbs.h.
+ * fed_actor_prefix() and fed_local_emit() stay in verbs.c and fed_obs() lives
+ * in federation/obs.c; all are extern via federation/verbs.h.
  */
 #ifndef IRC_FEDERATION_MEMBERSHIP_H
 #define IRC_FEDERATION_MEMBERSHIP_H
