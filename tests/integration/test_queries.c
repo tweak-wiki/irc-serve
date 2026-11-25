@@ -392,38 +392,41 @@ int main(void)
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "the masked entry", ":" BIN_NAME " 352 alice * bob ");
 
-    /* Bare WHO: capped by #170. A bare mask ("*") would sweep the whole nick
-     * table -- one line in, one 352 per user -- so the node answers 315 alone
-     * with no 352 rows. The <channel> field of 315 is '*' (the mask echoed). */
+    /* Bare WHO: RFC 2812 3.3.4 lists every visible user (#674). Three users
+     * are connected, so three 352s with the RFC's '*' channel placeholder,
+     * terminated by 315 naming '*'. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO") == 0, "tc_send failed");
     end = drain(&alice);
-    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
-                 "bare WHO produced %zu 352 lines, expected 0 (#170 cap)",
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 3,
+                 "bare WHO produced %zu 352 lines, expected 3 (one per user)",
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+    expect_in_window(&alice, from, end, "bare WHO names bob",
+                     ":" BIN_NAME " 352 alice * bob ");
     expect_in_window(&alice, from, end, "bare WHO terminates",
                      ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
 
-    /* WHO * and WHO 0: the same broad-mask refusal, 315 alone, no sweep. */
+    /* WHO * and WHO 0: the same full enumeration. The 315 echoes the mask as
+     * sent, so WHO 0 terminates with '0'. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO *") == 0, "tc_send failed");
     end = drain(&alice);
-    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
-                 "WHO * produced %zu 352 lines, expected 0 (#170 cap)",
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 3,
+                 "WHO * produced %zu 352 lines, expected 3 (one per user)",
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO * terminates",
                      ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO 0") == 0, "tc_send failed");
     end = drain(&alice);
-    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
-                 "WHO 0 produced %zu 352 lines, expected 0 (#170 cap)",
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 3,
+                 "WHO 0 produced %zu 352 lines, expected 3 (one per user)",
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO 0 terminates",
                      ":" BIN_NAME " 315 alice 0 :End of WHO list\r\n");
     /* #217: a mask of many wildcards is a sweep with no cap on the matching
-     * itself, so it answers 315 alone like a broad mask -- no 352 rows, and
-     * the 315 names '*' rather than echoing client bytes. */
+     * itself, so it answers 315 alone with no 352 rows, and the 315 names '*'
+     * rather than echoing client bytes. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO *a*a*a*a*") == 0, "tc_send failed");
     end = drain(&alice);
@@ -1006,16 +1009,16 @@ int main(void)
     }
 
     /* =======================================================================
-     * 7. #170: WHO * with 5 nicks -> 0x352 + 315; filtered masks stay capped;
+     * 7. #674: WHO * with 5 nicks -> 5x352 + 315; filtered masks stay capped;
      *    WHO #chan unchanged
      * ==================================================================== */
     client_open(&eve, &node, "eve");
-    /* WHO * sweeps nothing: 315 alone even with five nicks online. */
+    /* WHO * enumerates every visible user: five nicks online, five 352s. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO *") == 0, "tc_send failed");
     end = drain(&alice);
-    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 0,
-                 "WHO * with 5 nicks produced %zu 352 lines, expected 0 (#170)",
+    TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 5,
+                 "WHO * with 5 nicks produced %zu 352 lines, expected 5 (#674)",
                  count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
     expect_in_window(&alice, from, end, "WHO * terminates with 5 nicks",
                      ":" BIN_NAME " 315 alice * :End of WHO list\r\n");
