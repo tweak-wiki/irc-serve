@@ -137,12 +137,13 @@ add_library(irc_core STATIC
   # out of server.c. The lifecycle, nick/channel registries and shutdown stay
   # there; this file holds the registry.
   core/server_conns.c
-  # #543: the nick and channel registries (claim/release/lookup/enumeration,
-  # attach/get/detach) split out of server.c. The lifecycle, link/dial
-  # registries and shutdown stay there; this file holds the registries.
+  # #543: the nick, channel and peer-link registries (claim/release/lookup/
+  # enumeration, attach/get/detach, find_link/link_at/find_peer) split out of
+  # server.c. The lifecycle, dial registry and shutdown stay there; this file
+  # holds the registries.
   core/server_registry.c
   # #543: the nonblocking outbound-dial FSM (dial/collect/progress/count) split
-  # out of server.c. The lifecycle, link lookup and shutdown stay there; this
+  # out of server.c. The lifecycle and shutdown stay there; this
   # file holds the dial side of 3.4.
   core/server_dial.c
   core/channel.c
