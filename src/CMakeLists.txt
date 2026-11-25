@@ -271,11 +271,9 @@ add_library(irc_core STATIC
   # the handlers stay declared in their own headers, which this module reads.
   federation/dispatch.c
   federation/dedup.c
-  # The peer link: the table, the FEDERATE exchange and the tick. It is listed
-  # after the two above because it uses both -- dedup for T5 and verbs.c for
-  # the outbound side of the wire -- which is the first time anything in this
-  # tree has had a reason to depend on more than one module under federation/.
-  federation/link.c
+  # #543 TU-41: link.c is fully split (last family: FED_REASON_NAME +
+  # fed_federate_reason() -> link_dump.c) and holds only the split map,
+  # so it is no longer compiled.
   # The tick: the dial/retry arms and fed_tick() itself, split out of link.c
   # (issue #543). Listed beside link.c; the exchange half it reaches stays
   # declared in federation/link.h.
@@ -298,9 +296,10 @@ add_library(irc_core STATIC
   # link.c (issue #543). Listed beside link.c; the seam stays declared in
   # federation/link.h.
   federation/link_accept.c
-  # The observable dump (FED_REASON_KEY + fed_state_name() + fed_dump()),
-  # split out of link.c (issue #543). Listed beside link.c; fed_dump()
-  # stays declared in federation/link.h.
+  # The observable dump (FED_REASON_KEY + fed_state_name() + fed_dump()) plus
+  # the reason spellings (FED_REASON_NAME + fed_federate_reason(), TU-41),
+  # split out of link.c (issue #543). Listed beside link.c; fed_dump() and
+  # fed_federate_reason() stay declared in federation/link.h.
   federation/link_dump.c
   # The link table (fed_link_set_state() + fed_link_of_conn() + fed_link_new() +
   # fed_link_set_tls() + fed_link_configure()), split out of link.c

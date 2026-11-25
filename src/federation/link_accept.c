@@ -8,7 +8,7 @@
  * fed_dispatch_hook() stay declared in federation/link.h (tick.c precedent,
  * no new header); fed_reject()/fed_link_established()/fed_claim_accepted()
  * stay static (their sole callers move with them). fed_link_new() is shared
- * with link.c's fed_link_configure() and goes extern through link.h.
+ * with link_table.c's fed_link_configure() and goes extern through link.h.
  */
 #include "federation/link.h"
 

@@ -69,8 +69,8 @@ const char *fed_queue_why_name(fed_queue_why_t why)
      * written both ways satisfies neither. Reading the value into an int
      * satisfies both, and a reason added later lands in the `default` that says
      * it has no name yet rather than off the end of the function. fanout.c
-     * documents the pair; fed_federate_reason() in federation/link.c is the
-     * same shape. */
+     * documents the pair; fed_federate_reason() in federation/link_dump.c is
+     * the same shape. */
     int which = (int)why;
 
     switch (which) {

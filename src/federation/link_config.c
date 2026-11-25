@@ -5,8 +5,8 @@
  * fed_set_timeouts()/fed_hs_due()/fed_set_retry(), and link_wipe() (whose
  * sole caller is fed_close()). All five functions stay declared in
  * federation/link.h (the tick.c precedent: no new header). The FEDERATE
- * exchange and the dispatch seam stay in link.c and are reached through
- * link.h.
+ * exchange lives in federation/link_queue.c and the dispatch seam in
+ * federation/link_accept.c, both reached through link.h.
  */
 #include "federation/link.h"
 

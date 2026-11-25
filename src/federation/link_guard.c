@@ -2,9 +2,9 @@
  *
  * Split verbatim out of link.c (issue #543 TU-35): the constant-time secret
  * comparison and fed_check_federate() itself (shape/secret/identity checks).
- * The verdict spelling (FED_REASON_NAME), fed_federate_reason() and the
- * per-reason counter stay in link.c; the observable dump (FED_REASON_KEY +
- * fed_dump()) lives in federation/link_dump.c (issue #543 TU-38). The refusal
+ * The verdict spellings (FED_REASON_NAME) + fed_federate_reason() live in
+ * federation/link_dump.c (issue #543 TU-41), beside the observable dump
+ * (FED_REASON_KEY + fed_dump(), issue #543 TU-38). The refusal
  * and claim-accepted arms that consume verdicts stay there too and are reached
  * through link.h.
  */

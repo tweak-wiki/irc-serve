@@ -2,10 +2,12 @@
  *
  * Split verbatim out of link.c (issue #543 TU-38): the per-reason dump keys
  * (FED_REASON_KEY) and the dump itself (fed_state_name() + fed_dump()).
- * fed_dump() stays declared in federation/link.h (tick.c/link_config.c/
- * link_guard.c/link_accept.c precedent, no new header); FED_REASON_KEY and
- * fed_state_name() stay static (their sole user moves with them). The stable
- * spellings (FED_REASON_NAME) and fed_federate_reason() stay in link.c.
+ * TU-41 adds the stable spellings (FED_REASON_NAME) + fed_federate_reason(),
+ * the other half of the same table pair. fed_dump() and fed_federate_reason()
+ * stay declared in federation/link.h (tick.c/link_config.c/
+ * link_guard.c/link_accept.c precedent, no new header); FED_REASON_KEY,
+ * FED_REASON_NAME and fed_state_name() stay static (their sole users live
+ * in this file).
  */
 #include "federation/link.h"
 
@@ -22,6 +24,72 @@ static const char *const FED_REASON_KEY[FED_RESULT_COUNT] = {
     "rej_in_use=", "rej_dup=", "rej_mismatch=", "rej_name=", "rej_epoch=",
     "rej_version=", "rej_tls="
 };
+/* The stable spellings, and the dump keys. One table for both so that the
+ * `reason=` on the rejection line and the `rej_*=` on the dump line cannot
+ * drift apart, which is the failure a reader hits when they are two lists and
+ * one of them has a typo: every count looks plausible and the name beside it
+ * is the wrong one.
+ *
+ * THE INDEX IS THE VERDICT, and the comment on FED_RESULT_COUNT above is the
+ * reason that is an invariant rather than a convention: the counter array and
+ * this array are both indexed by fed_federate_result_t, so a member added to
+ * the enum without a row here is a member whose counter is a neighbour's. The
+ * two new rows therefore sit where link.h puts the two new members -- beside
+ * the verdicts they belong with, which is FED_NO_SECRET next to the secret and
+ * FED_NAME_MISMATCH next to the uniqueness verdicts. */
+static const char *const FED_REASON_NAME[FED_RESULT_COUNT] = {
+    "OK",         /* FED_OK            */
+    "BAD_ARITY",  /* FED_BAD_ARITY     */
+    "BAD_SECRET", /* FED_BAD_SECRET    */
+    "NO_SECRET",  /* FED_NO_SECRET     */
+    "SELF_NAME",  /* FED_SELF_NAME     */
+    "NAME_IN_USE",/* FED_NAME_IN_USE   */
+    "DUPLICATE_LINK",
+    "NAME_MISMATCH",
+    "BAD_NAME",   /* FED_BAD_NAME      */
+    "BAD_EPOCH",  /* FED_BAD_EPOCH     */
+    "BAD_VERSION", /* FED_BAD_VERSION   */
+    "TLS_REQUIRED" /* FED_TLS_REQUIRED  */
+};
+
+const char *fed_federate_reason(fed_federate_result_t result)
+{
+    /* Switched on an int rather than on the enum, and the reason is the
+     * -Weverything pair that fanout.c documents: -Wswitch-default wants a
+     * `default` on a switch over an enum and -Wcovered-switch-default reports
+     * that `default` as redundant when every enumerator is listed, so a switch
+     * written both ways cannot satisfy both. Reading the value into an int
+     * satisfies both, the cases below are still one per enumerator, and a
+     * reason added later lands in the `default` that says it has no name yet
+     * rather than falling off the end of the function. */
+    int which = (int)result;
+
+    switch (which) {
+    case (int)FED_OK:
+    case (int)FED_BAD_ARITY:
+    case (int)FED_BAD_SECRET:
+    case (int)FED_NO_SECRET:
+    case (int)FED_SELF_NAME:
+    case (int)FED_NAME_IN_USE:
+    case (int)FED_DUPLICATE_LINK:
+    case (int)FED_NAME_MISMATCH:
+    case (int)FED_BAD_NAME:
+    case (int)FED_BAD_EPOCH:
+    case (int)FED_BAD_VERSION:
+    case (int)FED_TLS_REQUIRED:
+        break;
+    default:
+        /* Unreachable while fed_federate_result_t is closed and every member
+         * is listed. A BUG REPORT if it is ever reached, so it says so rather
+         * than returning a name that does not correspond to anything. */
+        printf("[observable] link_reason_unknown: reason=%d\n", which);
+        return "UNKNOWN";
+    }
+    if (which < 0 || which >= FED_RESULT_COUNT) {
+        return "UNKNOWN";
+    }
+    return FED_REASON_NAME[which];
+}
 
 /* The observable dump
  * ---------------------------------------------------------------------------

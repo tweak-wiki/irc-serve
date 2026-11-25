@@ -5,7 +5,8 @@
  * (tick.c/link_config.c/link_guard.c/link_accept.c/link_dump.c/link_table.c
  * precedent, no new header); no static helpers move. Reached through link.h
  * by fed_tick() in tick.c and the establishment arm in link_accept.c. The
- * reason spellings (FED_REASON_NAME) + fed_federate_reason() stay in link.c.
+ * reason spellings (FED_REASON_NAME) + fed_federate_reason() live in
+ * federation/link_dump.c (issue #543 TU-41).
  */
 #include "federation/link.h"
 
