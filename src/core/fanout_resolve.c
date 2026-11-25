@@ -1,5 +1,6 @@
 /* fanout_resolve.c -- see fanout_resolve.h. The resolution family, verbatim
- * out of fanout.c (issue #543); delivery and forwarding stay there.
+ * out of fanout.c (issue #543); delivery, forwarding, cap and stamp live in
+ * core/fanout_deliver.c, core/fanout_forward.c and core/fanout_cap.c.
  */
 #include "core/fanout_resolve.h"
 

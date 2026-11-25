@@ -1,6 +1,6 @@
 /* fanout_deliver.c -- see core/fanout.h. The delivery leg, verbatim out of
  * core/fanout.c; the 3.2 cap (fanout_line_fits*) and the shared
- * fanout_stamp() stay there.
+ * fanout_stamp() live in core/fanout_cap.c.
  */
 #include "core/fanout.h"
 
@@ -13,7 +13,7 @@
 #include "core/reply.h"
 #include "federation/verbs.h"
 
-/* fanout_stamp() is defined in core/fanout.c and declared here (same as the
+/* fanout_stamp() is defined in core/fanout_cap.c and declared here (same as the
  * forward leg's include): delivery mints the emission identity through it. */
 #include "core/fanout_forward.h"
 

@@ -1,5 +1,6 @@
 /* fanout_forward.c -- see fanout_forward.h. The forward leg, verbatim out of
- * core/fanout.c; delivery stays there.
+ * core/fanout.c; delivery lives in core/fanout_deliver.c and the 3.2 cap plus
+ * fanout_stamp() in core/fanout_cap.c.
  */
 #include "core/fanout_forward.h"
 

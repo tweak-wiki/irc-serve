@@ -165,20 +165,24 @@ add_library(irc_core STATIC
   core/poll_loop.c
   core/reply.c
   core/resume.c
-  core/fanout.c
+  # #543 TU-47: fanout.c is fully split (last family: 3.2 cap + emission stamp
+  # -> fanout_cap.c) and holds only the split map, so it is no longer compiled.
   # #543: the resolution family (mask match, nick lookup, target resolve,
-  # membership) split out of fanout.c. Cap, stamp, delivery and forwarding
-  # were split out alongside; this file holds the "what did this name refer
-  # to" half.
+  # membership) split out of fanout.c; this file holds the "what did this name
+  # refer to" half.
   core/fanout_resolve.c
   # #543: the forward leg (target-set walk + the fanout_forward_* entry
-  # points) split out of fanout.c. Cap, stamp and delivery stay there; this
-  # file holds the forward half and the two static helpers it owns.
+  # points) split out of fanout.c; this file holds the forward half and the
+  # two static helpers it owns.
   core/fanout_forward.c
   # #543: the delivery leg (emission helpers, write_to_members, the
-  # fanout_deliver_* entry points) split out of fanout.c. Cap and stamp stay
-  # there; this file holds the delivery half and the static helpers it owns.
+  # fanout_deliver_* entry points) split out of fanout.c; this file holds the
+  # delivery half and the static helpers it owns.
   core/fanout_deliver.c
+  # #543: the 3.2 client-facing cap (fanout_line_fits_n()/fanout_line_fits())
+  # and the shared emission identity (fanout_stamp()) split out of fanout.c.
+  # All three stay declared in core/fanout.h; this file holds the final family.
+  core/fanout_cap.c
   # #543 TU-37: commands.c is fully split (last family -> commands_state.c)
   # and holds only the split map, so it is no longer compiled.
   # #543: the dispatch seam (command table + lookup + commands_dispatch())
