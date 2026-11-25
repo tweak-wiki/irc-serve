@@ -104,6 +104,12 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
 int canonical_channel(server_t *s, conn_t *c, const char *arg, char *out,
                       size_t cap);
 
+/* Resolve a channel the client must ALREADY be a member of (442/403 on
+ * failure, with the reply already sent). Shared with
+ * core/chan_verbs_invite.c (issue #543 TU-48); see chan_verbs.c for why
+ * JOIN is the only verb that does not come through here. */
+chan_t *resolve_joined(server_t *s, conn_t *c, const char *arg);
+
 /* Put `c` on `ch` as a member with `flags`, and tell everybody who needs to
  * know: the local members, the mesh (through 3.1's table), and `c` itself
  * through the topic, the roster, the creation time and 366. Returns 0 when the
