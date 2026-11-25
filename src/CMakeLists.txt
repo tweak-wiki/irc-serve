@@ -298,6 +298,10 @@ add_library(irc_core STATIC
   # link.c (issue #543). Listed beside link.c; the seam stays declared in
   # federation/link.h.
   federation/link_accept.c
+  # The observable dump (FED_REASON_KEY + fed_state_name() + fed_dump()),
+  # split out of link.c (issue #543). Listed beside link.c; fed_dump()
+  # stays declared in federation/link.h.
+  federation/link_dump.c
   # The departure half: the SQUIT announcement, the link teardown, the clean-leave
   # latch, the shutdown drain and the operator's reset door, split out of link.c
   # (issue #543). Listed beside link.c; link.c reaches fed_link_down() through
