@@ -229,6 +229,9 @@ add_library(irc_core STATIC
   # literal at a call site is a claim with no owner.
   core/cap.c
   core/chan_verbs.c
+  # #543 TU-45: 4.2's KNOCK (handle_knock()) split out of core/chan_verbs.c.
+  # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
+  core/chan_verbs_knock.c
   core/msg_verbs.c
   # Phase 10.12: IRCv3 `batch`, the client-facing half -- the BATCH verb and the
   # `@`/`+` reference tags. It is a module of its own for the reason cap.c is: the
