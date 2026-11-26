@@ -49,6 +49,13 @@
 #define FLOOD_BATCH 150
 #define FLOOD_BATCHES 20
 #define FLOOD_BATCH_MS 100
+/* The lagging refusal: after the last batch goes out the server may still be
+ * working the backlog -- at N=4 a ~120 KiB writer-pool drain on a loaded
+ * (sanitizer) runner, and a shared runner can stall either side past 15 s
+ * without anything being wrong. Same 30 s bound test_writers_tls_417 uses
+ * for its 417 wait (#745); the per-batch polls above already spent the cheap
+ * waiting, so this only binds when the runner is truly stalled. */
+#define T_REFUSAL_MS 30000
 
 #define T_DIR_MAX 512
 #define T_PATH (T_DIR_MAX + 128)
@@ -163,9 +170,9 @@ static void flood_leg(int port, int big)
             got = (tc_expect(&flood, " 417 ", FLOOD_BATCH_MS) == 0);
          }
         /* A slow server may still be working the backlog when the last batch
-         * goes out; one final bounded wait covers the lagging refusal. */
+         * goes out; one final generous wait covers the lagging refusal. */
         if (!got) {
-            got = (tc_expect(&flood, " 417 ", T_IO_MS) == 0);
+            got = (tc_expect(&flood, " 417 ", T_REFUSAL_MS) == 0);
         }
         {
             const char *saw = tc_buffer(&flood);
