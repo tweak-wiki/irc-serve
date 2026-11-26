@@ -618,7 +618,8 @@ static void assert_exceptions_all_used(void)
 typedef struct {
     char verb[24];
     int  pre_reg;
-    int  implemented; /* 0 for a row whose handler is NULL: KILL on this build */
+    int  implemented; /* 0 for a row whose handler is NULL (none on this build:
+     * every row has a handler since #670 gave KILL one) */
 } sw_verb;
 
 static sw_verb g_verbs[SW_MAX_VERBS];
@@ -835,9 +836,10 @@ static void derive_verbs(void)
                      g_verbs[rows].verb);
         g_verbs[rows].pre_reg = (*lastdigit == '1') ? 1 : 0;
         /* THE HANDLER COLUMN, which is `NULL` for a verb this build knows and does
-         * not implement (`KILL` is the one on this tree). It is needed because the
-         * wire cannot tell those two cases apart -- both answer 421 -- and the
-         * cross-check against the running node has to be able to. */
+         * not implement (none on this tree since #670: every row has a handler).
+         * It is needed because the wire cannot tell those two cases apart -- both
+         * answer 421 -- and the cross-check against the running node has to be
+         * able to. */
         g_verbs[rows].implemented = 1;
         for (const char *n = q2; n < row_end; n++) {
             if (strncmp(n, "NULL", 4u) == 0) {

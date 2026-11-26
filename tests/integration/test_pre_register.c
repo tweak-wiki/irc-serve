@@ -9,20 +9,19 @@
  * nothing falls through in silence: an unrecognised verb is 421, and a verb the
  * client is not yet entitled to send is 451.
  *
- * Three distinct cases, which are easy to conflate and are not the same code:
+ * Two distinct cases, which are easy to conflate and are not the same code:
  *
  *   451  the client is not registered and this verb is not part of
  *        registration. The answer is about the CLIENT, and it is actionable:
  *        the client knows to send NICK and USER.
  *   421  the client IS registered and sent a verb this build has never heard
- *        of (`NICKX`).
- *   421  the client IS registered and sent a verb 4.1 lists that a LATER phase
- *        still owns (`PRIVMSG`, `NOTICE`, `KILL`). A slight lie about the
- *        reason -- the wire has no numeric for "not yet" -- but the alternative
- *        is silence, and the node records which of the two it was so a log
- *        reader is not misled.
+ *        of (`NICKX`). A verb 4.1 lists that a later phase still owns used to
+ *        be a third case here -- KILL was its last member -- until issue #670
+ *        gave KILL a handler that refuses it 481. A refusal is an answer, so
+ *        KILL is now swept with the verbs the earlier phases own below, and
+ *        test_kill.c owns the rest of the verb's behaviour.
  *
- * WHAT CHANGED IN PHASE 4, AND WHY IT IS A STRENGTHENING
+ * WHAT CHANGED IN PHASE 4, AND LATER IN #670
  * ---------------------------------------------------
  * This test originally used `JOIN` as its example of the third case, because in
  * Phase 3 JOIN was a 4.1 verb nobody had implemented. Phase 4 implements it, so
@@ -32,9 +31,13 @@
  * statement than the original:
  *
  *   - a verb a later phase still owns produces exactly one 421 and nothing else;
- *   - a verb Phase 4 owns produces its real numerics and NO 421, which is the
- *     half the original could not check (a Phase 3 JOIN answering 421 and a
- *     Phase 4 JOIN answering 421 were indistinguishable on the wire).
+ *   - a verb an earlier phase owns produces its real numerics and NO 421, which
+ *     is the half the original could not check (a Phase 3 JOIN answering 421
+ *     and a Phase 4 JOIN answering 421 were indistinguishable on the wire).
+ *
+ * Issue #670 closed the first category for good: KILL was its last member, and
+ * is now a refusal (481) rather than an unimplemented verb, so the sweep below
+ * has one batch instead of two.
  *
  * Nothing was removed and nothing was loosened. The 451 gate is still probed
  * with JOIN -- it is a registered-client gate, and a verb this node implements is
@@ -212,12 +215,9 @@ int main(void)
     TF_CHECK_MSG(tf_count(tc_buffer(&c), " 421 ") == 1,
                  "a verb this build implements was answered 421");
 
-    /* The node distinguishes "never heard of it" from "arrives in a later
-     * phase" in its own output, so a log reader is not told a planned verb is
-     * unknown -- and the Phase 4 verbs are no longer in that category. The
-     * cmd_unimplemented check is made further down, after the sweep has sent a
-     * verb that really is one, because that is the only point at which the node
-     * has had a chance to record one. */
+    /* The node distinguishes "never heard of it" from "refused" in its own
+     * output, so a log reader is not told a known verb is unknown -- and every
+     * 4.1 verb is now in one of those two categories. */
     TF_CHECK_MSG(nf_expect(&node, "cmd_unknown: fd=", T_IO_MS) == 0,
                  "the node did not record NICKX as an unknown verb");
     TF_CHECK_MSG(nf_expect(&node, "chan_join: channel=#SOMEWHERE", T_IO_MS) == 0,
@@ -225,109 +225,67 @@ int main(void)
                  "still being answered through the unimplemented path");
 
     /* ---------------------------------------------------------------------
-     * Every 4.1 verb is ANSWERED, not dropped, and the two categories now have
-     * opposite answers on the wire. A verb that fell through to silence would be
-     * invisible in this test and invisible in production, so each is sent, the
-     * whole batch is drained with a PING whose answer cannot overtake them, and
-     * the counts are checked.
+     * Every 4.1 verb is ANSWERED, not dropped. A verb that fell through to
+     * silence would be invisible in this test and invisible in production, so
+     * each is sent, the whole batch is drained with a PING whose answer cannot
+     * overtake them, and the counts are checked.
+     *
+     * KILL was HERE, in a "later phase still owns it" batch of its own, until
+     * issue #670 gave it a handler: it is refused 481 rather than implemented,
+     * and a refusal is an answer. So it is sent here, with the verbs the
+     * earlier phases own -- output, and emphatically not a 421. PRIVMSG and
+     * NOTICE are here from Phase 5 for the same reason: both are sent to #x,
+     * which this client never joined and which does not exist, so each is
+     * answered with a 403. Sending them at something that DOES resolve would
+     * be a weaker choice: a message that is delivered to nobody produces no
+     * line at all on this connection, and the count below would then be
+     * measuring nothing.
      * --------------------------------------------------------------------- */
     {
-        /* Still a later phase's: one 421 each, and nothing else.
-         *
-         * PRIVMSG and NOTICE were HERE until Phase 5 landed them, and this batch
-         * is where a verb moves to as each phase ships. Nothing about the
-         * assertion is relaxed by the move: batch 2 below then demands that both
-         * produce output AND that neither produces a 421, which is a stronger
-         * statement about them than being one more 421 ever was. KILL is the
-         * only 4.1 verb still outstanding, so it is the only one left here. */
-        static const char *const later[] = {
-            "KILL bob"
+        static const char *const now[] = {
+            "PART #x", "TOPIC #x :t", "NAMES #x", "MODE #x", "KICK #x bob",
+            "PRIVMSG #x :hi", "NOTICE #x :hi", "KILL bob"
         };
-        /* One so far (NICKX), plus one for each verb in `later`. */
-        size_t expect_421 = 1 + sizeof later / sizeof later[0];        /* Where the "before" window ends. The casefold-drain PONG above is the
+        /* Where the "before" window ends. The casefold-drain PONG above is the
          * last thing the node had written at this point, so everything after it
          * is an answer to the sweep. Counting from a remembered offset is what
          * makes "no 421 arrived" a statement about those verbs rather than about
          * the whole session. */
-        const char *const at = strstr(tc_buffer(&c), "PONG irc.test casefold-drain");
-        size_t drain;
+        const char *const at =
+            strstr(tc_buffer(&c), "PONG irc.test casefold-drain");
+        size_t drain = (at != NULL) ? (size_t)(at - tc_buffer(&c)) : 0u;
 
-        TF_CHECK_MSG(at != NULL,
-                     "expected the casefold-drain PONG in the buffer");
-        drain = (at != NULL) ? (size_t)(at - tc_buffer(&c)) : 0u;
-
-        /* Batch 1: a later phase's verbs. Each must be 421, and only 421. */
-        for (size_t i = 0; i < sizeof later / sizeof later[0]; i++) {
-            TF_CHECK_MSG(tc_send(&c, later[i]) == 0, "tc_send(%s) failed",
-                         later[i]);
+        TF_CHECK_MSG(at != NULL, "expected the casefold-drain PONG");
+        for (size_t i = 0; i < sizeof now / sizeof now[0]; i++) {
+            TF_CHECK_MSG(tc_send(&c, now[i]) == 0, "tc_send(%s) failed",
+                         now[i]);
         }
-        TF_CHECK_MSG(tc_send(&c, "PING :drain-later") == 0, "tc_send failed");
-        TF_CHECK_MSG(tc_expect(&c, "PONG irc.test drain-later", T_IO_MS) == 0,
-                     "no PONG after the unimplemented-verb sweep");
-        TF_CHECK_MSG(tf_count(tc_buffer(&c) + drain, " 421 ") ==
-                         sizeof later / sizeof later[0],
-                     "expected %zu 421 lines for the unimplemented verbs and "
-                     "saw %zu: a planned verb answered something other than 421, "
-                     "or was dropped silently",
-                     sizeof later / sizeof later[0],
+        TF_CHECK_MSG(tc_send(&c, "PING :drain-now") == 0, "tc_send failed");
+        TF_CHECK_MSG(tc_expect(&c, "PONG irc.test drain-now", T_IO_MS) == 0,
+                     "no PONG after the verb sweep");
+        TF_CHECK_MSG(tf_count(tc_buffer(&c) + drain, " 421 ") == 0,
+                     "a verb this build answers was answered 421: %zu "
+                     "421 lines arrived in the sweep window",
                      tf_count(tc_buffer(&c) + drain, " 421 "));
-
-        /* Batch 2: Phase 4's and Phase 5's verbs, against a FRESH window.
-         * Reusing batch 1's offset would conflate the two categories, which is
-         * the whole distinction -- batch 1 must be 421 and batch 2 must not be,
-         * and a shared window cannot show that.
-         *
-         * PRIVMSG and NOTICE are here from Phase 5. Both are sent to #x, which
-         * this client never joined and which does not exist, so each is answered
-         * with a 403 -- output, and emphatically not a 421. Sending them at
-         * something that DOES resolve would be a weaker choice: a message that
-         * is delivered to nobody produces no line at all on this connection, and
-         * the count below would then be measuring nothing. */
-        {
-            static const char *const now[] = {
-                "PART #x", "TOPIC #x :t", "NAMES #x", "MODE #x", "KICK #x bob",
-                "PRIVMSG #x :hi", "NOTICE #x :hi"
-            };
-            const char *const at2 =
-                strstr(tc_buffer(&c), "PONG irc.test drain-later");
-            size_t drain2 = (at2 != NULL) ? (size_t)(at2 - tc_buffer(&c)) : 0u;
-
-            TF_CHECK_MSG(at2 != NULL, "expected the drain-later PONG");
-            for (size_t i = 0; i < sizeof now / sizeof now[0]; i++) {
-                TF_CHECK_MSG(tc_send(&c, now[i]) == 0, "tc_send(%s) failed",
-                             now[i]);
-            }
-            TF_CHECK_MSG(tc_send(&c, "PING :drain-now") == 0, "tc_send failed");
-            TF_CHECK_MSG(tc_expect(&c, "PONG irc.test drain-now", T_IO_MS) == 0,
-                         "no PONG after the implemented-verb sweep");
-            TF_CHECK_MSG(tf_count(tc_buffer(&c) + drain2, " 421 ") == 0,
-                         "a verb this build implements was answered 421: %zu "
-                         "421 lines arrived in the implemented-verb window",
-                         tf_count(tc_buffer(&c) + drain2, " 421 "));
-            /* And they were ANSWERED, not dropped: each produced output. A verb
-             * that produced nothing would satisfy a 421 count of zero, which is
-             * the silent failure this test exists to prevent. */
-            TF_CHECK_MSG(tf_count(tc_buffer(&c) + drain2, "\r\n") >=
-                             sizeof now / sizeof now[0],
-                         "only %zu lines arrived for %zu implemented verbs: at "
-                         "least one was dropped silently",
-                         tf_count(tc_buffer(&c) + drain2, "\r\n"),
-                         sizeof now / sizeof now[0]);
-        }
-        TF_CHECK_MSG(tf_count(tc_buffer(&c), " 421 ") == expect_421,
-                     "expected %zu 421 lines and saw %zu overall", expect_421,
+        /* And they were ANSWERED, not dropped: each produced output. A verb
+         * that produced nothing would satisfy a 421 count of zero, which is
+         * the silent failure this test exists to prevent. */
+        TF_CHECK_MSG(tf_count(tc_buffer(&c) + drain, "\r\n") >=
+                         sizeof now / sizeof now[0],
+                     "only %zu lines arrived for %zu swept verbs: at "
+                     "least one was dropped silently",
+                     tf_count(tc_buffer(&c) + drain, "\r\n"),
+                     sizeof now / sizeof now[0]);
+        TF_CHECK_MSG(tf_count(tc_buffer(&c), " 421 ") == 1,
+                     "expected 1 421 line overall (NICKX) and saw %zu",
                      tf_count(tc_buffer(&c), " 421 "));
     }
 
-    /* The "planned but not yet implemented" record, now that the sweep above has
-     * actually sent one. Checked here rather than earlier because this is the
-     * first point at which the node has had a chance to emit it -- a check made
-     * before the sweep would pass against a node that never records the
-     * distinction at all. */
-    TF_CHECK_MSG(nf_expect(&node, "cmd_unimplemented: fd=", T_IO_MS) == 0,
-                 "the node did not record an unimplemented-but-planned verb "
-                 "(KILL is the one 4.1 verb still outstanding)");
-
+    /* KILL's refusal is on the record, not an unimplemented-verb note: every
+     * row in the dispatch table has a handler now, so no verb reaches the
+     * cmd_unimplemented branch on this build. */
+    TF_CHECK_MSG(nf_expect(&node, "kill_refused: by=alice", T_IO_MS) == 0,
+                 "the node did not record the KILL refusal");
     TF_CHECK_MSG(nf_stop(&node) == 0, "node did not exit cleanly");
     TF_CHECK_MSG(nf_expect_u64(&node, "reply_refused=", 0, T_IO_MS) == 0,
                  "reply_refused is not 0");

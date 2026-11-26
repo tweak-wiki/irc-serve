@@ -486,6 +486,11 @@ irc_add_integration_test(test_serverinfo test_serverinfo.c)
 # does NOT say: 381 must never appear, and the password must never reach the log.
 irc_add_integration_test(test_choper test_choper.c)
 
+# KILL, refused 481 (issue #670). Its own file for the same reason as KNOCK:
+# the whole behaviour is one numeric, and the regression is which of the
+# other numerics does NOT come back.
+irc_add_integration_test(test_kill test_kill.c)
+
 # Channel topic persistence across a reconnect. This was a CTest skip
 # (return 77) from Phase 1 and Phase 7 implemented the feature it was named for:
 # a channel's topic now survives the channel being DISPOSED, which 2.2 requires

@@ -248,7 +248,7 @@ conformant.
 | 478 | ERR_BANLISTFULL | `<channel> <char> :Channel list is full` | E | **Added in Phase 11**, replacing 696. Both middle parameters. |
 | 481 | ERR_NOPRIVILEGES | `:Permission Denied- You're not an IRC operator` | A | **deviation** — see §6.7. |
 | 482 | ERR_CHANOPRIVSNEEDED | `<client> <channel> :You're not channel operator` | E | ✓ on the four channel sites, which name `ch->name`. **One site is not**: `REGISTER`/`UNREGISTER` refused by `account_refuse()` sends `482` with no `<channel>` and this node's own text, because neither verb has a channel and this node has no operator model to name instead. **The finding is the numeric, not the field** — `482` is a channel refusal being used for a non-channel one — and it is **blocked on §6.7**, which is the operator-model decision that would also settle `CHOPER` and `KNOCK`. §6.13. |
-| 483 | ERR_CANTKILLSERVER | `:You can't kill a server!` | A | `KILL` is in the dispatch table with a NULL handler, so it answers 421. No operator model. |
+| 483 | ERR_CANTKILLSERVER | `:You can't kill a server!` | A | `KILL` from a client is refused `481` (no operator model, #670), so `483` is never emitted. |
 | 484 | ERR_RESTRICTED | `:Your connection is restricted!` | A | No user mode `+r`. 004 advertises user modes `i` only. |
 | 485 | ERR_UNIQOPPRIVSNEEDED | `:You're not the original channel operator` | A | No `+q`/`+a`. |
 | 491 | ERR_NOOPERHOST | `:No O-lines for your host` | A | No OPER. |
@@ -297,7 +297,7 @@ in §3.2.
 | 467, 471, 473, 475 | +k, +l, +i, +k | 2.3.1 | All four are advertised in 004's channel-mode set and **not evaluated** — 472 by name, which is the node's deliberate choice: a node that accepted a mode it does not act on would have a 324 that disagreed with its behaviour. Since none can be set, none of their refusals can arise. |
 | 477 | NOCHANMODES | 2.3.1 | The node does support channel modes. |
 | 481 | NOPRIVILEGES | 3.3.2 | See §6.7. |
-| 483 | CANTKILLSERVER | 3.3.2 | `KILL` has a NULL handler; 421. |
+| 483 | CANTKILLSERVER | 3.3.2 | `KILL` from a client is refused `481` (#670); never emitted. |
 | 484 | RESTRICTED | 2.3.2 | No user mode `+r`. |
 
 ### 3.2 N/A — reserved, obsolete, or a numeric no server ever sends

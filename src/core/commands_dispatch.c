@@ -183,7 +183,7 @@ static const command_t k_commands[] = {
     { "NAMES",   handle_names, 0 },
     { "MODE",    handle_mode,  0 },
     { "KICK",    handle_kick,  0 },
-    { "KILL",    NULL,         0 },
+    { "KILL",    handle_kill,  0 },
     /* 7/Phase 5: the messaging surface, and the point at which the node becomes
      * usable. PRIVMSG and NOTICE are 4.1 MUST; WHO, WHOIS, ISON and AWAY are
      * 4.2 SHOULD, pulled forward here because 4.2's own list puts them in the
@@ -361,8 +361,9 @@ void commands_dispatch(server_t *s, conn_t *c, const message_t *m)
         /* As `cmd_unknown` above, and for the same reason: the 421's <command> field
          * is rendered by `emit_numeric_ex()` in reply.c -- the single place a
          * numeric's parameters are filtered -- and the LOG measures the value rather
-         * than printing it raw. `KILL` is the verb that reaches this branch on this
-         * build, so the line is not hypothetical. */
+         * than printing it raw. No verb reaches this branch on this build (every
+         * row in the table above has a handler); it is here for the next phase
+         * that adds a row before its handler. */
         char shown[CONN_LOG_FIELD_MAX + 1u];
 
         mid[0] = m->command;

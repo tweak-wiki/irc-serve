@@ -255,7 +255,7 @@ static void case_no_client_byte_reaches_the_log(void)
      * the verb `NICK`, so it is an unknown command and no nickname is ever set,
      * and the connection then fails to register on `USER` alone. The battery below
      * therefore registers cleanly and exercises the unprintable command word later,
-     * on `KILL`, where it reaches the same two log lines.
+     * where it reaches `cmd_unknown:`.
      *
      * Registering here rather than after is still load-bearing: it is the proof
      * that the battery ran, and a battery that silently failed to register would
@@ -342,11 +342,12 @@ static void case_no_client_byte_reaches_the_log(void)
      * and nothing bounds it before the refusal line. */
     poke(&c, "AUTHENTICATE " X);
 
-    /* A KNOWN verb this build does not implement -- KILL is `fn == NULL` in the
-     * table -- which is `cmd_unimplemented:` rather than `cmd_unknown:`. Both
-     * name the same word, so both are in the battery: a fix that covered only the
-     * unknown-command branch would leave the unimplemented one printing raw. */
+    /* A KNOWN verb this node refuses -- `KILL` is 481 since #670 -- with hostile
+     * bytes in the parameters the handler ignores. The refusal names nothing
+     * client-chosen, so the battery proves it rather than assuming it. */
     poke(&c, "KILL " X);
+    /* And an UNKNOWN verb, which is `cmd_unknown:`: the other half of "every
+     * command word is measured before it is printed". */
     poke(&c, "NOSUCHVERB");
 
     /* A COMMAND WORD LONGER THAN THE PRINT FIELD. `conn_text_logsafe()` withholds
@@ -368,13 +369,12 @@ static void case_no_client_byte_reaches_the_log(void)
         poke(&c, long_verb);
     }
 
-    /* THE SAME VERB WITH THE BYTES IN THE WORD. `KILL ` + X has a space, so the
-     * verb is the printable word `KILL` and the hostile bytes are a parameter.
-     * `KILL` + X has no space, so the verb itself is unprintable -- which is the
-     * withheld case, and the one that reaches `cmd_unknown:` rather than
-     * `cmd_unimplemented:`. Both are needed: a fix that covered one of the two
-     * branches would leave the other printing raw, and they are the same
-     * expression in the source. */
+    /* THE SAME WORD WITH THE BYTES IN THE VERB. `KILL ` + X has a space, so the
+     * verb is the printable word `KILL` and the hostile bytes are a parameter
+     * the refusal ignores. `KILL` + X has no space, so the verb itself is
+     * unprintable -- which is the withheld case on `cmd_unknown:`. Both are
+     * needed: one proves the refusal path is clean, the other the unknown-word
+     * path. */
     poke(&c, "KILL" X);
 
     /* INVITE: the `not_a_nick` branch names `t.name`, which is a RESOLVED name.
@@ -424,34 +424,47 @@ static void case_no_client_byte_reaches_the_log(void)
     TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
     assert_log_clean(&node, "the log-injection battery, including QUIT");
 
-    /* TWO LINES THAT MUST STILL NAME THEIR VALUE. Every site above withholds a
-     * value that holds a control byte, and this is the half that would be lost if
-     * "withhold" had been implemented as "never print the value": a log line whose
-     * whole content is the verb has to still name the verb when the verb is a verb.
+    /* A PRINTABLE COMMAND WORD IS STILL PRINTED, on the line that carries it.
+     * Every site above withholds a value that holds a control byte, and this
+     * is the half that would be lost if "withhold" had been implemented as
+     * "never print the value": a log line whose whole content is the verb has
+     * to still name the verb when the verb names nothing the node knows.
      *
-     * `KILL` is the right one to pin because it is the ONLY verb that reaches
-     * `cmd_unimplemented`, so this is the assertion that branch's value survived. */
-    TF_CHECK_MSG(strstr(node.out, "cmd_unimplemented: fd=") != NULL,
-                 "the node never logged a cmd_unimplemented line, so the branch this "
-                 "assertion is about was not reached and the value cannot have been "
-                 "checked.\n  log: %s", node.out);
-    TF_CHECK_MSG(log_line_has_tail(node.out, "cmd_unimplemented: fd=",
-                                  "command=KILL command_len=4 "
+     * `NOSUCHVERB` is the probe: the battery's printable unknown verb. `KILL`
+     * used to be this assertion's probe -- it was the only verb that reached
+     * `cmd_unimplemented` -- until issue #670 gave it a handler that refuses
+     * it 481, so no printable verb reaches that branch on this build. A fix
+     * that withheld every value would leave every `cmd_*:` line naming `-`
+     * and this log useless for the question it exists to answer. The
+     * descriptor is deliberately NOT in the needle: it is the node's fd for
+     * the client, it differs between platforms and between runs, and pinning
+     * it tested the kernel's descriptor table rather than this log. Every
+     * other field on the line is pinned, in order. */
+    TF_CHECK_MSG(log_line_has_tail(node.out, "cmd_unknown: fd=",
+                                  "command=NOSUCHVERB command_len=10 "
                  "command_bad_bytes=0") != 0,
-                 "a KNOWN, PRINTABLE command word is no longer printed. `KILL` is "
-                 "4 bytes with no control byte in it, so the value must be verbatim "
-                 "and the count must be 0 -- a fix that withheld every value would "
-                 "leave every `cmd_*:` line naming `-` and this log useless for the "
-                 "question it exists to answer. The descriptor is deliberately "
-                 "NOT in the needle: it is the node's fd for the client, it "
-                 "differs between platforms and between runs, and pinning it "
-                 "tested the kernel's descriptor table rather than this log. "
-                 "Every other field on the line is pinned, in order.\n  log: %s",
+                 "a PRINTABLE command word is no longer printed. `NOSUCHVERB` "
+                 "is 10 bytes with no control byte in it, so the value must be "
+                 "verbatim and the count must be 0.\n  log: %s",
                  node.out);
 
-    /* AND THE WITHHELD CASE, which is the other half. `KILL ` + a control byte is
-     * the same branch with a word that cannot be printed, and it must produce the
-     * MEASUREMENT instead: the value withheld, the true length, and the count. */
+    /* AND KILL IS NOT IN THAT BRANCH ANY MORE. Its printable form is a known
+     * verb now, refused 481, so no `cmd_unknown:` line may carry it -- the
+     * #670 regression was exactly that line. `kill_refused:` names only the
+     * caller's (validated) nickname, so there is no `command=KILL` measurement
+     * for it anywhere. */
+    TF_CHECK_MSG(log_line_has_tail(node.out, "cmd_unknown: fd=",
+                                  "command=KILL command_len=4 "
+                 "command_bad_bytes=0") == 0,
+                 "a KNOWN command word was logged as unknown. `KILL` is "
+                 "recognised since #670 and refused 481, so a `cmd_unknown:` "
+                 "line carrying it means the dispatch table lost its handler."
+                 "\n  log: %s", node.out);
+
+    /* AND THE WITHHELD CASE, which is the other half. `KILL` + a control byte
+     * with no space is not the verb `KILL` at all -- it is an unprintable
+     * word, and it must produce the MEASUREMENT instead: the value withheld,
+     * the true length, and the count. */
     TF_CHECK_MSG(log_line_has_tail(node.out, "cmd_unknown: fd=",
                                   "command=- command_len=9 "
                  "command_bad_bytes=2") != 0,
@@ -462,29 +475,17 @@ static void case_no_client_byte_reaches_the_log(void)
                  "withheld value diagnosable rather than mysterious.\n  log: %s",
                  node.out);
 
-    /* AND THE PER-LINE CONFINEMENT IS LOAD-BEARING, asserted rather than assumed.
-     *
-     * The two cases above produce DIFFERENT lines -- one carrying the verbatim word,
-     * one carrying `-` with a length and a bad-byte count -- and confining the search
-     * to the line that carries the prefix is the only thing keeping each assertion
-     * pointed at its own. Without it, a tail can be satisfied by another line's
-     * fields, and that failure is invisible: the assertion still passes, for the
-     * wrong line.
-     *
-     * So this is the negative of it, and it exists because the confinement was
-     * removed under fault injection and NOTHING WENT RED. That is the useful shape of
-     * this bug: a helper that quietly stopped doing what its name says, caught by no
-     * assertion, in a suite where a strip that stopped stripping also went unnoticed
-     * once. Here is the assertion that would have caught it. */
-    TF_CHECK_MSG(log_line_has_tail(node.out, "cmd_unimplemented: fd=",
-                                  "command=- command_len=9 "
-                                  "command_bad_bytes=2") == 0,
-                 "the WITHHELD case's fields were found on the VERBATIM case's line, "
-                 "which means the helper is no longer confining its search to the line "
-                 "that carries the prefix. Both lines exist in this log and carry "
-                 "different values, so a helper ranging over the whole buffer would "
-                 "satisfy either assertion from either line -- and every check here "
-                 "would go on passing for the wrong reason.\n  log: %s", node.out);
+    /* AND THE REFUSAL IS ON THE RECORD. `KILL ` + hostile bytes above took the
+     * refusal path, not a `cmd_*:` one: the handler ignores the parameters, so
+     * there is no `command=` measurement for it anywhere, and this is the
+     * assertion that the handler ran rather than the line being dropped. A
+     * drain only proves the node kept answering; this proves it answered. */
+    TF_CHECK_MSG(strstr(node.out, "kill_refused: by=vic "
+                         "reason=NO_OPER_FLAGS") != NULL,
+                 "the node never logged a kill_refused line, so the `KILL ` "
+                 "probe with hostile parameters was not refused -- it was "
+                 "dropped or logged somewhere it should not be.\n  log: %s",
+                 node.out);
 
     /* AND THE WITHHELD-BECAUSE-TOO-LONG CASE, the other `-`. Same verb, same
      * absence of a control byte, and a different reason -- so the two `-`s are only
