@@ -252,6 +252,18 @@ irc_add_integration_test(test_flood_peer test_flood_peer.c)
 # Release -j2 (#480). Six times the observed maximum, rounded up to the next
 # 30s, per the rule above.
 set(irc_timeout_test_writers_tls_417 210)
+# #743: ASan-only headroom. The PING-flood rate-limit leg is a timing loop
+# against the 50/sec refill under a real TLS handshake, and ASan
+# instrumentation (~2-3x on this handshake+pump shape) puts a loaded CI
+# runner past the 210 above with zero sanitizer errors (PR #732:
+# WITH_TLS=ON ASan red, same commit green on TLS=OFF, TSan, and 153/153
+# locally). TIMEOUT 300 matches the #719/#720 TSan precedent number and is
+# ~1.4x over the flake point; a wedged run still fails its first 30s
+# T_IO_MS tc_expect loudly, so the backstop stays meaningful. Native keeps
+# the 210 above.
+if(IRC_SANITIZE)
+  set(irc_timeout_test_writers_tls_417 300)
+endif()
 irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
 
 # Issue #500: N=4 wire coverage for the two N>0-critical paths -- the
@@ -259,6 +271,17 @@ irc_add_integration_test(test_writers_tls_417 test_writers_tls_417.c)
 # which test_close_handoff lacks) and the 670-before-handshake ordering in
 # conn_pump_locked at N=4. One flood leg (417 before close) plus one
 # plaintext-STARTTLS leg (670 before ServerHello), each one tc_expect.
+# #743: macOS-only headroom. The STARTTLS leg pays a real OpenSSL handshake
+# plus the writer-drain round-trips at N=4, and macOS Release TLS=ON runners
+# timed it out with zero failures (PR #740 docs-only branch, unreproduced on
+# rerun; PR #732 macOS Release TLS=ON red while the same commit went
+# 153/153 locally). TIMEOUT 180 is 3x the 60s suite default and sits below
+# the test's own structural worst case (several 15s T_IO_MS waits plus one
+# 120s T_CLOSE_MS EOF wait), so a wedged run still fails its first 15s
+# tc_expect loudly. Everywhere else keeps the 60s default.
+if(APPLE)
+  set(irc_timeout_test_reap_flush_starttls_n4 180)
+endif()
 irc_add_integration_test(test_reap_flush_starttls_n4 test_reap_flush_starttls_n4.c)
 
 # MT 2.3 (#242): the reaper never closes a conn under a writer's wq_lock.
