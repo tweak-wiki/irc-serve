@@ -261,6 +261,55 @@ static void test_bare_lf(void)
     rig_close(&r);
 }
 
+/* #678: a bare CR frames a line. CR-only input used to sit in rbuf until the
+ * 8K cap closed the connection with no reply in between -- the client could
+ * not tell stall from lag. CRLF still frames as one line, and a trailing CR
+ * with no next byte yet frames immediately rather than waiting (it may be a
+ * split CRLF, in which case the leftover LF frames as one benign empty line,
+ * which dispatch already tolerates for bare LFs). */
+static void test_bare_cr(void)
+{
+    rig_t r;
+    char line[64];
+    char scratch[IRC_MAX_LINE];
+    size_t len = 0;
+    message_t m;
+
+    rig_open(&r);
+    /* The issue's shape: two CR-only commands in one segment frame as two
+     * lines, and the framed bytes survive intact for the parser. */
+    put(r.pair[1], "NICK cr1\rUSER cr1 0 * :C\r", 25);
+    TF_CHECK_MSG(conn_fill(r.c) == 0, "conn_fill failed");
+    TF_CHECK_MSG(conn_has_line(r.c) == 1, "CR-only bytes report no line");
+    TF_CHECK_MSG(conn_next_line(r.c, scratch, sizeof scratch, &len) == 1,
+                 "the first CR-only line did not frame");
+    TF_CHECK_MSG(len == 9 && memcmp(scratch, "NICK cr1\r", 9) == 0,
+                 "the first CR-only line is wrong (len=%zu)", len);
+    TF_CHECK_MSG(message_parse_n(scratch, len, &m) == 0,
+                 "the framed CR-only line does not parse");
+    message_free(&m);
+    TF_CHECK_MSG(conn_next_line(r.c, scratch, sizeof scratch, &len) == 1,
+                 "the second CR-only line did not frame");
+    TF_CHECK_MSG(len == 16 && memcmp(scratch, "USER cr1 0 * :C\r", 16) == 0,
+                 "the second CR-only line is wrong (len=%zu)", len);
+    TF_CHECK_MSG(conn_next_line(r.c, scratch, sizeof scratch, &len) == 0,
+                 "a third line was invented");
+    TF_CHECK_MSG(r.c->rlen == 0, "%zu bytes were left in the read buffer",
+                 r.c->rlen);
+    /* A trailing bare CR frames on its own: no wedge while waiting for bytes
+     * that may never come. */
+    put(r.pair[1], "PING :z\r", 8);
+    TF_CHECK_MSG(drain(&r, line, &len) == 1, "a trailing bare CR wedged");
+    TF_CHECK_MSG(len == 8 && memcmp(line, "PING :z\r", 8) == 0,
+                 "the trailing-CR line is wrong (len=%zu)", len);
+    /* CRLF in one segment is still exactly one line, not CR + empty. */
+    put(r.pair[1], "PING :w\r\n", 9);
+    TF_CHECK_MSG(drain(&r, line, &len) == 1, "a CRLF line split in two");
+    TF_CHECK_MSG(len == 9 && memcmp(line, "PING :w\r\n", 9) == 0,
+                 "the CRLF line is wrong (len=%zu)", len);
+    rig_close(&r);
+}
+
 static void test_cap_boundary(void)
 {
     rig_t r;
@@ -659,6 +708,7 @@ int main(void)
     test_partial_line();
     test_two_lines_one_read();
     test_bare_lf();
+    test_bare_cr();
     test_cap_boundary();
     test_eof_and_pump();
     test_queue_compaction();
