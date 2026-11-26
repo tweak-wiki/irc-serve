@@ -830,28 +830,10 @@ static void cap_do_ls(server_t *s, conn_t *c, const message_t *m, int is_list)
 
 /* CAP REQ.
  *
- * ---------------------------------------------------------------------------
- * PARTIAL ACK, AND WHY
- * ---------------------------------------------------------------------------
- * A `CAP REQ` naming four capabilities where this node has two is answered with
- * one `CAP ACK` carrying the two granted and one `CAP NAK` carrying the two
- * refused. The specification allows exactly this, and it is the right answer here
- * for a reason that is about clients rather than about the protocol: a client
- * that asked for `sasl multi-prefix server-time chghost` against a node with the
- * first two gets SASL, which is the one it cannot do without, instead of being
- * told it may have nothing. A whole-request NAK would be an accurate answer to a
- * question nobody asked.
- *
- * It is also the RARE path rather than the common one, because CAP LS only lists
- * what this node has -- so a well-behaved client's REQ names capabilities that all
- * exist, and the ACK is complete. Partial ACK is what happens when a client asks
- * for something it was never offered, and the honest handling of that is to say
- * which half of the request this node can honour.
- *
- * The ordering rule that keeps the two answers unambiguous: every name in the
- * ACK appears in the REQ and no name appears in both, and the NAK carries
- * everything in the REQ that is not in the ACK. A client that counted ACK+NAK
- * sizes gets the request size back. */
+ * ATOMIC: either every requested capability is available and all are enabled
+ * with a single ACK, or any one is unavailable and none are enabled with a
+ * single NAK naming the full requested list.
+ */
 static void cap_do_req(server_t *s, conn_t *c, const message_t *m)
 {
     char *arg = (m->nparams > 1) ? m->params[1] : NULL;
@@ -859,7 +841,6 @@ static void cap_do_req(server_t *s, conn_t *c, const message_t *m)
     char granted[CAP_LS_MAX];
     char refused[CAP_LS_MAX];
     size_t gn = 0;
-    size_t rn = 0;
     int n;
 
     granted[0] = '\0';
@@ -880,38 +861,27 @@ static void cap_do_req(server_t *s, conn_t *c, const message_t *m)
     }
     c->cap_negotiating = 1;
 
+    /* Availability pass: enable nothing until every name checks out. `sts`
+     * is always refused per spec ("Clients MUST NOT request this
+     * capability"), checked before availability so the refusal is the same
+     * with or without a certificate. */
     for (int i = 0; i < n; i++) {
-        const int known = cap_known(names[i]);
-        const int have = cap_available(s, c, names[i]);
-
-        /* `sts` IS REFUSED EVEN THOUGH THIS NODE OFFERS IT, and that is the
-         * specification's rule rather than this file's opinion: "Clients MUST NOT
-         * request this capability with `CAP REQ`. Servers MAY reply with a `CAP
-         * NAK` message if a client requests this capability."
-         *
-         * ACKING IT WOULD BE WORSE THAN THE SPECIFICATION THREATENS. `sts` is not
-         * a feature a client switches on; it is a POLICY the server states, and a
-         * client that has "negotiated" one has been told the server believes the
-         * client's own request has a bearing on what the client may connect to.
-         * A client that cached a policy on the strength of an ACK and then had
-         * that policy dropped would have been told it was under a constraint it is
-         * not. So the NAK is the honest answer to a request that should not have
-         * been made, and the policy is delivered in CAP LS where it belongs.
-         *
-         * IT IS CHECKED BEFORE `have`, so the refusal is the SAME on a node with no
-         * certificate: a client that sent `CAP REQ :sts` to a plaintext node gets
-         * a NAK naming a capability that exists, not one that does not, and the
-         * difference between "not implemented" and "not for you" is visible. */
-        if (strcasecmp(names[i], CAP_STS) == 0) {
-            rn += cap_append_name(refused, sizeof refused, rn, names[i]);
-            continue;
+        if (strcasecmp(names[i], CAP_STS) == 0 ||
+            cap_known(names[i]) == 0 || cap_available(s, c, names[i]) == 0) {
+            char full[CAP_LS_MAX];
+            size_t off = 0;
+            full[0] = '\0';
+            for (int j = 0; j < n; j++) {
+                off += cap_append_name(full, sizeof full, off, names[j]);
+            }
+            cap_reply(s, c, "NAK", full);
+            granted[0] = '\0';
+            gn = 0;
+            memcpy(refused, full, off + 1);
+            goto logged;
         }
-        if (known == 0 || have == 0) {
-            rn += cap_append_name(refused, sizeof refused, rn, names[i]);
-            continue;
-        }
-        /* ENABLE IT. A capability is granted by writing the bit here and nowhere
-         * else, so "did this client get multi-prefix" has one answer. */
+    }
+    for (int i = 0; i < n; i++) {
         for (size_t k = 0; k < k_ncaps; k++) {
             if (strcasecmp(k_caps[k].name, names[i]) == 0) {
                 c->caps |= k_caps[k].bit;
@@ -920,19 +890,8 @@ static void cap_do_req(server_t *s, conn_t *c, const message_t *m)
         }
         gn += cap_append_name(granted, sizeof granted, gn, names[i]);
     }
-
-    /* ACK first, then NAK, and only for the non-empty halves. A client waits
-     * for one of each; sending an ACK with an empty list would be an ACK the
-     * client would have to interpret. */
-    if (gn != 0u) {
-        cap_reply(s, c, "ACK", granted);
-    }
-    if (rn != 0u) {
-        cap_reply(s, c, "NAK", refused);
-    }
-    if (gn == 0u && rn == 0u) {
-        cap_reply(s, c, "NAK", "");
-    }
+    cap_reply(s, c, "ACK", granted);
+logged:;
     /* BOTH NAMES ARE CLIENT TEXT, and both are measured. `refused` is assembled
      * from `m->params[1]` by `cap_split()`/`cap_append_name()`, so it is whatever
      * capability names the client asked for -- including ones this node has never

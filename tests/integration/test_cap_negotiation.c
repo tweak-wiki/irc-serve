@@ -23,8 +23,9 @@
  *  2. The advertised set depends on the CONFIGURATION, not only the build: a
  *     node with no --sasl-store must not list `sasl`, because a client that saw
  *     it would switch authentication on and then be refused.
- *  3. `CAP REQ` grants the subset this node has and refuses the rest, in ONE
- *     ACK and ONE NAK -- the partial ACK, which the specification allows.
+ *  3. `CAP REQ` is ATOMIC: one unavailable name NAKs the whole list with a
+ *     single NAK naming the full list and enables nothing; an all-available
+ *     list gets one ACK enabling everything.
  *  4. **REGISTRATION IS HELD UNTIL `CAP END`.** This is the property everything
  *     else exists to serve. A client that has sent NICK and USER and has NOT
  *     sent CAP END must not have received 001, and the test proves the negative
@@ -358,36 +359,22 @@ static void test_negotiation(void)
     TF_CHECK_MSG(tc_expect(&c, " CAP * LS :", T_IO_MS) == 0,
                  "CAP LS 302 was not answered; every current client offers it");
 
-    /* ---- REQ: the partial ACK ---- */
+    /* ---- REQ: atomic -- one unavailable name NAKs the whole list ---- */
     TF_CHECK_MSG(tc_send(&c, "CAP REQ :message-tags cap-notify") == 0,
                  "tc_send failed");
-    TF_CHECK_MSG(tc_expect(&c, " CAP * ACK :message-tags\r\n", T_IO_MS) == 0,
-                 "expected an ACK naming only the capability this node has");
-    TF_CHECK_MSG(tc_expect(&c, " CAP * NAK :cap-notify\r\n", T_IO_MS) == 0,
-                 "expected a NAK for the capability this node does not have");
-    /* The ACK names exactly what was asked for and the NAK names the rest, so a
-     * client that counts the two sizes gets the request size back. */
-    TF_CHECK_MSG(strstr(tc_buffer(&c), " ACK :message-tags cap-notify") == NULL,
-                 "the ACK carried a capability that was NAKed");
+    TF_CHECK_MSG(tc_expect(&c, " CAP * NAK :message-tags cap-notify\r\n", T_IO_MS) == 0,
+                 "expected a single NAK naming the full requested list");
+    /* No ACK accompanies it: anything enabled here would be a half-negotiated
+     * set the client did not ask to hold piecemeal. */
+    TF_CHECK_MSG(strstr(tc_buffer(&c), " ACK :") == NULL,
+                 "a NAKed multi-cap REQ must not also produce an ACK");
 
-    /* ---- LIST reports what THIS client negotiated ---- */
-    /* CONVERTED TO expect_line(), AND IT HAD THE SAME LATENT FRAGILITY as the
-     * worst-case case below even though it always passed.
-     *
-     * The needle carried its own CRLF, which proves the reply is TERMINATED, and that
-     * was half of what is wanted. The other half is where it STARTS, and a substring
-     * search cannot see it: `" CAP * LIST :message-tags\r\n"` would be satisfied by
-     * `:irc.test CAP alice CAP * LIST :message-tags` -- a longer line containing the
-     * text. That reply cannot be produced by this node, so the assertion was never
-     * wrong here; it was one formatter change away from being wrong, and it was
-     * checking a claim ("this is the reply") with a tool that cannot establish it
-     * ("this text arrived somewhere").
-     *
-     * It is a one-line change now, and `expect_line()` proves both halves -- see its
-     * comment for what the substring form got wrong. The claim is unchanged. */
+    /* ---- LIST reports what THIS client negotiated: nothing, after a NAK ---- */
+    /* Matched with expect_line() so both the start and the terminator are
+     * proven, not merely a substring somewhere in the buffer. */
     TF_CHECK_MSG(tc_send(&c, "CAP LIST") == 0, "tc_send failed");
-    expect_line(&c, "CAP LIST reports the negotiated set",
-                ":irc.test CAP * LIST :message-tags\r\n");
+    expect_line(&c, "CAP LIST reports nothing after a NAKed REQ",
+                ":irc.test CAP * LIST :\r\n");
 
     /* ---- an UNKNOWN SUBCOMMAND is answered, not ignored ---- */
     TF_CHECK_MSG(tc_send(&c, "CAP NONSENSE") == 0, "tc_send failed");
@@ -1092,12 +1079,11 @@ static int listed_n_same_order(char listed[][CAP_NAME_MAX + 1], size_t ln,
  * the one that survives the table growing: with EVERY capability this node offers
  * enabled, the reply names all of them, in the table's order, and nothing is cut.
  *
- * WHY THE WHOLE TABLE AND NOT ONE NAME. The existing case in part 1 enables
- * `message-tags` and asserts `CAP * LIST :message-tags` -- which is a one-name
- * reply and would pass against an accumulator that wrote one name correctly and
- * the hundredth one wherever it liked. A single-name reply cannot reach a
- * separator write at all, let alone the NUL, so the accumulator's whole worst case
- * is invisible to it.
+ * WHY THE WHOLE TABLE AND NOT ONE NAME. The case in part 1 NAKs its REQ and
+ * asserts an empty LIST -- which is a zero-name reply and would pass against
+ * an accumulator that wrote one name correctly and the hundredth one wherever
+ * it liked. A short reply cannot reach a separator write at all, let alone the
+ * NUL, so the accumulator's whole worst case is invisible to it.
  *
  * AND WHY TWO REQs. `cap_split()` refuses more than CAP_MAX_REQ (16) names per
  * request, and this node offers fifteen on a default build, so one REQ would do
