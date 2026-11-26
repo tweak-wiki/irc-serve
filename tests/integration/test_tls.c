@@ -778,10 +778,25 @@ static void case_caps_vary_by_connection(const char *cert, const char *key,
         if (expect_duration != 0ul) {
             char want[64];
 
+            /* Issue #728: the bare `CAP LS` above is 301, so `sts` arrives
+             * WITHOUT its value; the value is a 302 feature and rides only
+             * on a 302 reply. */
+            check(strstr(tc_buffer(&plain), " sts") != NULL,
+                  "the bare (301) CAP LS still names `sts`: withholding the "
+                  "name would hide a policy from a client that cannot parse "
+                  "values",
+                  tc_buffer(&plain));
+            check(strstr(tc_buffer(&plain), "sts=") == NULL,
+                  "the bare (301) CAP LS carries no `=value`: values are a "
+                  "302 feature",
+                  tc_buffer(&plain));
+            check(tc_send(&plain, "CAP LS 302") == 0,
+                  "ask again with CAP LS 302", NULL);
             (void)snprintf(want, sizeof want, "sts=duration=%lu", expect_duration);
-            check(strstr(tc_buffer(&plain), want) != NULL,
-                  "and `sts` carries the policy the operator chose, because a "
-                  "plaintext connection is the one a persistence policy is FOR",
+            check(tc_expect(&plain, want, 10000) == 0,
+                  "and `CAP LS 302` carries the policy the operator chose, "
+                  "because a plaintext connection is the one a persistence "
+                  "policy is FOR",
                   tc_buffer(&plain));
         } else {
             /* THE DURATION RULE, and it is asserted on a node with a secure port so
@@ -864,6 +879,174 @@ static void case_caps_vary_by_connection(const char *cert, const char *key,
         }
     }
 
+    (void)nf_stop(&n);
+    nf_free(&n);
+}
+
+/* ===========================================================================
+ * CASE GROUP 3b: `CAP LS 302` answers in 302 shape; 301 does not (#728)
+ * ===========================================================================
+ *
+ * The 302 specification is explicit about both directions: a client that sends
+ * `CAP LS 302` is presumed to support values and NEW/DEL for the life of the
+ * connection, and a server MUST NOT send 302 features to a client that did
+ * not claim them. So the two replies MUST differ exactly where the value is:
+ * `CAP LS 302` carries `sts=duration=...,port=...` and a bare `CAP LS` carries
+ * a bare `sts`. A server that answered both identically -- as this node did
+ * before the fix -- silently degrades every 302 client, which can never use a
+ * value-carrying capability it was never told the value of.
+ *
+ * The version is ALSO sticky: after `CAP LS 302`, a bare `CAP LS` is answered
+ * in 301 shape (the reply follows the request) while the stored version stays
+ * 302. The stickiness is asserted on the node's own observable log rather
+ * than the wire, because no 302-only server line exists yet to carry it.
+ * Versions above 302 clamp to 302; a non-numeric version is a 301 request. */
+/* Each exchange below waits with `tc_read_line_from()` from the end of what
+ * this connection has already received, which is what makes every assertion
+ * below about the reply that exchange solicited rather than an earlier one.
+ * Waiting on the node's log instead would be a race in the other direction:
+ * the log line is printed while the reply is still queued, so "logged" does
+ * not mean "arrived". */
+static void case_cap_ls_302_values(const char *cert, const char *key)
+{
+    nf_node_t n;
+    test_client_t c;
+    char a0[] = "irc-serve";
+    char a1[] = "0";
+    char a2[] = "--name";
+    char a3[] = "irc.tls";
+    char *argv[13];
+    int tls_port;
+    const char *p;
+
+    argv[0] = a0; argv[1] = a1; argv[2] = a2; argv[3] = a3;
+    argv[4] = "--tls-cert"; argv[5] = (char *)(uintptr_t)(const void *)cert;
+    argv[6] = "--tls-key"; argv[7] = (char *)(uintptr_t)(const void *)key;
+    argv[8] = "--tls-port"; argv[9] = "0";
+    argv[10] = "--tls-sts-duration"; argv[11] = "15552000";
+    argv[12] = NULL;
+    if (nf_spawn_binary_argv(&n, argv) != 0) {
+        check(0, "spawn a node with a certificate, a secure port and a policy",
+              NULL);
+        return;
+    }
+    p = strstr(n.out, "tls_port=");
+    tls_port = (p != NULL) ? atoi(p + 9) : -1;
+    check(tls_port > 0,
+          "the 302 case reaches a node with its own implicit-TLS port",
+          n.out);
+    if (tc_connect(&c, n.port) != 0) {
+        check(0, "connect to the plaintext port", NULL);
+        (void)nf_stop(&n);
+        nf_free(&n);
+        return;
+    }
+    /* 1. A bare `CAP LS` is 301: the NAME is there, the VALUE is not. */
+    check(tc_send(&c, "CAP LS") == 0, "send a bare CAP LS", NULL);
+    {
+        char line[1024];
+        size_t len = 0u;
+        size_t mark = strlen(tc_buffer(&c));
+
+        check(tc_read_line_from(&c, mark, ":irc.tls CAP * LS :", line,
+                                sizeof line, &len, 10000) == 0,
+              "the node answers a bare CAP LS with a complete line",
+              tc_buffer(&c));
+        check(strstr(line, " sts") != NULL,
+              "the 301 reply still names `sts`: 302-negotiation must not hide "
+              "a capability from a 301 client",
+              line);
+        check(strstr(line, "sts=") == NULL,
+              "the 301 reply carries no `=value`: values are a 302 feature "
+              "and the specification forbids sending 302 features to a 301 "
+              "client",
+              line);
+        /* 2. `CAP LS 302` on the SAME connection: the value appears. */
+        check(tc_send(&c, "CAP LS 302") == 0, "send CAP LS 302", NULL);
+        mark = strlen(tc_buffer(&c));
+        {
+            char line2[1024];
+            char want[64];
+            size_t len2 = 0u;
+
+            check(tc_read_line_from(&c, mark, ":irc.tls CAP * LS :", line2,
+                                    sizeof line2, &len2, 10000) == 0,
+                  "CAP LS 302 is answered with a complete line",
+                  tc_buffer(&c));
+            check(strstr(line2, "sts=duration=15552000") != NULL,
+                  "CAP LS 302 carries the `sts` value the 301 reply withheld",
+                  line2);
+            (void)snprintf(want, sizeof want, "port=%d", tls_port);
+            check(strstr(line2, want) != NULL,
+                  "the 302 reply's `port` names the secure port, so the value "
+                  "is a policy rather than a constant",
+                  line2);
+            /* THE REGRESSION ITSELF: the two replies on this connection
+             * differ, compared as whole lines rather than by substring, so a
+             * value that leaked into both (or into neither) fails. */
+            check(len != len2 || memcmp(line, line2, len) != 0,
+                  "the 301 and 302 replies DIFFER: byte-identical answers are "
+                  "the defect",
+                  tc_buffer(&c));
+        }
+        /* 3. `CAP LS 301` after 302: answered in 301 shape (the reply follows
+         * the request). */
+        check(tc_send(&c, "CAP LS 301") == 0, "send CAP LS 301 after 302",
+              NULL);
+        mark = strlen(tc_buffer(&c));
+        {
+            char line3[1024];
+            size_t len3 = 0u;
+
+            check(tc_read_line_from(&c, mark, ":irc.tls CAP * LS :", line3,
+                                    sizeof line3, &len3, 10000) == 0,
+                  "CAP LS 301 is answered with a complete line",
+                  tc_buffer(&c));
+            check(strstr(line3, "sts=") == NULL,
+                  "the 301 reply after a 302 one carries no value",
+                  line3);
+        }
+        /* 4. `CAP LS 307` clamps to 302: the value is back. */
+        check(tc_send(&c, "CAP LS 307") == 0, "send CAP LS 307", NULL);
+        mark = strlen(tc_buffer(&c));
+        {
+            char line4[1024];
+            size_t len4 = 0u;
+
+            check(tc_read_line_from(&c, mark, ":irc.tls CAP * LS :", line4,
+                                    sizeof line4, &len4, 10000) == 0,
+                  "CAP LS 307 is answered with a complete line",
+                  tc_buffer(&c));
+            check(strstr(line4, "sts=duration=15552000") != NULL,
+                  "a version above 302 enables the 302 features rather than "
+                  "refusing the client",
+                  line4);
+        }
+        /* 5. A non-numeric version is a 301 request, not a 302 one. */
+        check(tc_send(&c, "CAP LS abc") == 0, "send CAP LS abc", NULL);
+        mark = strlen(tc_buffer(&c));
+        {
+            char line5[1024];
+            size_t len5 = 0u;
+
+            check(tc_read_line_from(&c, mark, ":irc.tls CAP * LS :", line5,
+                                    sizeof line5, &len5, 10000) == 0,
+                  "CAP LS abc is answered with a complete line",
+                  tc_buffer(&c));
+            check(strstr(line5, "sts=") == NULL,
+                  "a garbage version gets the 301 shape",
+                  line5);
+        }
+    }
+    /* 6. STICKY: the bare LS in step 3 was answered 301-shaped, but the stored
+     * version stayed 302. The wire wait above already proves the reply
+     * arrived, and the log line is printed while handling it, so this is not
+     * a race in either direction. */
+    check(nf_expect(&n, "sub=LS 302=0 stored=302", 5000) == 0,
+          "a bare CAP LS after `CAP LS 302` is answered 301-shaped while the "
+          "stored version stays 302",
+          NULL);
+    tc_close(&c);
     (void)nf_stop(&n);
     nf_free(&n);
 }
@@ -1511,10 +1694,23 @@ int main(void)
                 check(tc_send(&plain, "CAP LS") == 0, "send CAP LS", NULL);
                 check(tc_expect(&plain, " LS :", 10000) == 0,
                       "the plaintext listener answers CAP LS", tc_buffer(&plain));
-                check(strstr(tc_buffer(&plain), "sts=duration=15552000") != NULL,
-                      "CAP LS carries the `sts` VALUE -- `sts=duration=15552000` "
-                      "-- because the specification requires the value in the LS "
-                      "and forbids a client requesting it",
+                /* Issue #728: a bare `CAP LS` is 301 -- the NAME is advertised
+                 * and the VALUE is withheld, because values are a 302 feature
+                 * the specification forbids sending to a 301 client. */
+                check(strstr(tc_buffer(&plain), " sts") != NULL,
+                      "the bare (301) CAP LS names `sts`, so the policy is "
+                      "visible even to a client that cannot parse values",
+                      tc_buffer(&plain));
+                check(strstr(tc_buffer(&plain), "sts=") == NULL,
+                      "the bare (301) CAP LS carries no `=value`",
+                      tc_buffer(&plain));
+                check(tc_send(&plain, "CAP LS 302") == 0, "send CAP LS 302",
+                      NULL);
+                check(tc_expect(&plain, "sts=duration=15552000", 10000) == 0,
+                      "CAP LS 302 carries the `sts` VALUE -- "
+                      "`sts=duration=15552000` -- because the specification "
+                      "requires the value in a 302 LS and forbids a client "
+                      "requesting it",
                       tc_buffer(&plain));
                 check(strstr(tc_buffer(&plain), "port=6697") == NULL,
                       "the `port` key is not a constant 6697: it names the port "
@@ -1601,13 +1797,15 @@ int main(void)
                   "the node reports starting the handshake, so the handshake is "
                   "visible to an operator and not just to the client", NULL);
             /* THE CAPABILITY LIST IS PER CONNECTION, and it is asserted here on THIS
-             * node -- the one whose plaintext `CAP LS` above carried `tls` and the
-             * `sts` value -- so all three connections are the same node's. The
-             * duration half is a second node with the same certificate and the same
-             * secure port and NO policy, which is the only difference that can make
-             * `sts` disappear, and it is a separate spawn because the flag is read
+             * node -- the one whose plaintext `CAP LS 302` above carried `tls`
+             * and the `sts` value while the bare `CAP LS` carried bare names --
+             * so all three connections are the same node's. The duration half is
+             * a second node with the same certificate and the same secure port
+             * and NO policy, which is the only difference that can make `sts`
+             * disappear, and it is a separate spawn because the flag is read
              * once at startup. */
             case_caps_vary_by_connection(g_cert, g_key, "15552000", 15552000ul);
+            case_cap_ls_302_values(g_cert, g_key);
             case_tls_multi_record_burst(g_cert, g_key);
             case_tls_oversize_unterminated(g_cert, g_key);
             case_caps_vary_by_connection(g_cert, g_key, NULL, 0ul);

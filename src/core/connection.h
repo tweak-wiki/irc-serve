@@ -929,6 +929,11 @@ typedef struct conn {
     uint64_t    last_active_ms;  /* last byte read, monotonic ms; 317's <idle> */
     unsigned    caps;              /* negotiated capabilities; core/cap.h bits */
     int         cap_negotiating;   /* CAP LS/REQ in flight; CAP END clears it */
+    /* Highest CAP LS version this client has claimed (301 default, 302 if it
+     * ever sent `CAP LS 302`). Sticky per the 302 spec: a later bare `CAP LS`
+     * is answered in 301 shape but this keeps the higher version, which is
+     * what gates anything 302-only the server may send (NEW/DEL, values). */
+    int         cap_version;
     int         sasl;              /* sasl_state_t; FAILED is terminal */
     int         sasl_failures;      /* bad-credential attempts on this connection */
     /* Phase 10.1: the account identity, which is what `c->sasl` was missing.

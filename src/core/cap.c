@@ -12,6 +12,7 @@
 #include "core/cap.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -503,6 +504,7 @@ void cap_init(conn_t *c)
     }
     c->caps = 0u;
     c->cap_negotiating = 0;
+    c->cap_version = 0;
 }
 
 int cap_negotiating(const conn_t *c)
@@ -744,21 +746,56 @@ static int cap_split(char *arg, char out[][CAP_NAME_MAX + 1], int max)
 
 /* CAP LS and CAP LIST.
  *
- * `CAP LS 302` asks for the continuation mechanism, which exists because a server
- * may have more capabilities than fit in one line. This node has three, so the
- * answer always fits and there is nothing to continue: the 302 parameter is
- * ACCEPTED and IGNORED rather than refused, because refusing it would make a
- * client that offers it -- and every current client offers it -- fail
- * negotiation against a node whose only reason for not continuing is that it has
- * nothing to continue. The [observable] line says which form arrived, so a reader
- * is not left guessing whether 302 was honoured.
+ * `CAP LS 302` switches this reply -- and only this reply -- to 302 semantics:
+ * capability values are included (`sts=duration=...,port=...`), per the 302
+ * rule that values ride on LS (and NEW) and nowhere else. A bare `CAP LS`, a
+ * `301`, or a non-numeric version gets the 301 shape: bare names, because the
+ * spec forbids sending 302 features to a client that did not claim 302.
+ *
+ * THE VERSION IS STICKY, which is the part that survives this function: the
+ * highest version claimed is kept in `c->cap_version`, so a later bare `CAP LS`
+ * is answered in 301 shape without forgetting the client speaks 302. That is
+ * what gates anything 302-only the server may yet send (NEW/DEL; this node has
+ * no mid-session cap changes, so none are emitted -- but a 301 client must
+ * never receive one). A version above what this node implements (302) is
+ * clamped to 302 for the reply, per the downgrade rule.
  *
  * `CAP LIST` answers with what THIS CLIENT has enabled, which is a different
  * question from LS and conflating them is how a client ends up believing it
  * negotiated something it did not. */
+/* Strip `=value` suffixes from a space-separated capability list, in place. 301
+ * clients predate values and must not receive 302 features; the values live
+ * only in the 302 reply, so the 301 one is derived from it rather than
+ * rendered twice. */
+static void cap_strip_values(char *list)
+{
+    char *w = list;
+    int in_value = 0;
+
+    if (list == NULL) {
+        return;
+    }
+    /* `in_value` is dropped at each space, so a `=` inside a later name still
+     * starts a value rather than being swallowed by an earlier one. */
+    for (const char *r = list; *r != '\0'; r++) {
+        if (*r == ' ' && in_value != 0) {
+            in_value = 0;
+        } else if (*r == '=' && in_value == 0) {
+            in_value = 1;
+            continue;
+        } else if (in_value != 0) {
+            continue;
+        }
+        *w++ = *r;
+    }
+    *w = '\0';
+}
+
 static void cap_do_ls(server_t *s, conn_t *c, const message_t *m, int is_list)
 {
     char list[CAP_LS_MAX];
+    long reqver = 301;
+    int is_302;
 
     /* LS starts a negotiation: registration is held until CAP END. LIST does
      * NOT, because a client asking what it has already negotiated is mid-session
@@ -766,6 +803,27 @@ static void cap_do_ls(server_t *s, conn_t *c, const message_t *m, int is_list)
     if (!is_list) {
         c->cap_negotiating = 1;
     }
+    /* The version is `m->params[1]` on LS only: LIST takes no version, and
+     * reading one there would let `CAP LIST 302` rewrite what LS negotiated. */
+    if (!is_list && m->nparams > 1 && m->params[1] != NULL &&
+        m->params[1][0] != '\0') {
+        char *end = NULL;
+
+        reqver = strtol(m->params[1], &end, 10);
+        if (end == m->params[1] || *end != '\0' || reqver < 0) {
+            reqver = 301;
+        } else if (reqver > 302) {
+            /* Clamped, not stored raw: this node implements 302, and the reply
+             * enables the features below the requested version. */
+            reqver = 302;
+        }
+        if (reqver > c->cap_version) {
+            c->cap_version = (int)reqver;
+        }
+    }
+    /* Answered in the REQUEST's shape (a bare LS after an LS 302 is 301-shaped),
+     * while `c->cap_version` remembers the highest claim. */
+    is_302 = (!is_list && reqver >= 302) ? 1 : 0;
     if (is_list) {
         /* Only what this client actually enabled. A server that answered LIST
          * with its whole table would be telling the client it may use things it
@@ -822,10 +880,15 @@ static void cap_do_ls(server_t *s, conn_t *c, const message_t *m, int is_list)
         }
     } else {
         (void)cap_available_list(s, c, list, sizeof list);
+        /* 301 MUST NOT receive 302 features, and values are one: the same
+         * list is rendered with values and then reduced to bare names. */
+        if (is_302 == 0) {
+            cap_strip_values(list);
+        }
     }
     cap_reply(s, c, is_list ? "LIST" : "LS", list);
-    printf("[observable] cap: fd=%d sub=%s 302=%d caps=%s\n", c->fd,
-           is_list ? "LIST" : "LS", (m->nparams > 1) ? 1 : 0, list);
+    printf("[observable] cap: fd=%d sub=%s 302=%d stored=%d caps=%s\n", c->fd,
+           is_list ? "LIST" : "LS", is_302, c->cap_version, list);
 }
 
 /* CAP REQ.
