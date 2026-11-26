@@ -179,6 +179,12 @@ void deliver_state_change(server_t *s, conn_t *c, chan_t *ch,
  * this header since #543 TU-50 (core/chan_verbs_topic.c is its first outside
  * caller); still used by handle_join(), so it stays defined in chan_verbs.c. */
 void send_topic(server_t *s, conn_t *dst, const chan_t *ch);
+/* The 353 roster and its 366 terminator (both defined in core/chan_verbs.c).
+ * Shared through this header since #543 TU-51 (core/chan_verbs_names.c is
+ * their first outside caller); still used by handle_join(), so they stay
+ * defined in chan_verbs.c. */
+void send_names_list(server_t *s, conn_t *dst, const chan_t *ch);
+void send_end_of_names(server_t *s, conn_t *dst, const char *channel);
 
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
  * validate arity, resolve the channel, answer the local preconditions (442/482/
