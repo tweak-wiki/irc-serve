@@ -168,6 +168,13 @@ typedef enum {
  * caller); resolve_joined() stays file-static for the remaining handlers. */
 chan_verdict_t authority_ok(server_t *s, conn_t *c, const chan_t *ch,
                             const char *verb, int stateful);
+/* The one-shape state-change emission (defined in core/chan_verbs.c). Shared
+ * through this header since #543 TU-49 (core/chan_verbs_part.c is its first
+ * outside caller); the two-shape deliver_state_change_forms() stays
+ * file-static for handle_join(). */
+void deliver_state_change(server_t *s, conn_t *c, chan_t *ch,
+                                 const char *verb, const char *prefix,
+                                 const char *const *params, int nparams);
 
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
  * validate arity, resolve the channel, answer the local preconditions (442/482/
