@@ -8,6 +8,7 @@
 
 #include "core/account.h"
 #include "core/cap.h"
+#include "core/commands_state.h"
 #include "core/reply.h"
 #include "core/secret_util.h"
 #include "core/transport.h"
@@ -141,6 +142,17 @@ void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
     char passwd[SASL_MAX_PASSWORD + 1];
     long decoded;
     const char *params[2];
+    /* sasl-3.2 S3.2: once registered, no new SASL exchange. Refused with 904
+     * and ignored: no challenge, no state change (not even the abort below),
+     * so a second credential can never re-establish the account mid-session. */
+    if (commands_registered(c)) {
+        (void)reply_refused(s, c, "AUTHENTICATE", "ERR_AUTHENTICATIONFAILED", ERR_SASLFAIL,
+                            NULL, 0, "SASL authentication failed: already registered");
+        printf("[observable] sasl: fd=%d outcome=REJECTED reason=ALREADY_REGISTERED\n",
+               c->fd);
+        auth_wipe_credential(payload, authzid, authcid, passwd);
+        return;
+    }
 
     /* BEFORE EVERYTHING, INCLUDING THE ABORT. See conn_t::credential_seen: what
      * this records is that a credential was OFFERED, and an offer that was then
@@ -506,10 +518,9 @@ void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                c->fd, shown, strlen(authcid), conn_text_bad_count(authcid),
                account_logged_in(c));
     }
-    /* Registration is not forced here. A client that sent NICK and USER before
-     * its AUTHENTICATE has already satisfied the state machine, and if it was
-     * held for CAP it is still held -- so the gate is re-evaluated rather than
-     * bypassed. */
+    /* Registration is not forced here. A client held for CAP is still held,
+     * so the gate is re-evaluated rather than bypassed. (Post-registration
+     * AUTHENTICATE never reaches this far: the guard above refuses it.) */
     /* 903 is SASL's own success verdict, and it goes out unconditionally: a
      * client that authenticates before registering watches for exactly this. */
     (void)reply(s, c, RPL_SASLSUCCESS, NULL, 0, "SASL authentication successful");

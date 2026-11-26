@@ -701,6 +701,45 @@ static void test_sasl_abort(char *store_path)
     tc_close(&c);
 }
 
+/* #722 (sasl-3.2 S3.2): once registered, AUTHENTICATE starts no exchange --
+ * 904, no `AUTHENTICATE +` challenge, and the session is untouched. */
+static void test_sasl_after_registration(char *store_path)
+{
+    nf_node_t node;
+    test_client_t c;
+    char portbuf[16];
+    char *argv[6];
+
+    tc_init(&c);
+    (void)snprintf(portbuf, sizeof portbuf, "0");
+    argv[0] = (char *)"irc-serve";
+    argv[1] = portbuf;
+    argv[2] = (char *)"--sasl-store";
+    argv[3] = store_path;
+    argv[4] = NULL;
+    argv[5] = NULL;
+    TF_CHECK(nf_spawn_binary_argv(&node, argv) == 0);
+    TF_CHECK_MSG(tc_connect(&c, node.port) == 0, "tc_connect failed");
+
+    TF_CHECK_MSG(tc_send(&c, "CAP END") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "NICK alice") == 0, "tc_send failed");
+    TF_CHECK_MSG(tc_send(&c, "USER a 0 * :Alice") == 0, "tc_send failed");
+    expect_line(&c, "001 before the late AUTHENTICATE",
+                ":irc.test 001 alice :Welcome to the irc-serve network "
+                "alice!a@");
+
+    TF_CHECK_MSG(tc_send(&c, "AUTHENTICATE PLAIN") == 0, "tc_send failed");
+    expect_line(&c, "904 for AUTHENTICATE after registration",
+                ":irc.test 904 alice :SASL authentication failed: already "
+                "registered\r\n");
+    expect_absent(&c, "no challenge after registration", "AUTHENTICATE * +",
+                  T_ABSENT_MS);
+
+    nf_kill(&node);
+    nf_free(&node);
+    tc_close(&c);
+}
+
 static void test_sasl_too_long(char *store_path)
 {
     nf_node_t node;
@@ -1544,6 +1583,7 @@ int main(void)
     test_bad_credentials(good_store, "an unknown authcid", "mallory",
                          "correct horse");
     test_sasl_abort(good_store);
+    test_sasl_after_registration(good_store);
     test_sasl_too_long(good_store);
     test_sasl_bad_payload(good_store);
     test_no_credential_in_the_log(good_store);
