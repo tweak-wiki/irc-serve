@@ -1125,6 +1125,19 @@ typedef struct conn {
 Partial writes matter: nonblocking `send()` may write fewer bytes than
 offered, so `woff` is retained and drained across poll iterations.
 
+**Line terminators: CRLF frames as one line; a bare LF or a bare CR each
+frame a line too (#678).** CRLF is the RFC 1459 §2.3 wire form. Bare-LF
+tolerance is the documented convention, and bare CR is accepted for the same
+reason the parser -- not the framing layer -- owns the line grammar:
+refusing it here would duplicate the grammar in two places, and the two
+would drift. Before #678 a bare CR never framed, so CR-only input sat in
+`rbuf` until the 8192-byte cap (`CONN_RBUF_MAX`) closed the connection with
+no reply in between -- the client could not tell stall from lag. Now every
+CR that does not start a CRLF pair terminates a line (a trailing CR frames
+immediately rather than waiting for a possibly-never LF), and each framed
+line is charged one flood token by the poll loop, so CR-stuffing spends the
+rate budget instead of burning the frame budget silently.
+
 ### 3.4 Event loop
 
 **Single-threaded `poll()`.** Not `epoll`/`kqueue`: portable across Linux and

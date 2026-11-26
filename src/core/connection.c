@@ -189,32 +189,62 @@ int conn_fill(conn_t *c)
     }
 }
 
+/* Length of the first framed line in [p, p+n), or 0 when no terminator is in
+ * hand. A line ends at LF, or at a CR that does not start a CRLF pair. A CR
+ * immediately followed by LF belongs to the CRLF pair, so the pair frames as
+ * one line exactly as before; any other CR (including a trailing CR with no
+ * next byte yet, which may be a split CRLF or a bare CR) frames there.
+ * Waiting on a trailing CR would re-introduce the #678 wedge for a client
+ * that sends one CR-terminated line and blocks for the reply; the cost is
+ * one benign empty line if a CRLF was split across segments, which the
+ * dispatch path already tolerates for bare LFs. */
+static size_t frame_len(const char *p, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        if (p[i] == '\n') {
+            return i + 1u;
+        }
+        if (p[i] == '\r') {
+            if (i + 1u < n && p[i + 1u] == '\n') {
+                return i + 2u;
+            }
+            return i + 1u;
+        }
+    }
+    return 0;
+}
+
 int conn_has_line(const conn_t *c)
 {
     if (c == NULL || c->rbuf == NULL || c->rlen == 0u) {
         return 0;
     }
-    return (memchr(c->rbuf, '\n', c->rlen) != NULL) ? 1 : 0;
+    return (frame_len(c->rbuf, c->rlen) != 0u) ? 1 : 0;
 }
 
 int conn_next_line(conn_t *c, char *dst, size_t dstcap, size_t *len)
 {
-    const char *nl;
-    size_t used;
+    size_t used = 0;
     size_t rest;
 
     if (dst == NULL || len == NULL || dstcap == 0) {
         return -1;
     }
-    nl = (const char *)memchr(c->rbuf, '\n', c->rlen);
-    if (nl == NULL) {
+    /* #678: a bare CR frames a line. A CR followed by LF still frames as one
+     * CRLF line; any other CR (including a trailing one) terminates there,
+     * so CR-only input is answered line by line instead of wedging the
+     * connection until the 8K cap. Every framed line is charged to the flood
+     * limiter by the caller, so CR-stuffing spends rate tokens per line. */
+    used = frame_len(c->rbuf, c->rlen);
+    if (used == 0u) {
         /* No terminator in hand. Once the buffer is at the line cap the line
          * can never become legal, so this is reported now rather than after
          * the peer stops sending. */
         return (c->rlen >= CONN_RBUF_MAX) ? -1 : 0;
     }
 
-    used = (size_t)(nl - c->rbuf) + 1u; /* the LF, and the CR before it */
     rest = c->rlen - used;
     if (used > dstcap) {
         return -1;
