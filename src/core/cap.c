@@ -633,6 +633,110 @@ static void cap_reply(server_t *s, conn_t *c, const char *sub, const char *args)
 }
 
 /* --------------------------------------------------------------------------
+ * Multiline `CAP LS` (cap-3.2 S3.1.2)
+ * ------------------------------------------------------------------------ */
+/* A reply line longer than this is split, `*`-continued, rather than sent
+ * whole: 512 is the line limit every client enforces, whatever the relay
+ * path behind send_line_colon() allows. */
+#define CAP_LS_WIRE_MAX 512u
+
+/* Length of the next chunk of `list` starting at `off`, holding whole
+ * space-separated tokens and at most `budget` bytes. Returns 0 when `off`
+ * is past the end. A single token longer than `budget` is returned whole --
+ * a capability name cannot be split, and names are bounded by CAP_NAME_MAX
+ * while the caller passes a budget in the hundreds, so this arm is a
+ * backstop rather than a path. */
+size_t cap_ls_chunk(const char *list, size_t off, size_t budget)
+{
+    size_t len = (list != NULL) ? strlen(list) : 0u;
+    size_t end;
+    size_t last_sp = (size_t)-1;
+
+    if (list == NULL || off >= len || budget == 0u) {
+        return 0u;
+    }
+    /* `end` is exclusive; `last_sp` is the last space at or before it, which
+     * is where a multi-token chunk is cut so no name is split. */
+    end = off + budget;
+    if (end >= len) {
+        return len - off;
+    }
+    for (size_t i = off; i <= end; i++) {
+        if (list[i] == ' ') {
+            last_sp = i;
+        }
+    }
+    if (last_sp == (size_t)-1 || last_sp == off) {
+        /* No space in range, or the chunk would be empty: the one token
+         * crosses the budget, so take it whole (up to the next space). */
+        end = off;
+        while (list[end] != '\0' && list[end] != ' ') {
+            end++;
+        }
+        return end - off;
+    }
+    return last_sp - off;
+}
+
+/* Send `list` as `CAP <target> LS` replies, `*`-continued while it does not
+ * fit one 512-byte line. A list that fits goes out as the single line it
+ * always was (`CAP * LS :<list>`); anything longer goes as
+ * `CAP * LS * :<chunk>` lines with a final `CAP * LS :<chunk>`, split on
+ * token boundaries so every line carries whole capability names. */
+static void cap_send_ls(server_t *s, conn_t *c, const char *list)
+{
+    const char *target = cap_target(c);
+    size_t overhead;
+    size_t budget;
+    size_t len = (list != NULL) ? strlen(list) : 0u;
+    size_t off = 0u;
+
+    if (len == 0u) {
+        cap_reply(s, c, "LS", "");
+        return;
+    }
+    /* `:` + server + ` CAP ` + target + ` LS ` + `:` + CRLF, plus `* ` on
+     * every line but the last. */
+    overhead = 1u + strlen(s->name) + 5u + strlen(target) + 4u + 1u + 2u;
+    if (overhead + 2u >= CAP_LS_WIRE_MAX) {
+        budget = 64u; /* absurd server/target names; still whole tokens */
+    } else {
+        budget = CAP_LS_WIRE_MAX - overhead - 2u;
+    }
+    if (len <= budget) {
+        cap_reply(s, c, "LS", list);
+        return;
+    }
+    while (off < len) {
+        char chunk[CAP_LS_MAX];
+        size_t n = cap_ls_chunk(list, off, budget);
+        const char *params[4];
+        int is_last;
+
+        if (n == 0u) {
+            break;
+        }
+        memcpy(chunk, list + off, n);
+        chunk[n] = '\0';
+        off += n;
+        if (list[off] == ' ') {
+            off++; /* the space the chunk was cut at belongs to neither */
+        }
+        is_last = (off >= len) ? 1 : 0;
+        params[0] = target;
+        params[1] = "LS";
+        if (is_last) {
+            params[2] = chunk;
+            (void)send_line_colon(s, c, NULL, "CAP", params, 3);
+        } else {
+            params[2] = "*";
+            params[3] = chunk;
+            (void)send_line_colon(s, c, NULL, "CAP", params, 4);
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Capability lists: splitting a request, and rendering a subset
  * ------------------------------------------------------------------------ */
 
@@ -886,9 +990,17 @@ static void cap_do_ls(server_t *s, conn_t *c, const message_t *m, int is_list)
             cap_strip_values(list);
         }
     }
-    cap_reply(s, c, is_list ? "LIST" : "LS", list);
-    printf("[observable] cap: fd=%d sub=%s 302=%d stored=%d caps=%s\n", c->fd,
-           is_list ? "LIST" : "LS", is_302, c->cap_version, list);
+    if (is_list) {
+        cap_reply(s, c, "LIST", list);
+        printf("[observable] cap: fd=%d sub=LIST 302=%d stored=%d caps=%s\n", c->fd,
+               is_302, c->cap_version, list);
+    } else {
+        /* Multiline when the list outgrows one 512-byte line (cap-3.2
+         * S3.1.2); a short list goes out as the single line it always was. */
+        cap_send_ls(s, c, list);
+        printf("[observable] cap: fd=%d sub=LS 302=%d stored=%d caps=%s\n", c->fd,
+               is_302, c->cap_version, list);
+    }
 }
 
 /* CAP REQ.

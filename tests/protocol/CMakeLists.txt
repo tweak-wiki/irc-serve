@@ -4,6 +4,7 @@ add_executable(test_message_format test_message_format.c)
 add_executable(test_valid_nick test_valid_nick.c)
 add_executable(test_ascii_fold test_ascii_fold.c)
 add_executable(test_cap_bounds test_cap_bounds.c)
+add_executable(test_cap_ls_multiline test_cap_ls_multiline.c)
 add_executable(test_strip_parity test_strip_parity.c)
 
 target_link_libraries(test_message_parse PRIVATE irc_core)
@@ -16,6 +17,7 @@ target_link_libraries(test_strip_parity PRIVATE irc_core)
 # function, with its own failure reporting in the assert(3) style the rest of this
 # directory uses. See the file header for why that is the shape here.
 target_link_libraries(test_cap_bounds PRIVATE irc_core)
+target_link_libraries(test_cap_ls_multiline PRIVATE irc_core)
 
 add_test(NAME MessageParse COMMAND test_message_parse)
 add_test(NAME MessageFormat COMMAND test_message_format)
@@ -23,14 +25,14 @@ add_test(NAME ValidNick COMMAND test_valid_nick)
 add_test(NAME AsciiFold COMMAND test_ascii_fold)
 add_test(NAME CapBounds COMMAND test_cap_bounds)
 add_test(NAME StripParity COMMAND test_strip_parity)
-
+add_test(NAME CapLsMultiline COMMAND test_cap_ls_multiline)
 set_tests_properties(MessageParse PROPERTIES LABELS Protocol)
 set_tests_properties(MessageFormat PROPERTIES LABELS Protocol)
 set_tests_properties(ValidNick PROPERTIES LABELS Protocol)
 set_tests_properties(AsciiFold PROPERTIES LABELS Protocol)
 set_tests_properties(CapBounds PROPERTIES LABELS Protocol)
 set_tests_properties(StripParity PROPERTIES LABELS Protocol)
-
+set_tests_properties(CapLsMultiline PROPERTIES LABELS Protocol)
 # test_multi_prefix MOVED to tests/integration/ for the reason
 # test_cap_negotiation did: a `353` roster is produced by a server over a socket,
 # and a test that cannot reach one cannot tell "one prefix per member" from "this
