@@ -46,7 +46,7 @@ class IrcServe < Formula
   # header out of. packaging/arch/PKGBUILD derives its pkgver with sed because
   # makepkg does run inside the unpacked source; this cannot. Hence the two checks
   # above instead of one sed.
-  version "1.0.0"
+  version "1.0.1"
 
   # The repository's LICENSE is the AGPL v3 text verbatim and NOTICE says "either
   # version 3 of the License, or (at your option) any later version", so the
