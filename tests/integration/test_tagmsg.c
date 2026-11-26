@@ -80,17 +80,19 @@ static size_t copies_since(const test_client_t *c, size_t mark,
         hay++;
     }
     return n;
-}
+ }
 
 static void case_tagmsg(void)
 {
-    nf_node_t node;
-    test_client_t alice; /* sender, message-tags */
-    test_client_t bob;   /* capped member: must receive */
-    test_client_t carol; /* uncapped member: must not */
-    test_client_t dave;  /* registered, not on #T: 404 */
-    test_client_t pre;   /* unregistered: 451 */
-    size_t mark;
+     nf_node_t node;
+     test_client_t alice; /* sender, message-tags */
+     test_client_t bob;   /* capped member: must receive */
+     test_client_t carol; /* uncapped member: must not */
+     test_client_t dave;  /* registered, not on #T: 404 */
+     test_client_t pre;   /* unregistered: 451 */
+     test_client_t eve;   /* echo-message + message-ids: echo + msgid */
+     test_client_t frank; /* message-ids, no echo: msgid, no echo */
+     size_t mark;
 
     TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
 
@@ -99,6 +101,8 @@ static void case_tagmsg(void)
     tc_init(&carol);
     tc_init(&dave);
     tc_init(&pre);
+    tc_init(&eve);
+    tc_init(&frank);
     register_caps(&alice, node.port, "alice", CAP_MESSAGE_TAGS);
     register_caps(&bob, node.port, "bob", CAP_MESSAGE_TAGS);
     register_caps(&carol, node.port, "carol", NULL);
@@ -146,6 +150,66 @@ static void case_tagmsg(void)
                      "alice got %zu echoes of her own TAGMSG; she already "
                      "knows her typing state.\n  alice saw: %s",
                      got, tc_buffer(&alice) + m);
+    }
+
+    /* ---- 3b. ECHO + MSGID (#724): echo-message gets the sender its own
+     * TAGMSG back, and message-ids stamps every capped copy ---- */
+    {
+        char caps[128];
+        size_t me;
+        size_t mb;
+        size_t mf;
+
+        (void)snprintf(caps, sizeof caps, "%s %s %s", CAP_MESSAGE_TAGS,
+                       CAP_ECHO_MESSAGE, CAP_MESSAGE_IDS);
+        register_caps(&eve, node.port, "eve", caps);
+        (void)snprintf(caps, sizeof caps, "%s %s", CAP_MESSAGE_TAGS,
+                       CAP_MESSAGE_IDS);
+        register_caps(&frank, node.port, "frank", caps);
+
+        me = tc_received(&eve);
+        mb = tc_received(&bob);
+        mf = tc_received(&frank);
+        TF_CHECK_MSG(tc_send(&eve, "@+typing=active TAGMSG " CHAN) == 0,
+                     "eve TAGMSG send failed");
+        drain(&eve);
+        drain(&bob);
+        drain(&frank);
+        TF_CHECK_MSG(strstr(tc_buffer(&eve) + me, "TAGMSG " CHAN) != NULL,
+                     "eve (echo-message) got no echo of her own TAGMSG.\n"
+                     "  eve saw: %s", tc_buffer(&eve) + me);
+        TF_CHECK_MSG(strstr(tc_buffer(&eve) + me, "msgid=") != NULL,
+                     "eve's TAGMSG echo carries no @msgid.\n"
+                     "  eve saw: %s", tc_buffer(&eve) + me);
+        TF_CHECK_MSG(strstr(tc_buffer(&frank) + mf, "msgid=") != NULL &&
+                     strstr(tc_buffer(&frank) + mf, "+typing=active") != NULL,
+                     "frank (message-ids) got no msgid-stamped TAGMSG relay.\n"
+                     "  frank saw: %s", tc_buffer(&frank) + mf);
+        TF_CHECK_MSG(strstr(tc_buffer(&bob) + mb, "TAGMSG " CHAN) != NULL &&
+                     strstr(tc_buffer(&bob) + mb, "msgid=") == NULL,
+                     "bob (no message-ids) must get the relay verbatim, "
+                     "with no msgid.\n  bob saw: %s", tc_buffer(&bob) + mb);
+        {
+            const char *ee = NULL;
+            const char *fe = NULL;
+            const char *p;
+            size_t el;
+            size_t fl;
+
+            for (p = tc_buffer(&eve) + me; (p = strstr(p, "msgid=")) != NULL; p++) {
+                ee = p;
+            }
+            for (p = tc_buffer(&frank) + mf; (p = strstr(p, "msgid=")) != NULL; p++) {
+                fe = p;
+            }
+            el = (ee != NULL) ? strcspn(ee, " ;\r\n") : 0u;
+            fl = (fe != NULL) ? strcspn(fe, " ;\r\n") : 0u;
+            TF_CHECK_MSG(ee != NULL && fe != NULL && el == fl && el > 6u &&
+                         strncmp(ee, fe, el) == 0,
+                         "echo and relay must share one msgid.\n"
+                         "  eve saw: %s  frank saw: %s",
+                         tc_buffer(&eve) + me, tc_buffer(&frank) + mf);
+        }
     }
 
     /* ---- 4. NON-MEMBER: 404, mirroring PRIVMSG ---- */
@@ -196,7 +260,9 @@ static void case_tagmsg(void)
     tc_close(&carol);
     tc_close(&dave);
     tc_close(&pre);
-}
+    tc_close(&eve);
+    tc_close(&frank);
+ }
 
 int main(void)
 {

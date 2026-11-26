@@ -26,10 +26,11 @@
 #include "core/cap.h"
 #include "core/chan_verbs.h"
 #include "core/channel.h"
-#include "core/connection.h"
-#include "core/fanout.h"
-#include "core/msg_verbs.h"
-#include "core/reply.h"
+ #include "core/connection.h"
+ #include "core/fanout.h"
+ #include "core/fanout_forward.h"
+ #include "core/msg_verbs.h"
+ #include "core/reply.h"
 #include "core/server.h"
 #include "federation/dispatch.h"
 
@@ -72,9 +73,11 @@ typedef struct {
  * msgid/account block and takes no client block. The walk below is therefore
  * PRIVMSG-shaped routing (resolve, membership, member walk) with the client's
  * tag block relayed verbatim. Only members that negotiated `message-tags` get
- * it (a tagless TAGMSG is meaningless), and the sender is excluded (it already
- * knows its own typing state). Non-channel targets are 403: for this verb a
- * nick is genuinely "no such channel".
+ * it (a tagless TAGMSG is meaningless); the sender gets its own copy back iff
+ * it negotiated `echo-message`. Every destination that negotiated
+ * `draft/message-ids` gets the emission's msgid prepended to the relayed
+ * block. Non-channel targets are 403: for this verb a nick is genuinely
+ * "no such channel".
  * shortcut: no cross-server TAGMSG forward (no STAGMSG verb); remote targets
  * are 403 until the mesh has one.
  */
@@ -88,6 +91,10 @@ static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
     size_t nslots = 0;
     size_t i;
     int delivered = 0;
+    irc_serve_tags_t ident;
+    int relayed = 0;
+    char idval[IRC_MAX_MSGTAG + 1u];
+    int have_id = 0;
 
     if (m->nparams != 1) {
         (void)reply_refused(s, c, "TAGMSG", "INVALID_PARAMS", "461", NULL, 0,
@@ -115,18 +122,34 @@ static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
     }
     params[0] = t.name;
     tags = (m->tags != NULL && m->tags[0] != '\0') ? m->tags : NULL;
+    fanout_stamp(s, NULL, &ident, &relayed);
+    have_id = (irc_serve_msgid_value(&ident, idval, sizeof idval) != 0u) ? 1 : 0;
     for (i = 0; i < t.chan->nmembers; i++) {
         conn_t *dst = t.chan->members[i].c;
         int slot;
         size_t k;
+        const char *out;
+        char merged[IRC_MAX_MSGTAG + 8u + IRC_MAX_LINE];
 
-        if (chan_member_live(&t.chan->members[i]) == 0 || dst == c) {
+        if (chan_member_live(&t.chan->members[i]) == 0) {
+            continue;
+        }
+        if (dst == c && cap_enabled(c, CAP_ECHO_MESSAGE) == 0) {
             continue;
         }
         if (cap_enabled(dst, CAP_MESSAGE_TAGS) == 0) {
             continue;
         }
-        (void)send_line_tagged_quiet(s, dst, prefix, "TAGMSG", params, 1, tags);
+        out = tags;
+        if (have_id != 0 && cap_message_ids_enabled(dst) != 0) {
+            int w = snprintf(merged, sizeof merged, "%s=%s%s%s",
+                             IRCV3_TAG_MSGTAG, idval,
+                             (tags != NULL) ? ";" : "", (tags != NULL) ? tags : "");
+            if (w > 0 && (size_t)w < sizeof merged) {
+                out = merged;
+            }
+        }
+        (void)send_line_tagged_quiet(s, dst, prefix, "TAGMSG", params, 1, out);
         slot = server_writer_slot(s, dst->fd);
         for (k = 0; k < nslots; k++) {
             if (slots[k] == slot) {
