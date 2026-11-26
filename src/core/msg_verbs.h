@@ -111,6 +111,7 @@
  * grouped by what they have in common. */
 void handle_privmsg(server_t *s, conn_t *c, const message_t *m);
 void handle_notice(server_t *s, conn_t *c, const message_t *m);
+void handle_tagmsg(server_t *s, conn_t *c, const message_t *m);
 void handle_who(server_t *s, conn_t *c, const message_t *m);
 void handle_whois(server_t *s, conn_t *c, const message_t *m);
 void handle_ison(server_t *s, conn_t *c, const message_t *m);

@@ -478,6 +478,19 @@ void handle_notice(server_t *s, conn_t *c, const message_t *m)
     send_message(s, c, m, "NOTICE", 1);
 }
 
+/* TAGMSG (IRCv3 message-tags, issue #672): PRIVMSG-shaped relay to the resolved
+ * target's members, with no other effect. It reuses send_message() wholesale --
+ * arity (exactly target + text), 412 for empty, the relay strip, 401/403, the
+ * remote forward and the 404 membership rule are all the message class's, so a
+ * TAGMSG is delivered everywhere a PRIVMSG would be. The one deliberate limit:
+ * only the trailing parameter is relayed. A tag-BLOCK-only TAGMSG (no trailing
+ * text) has no relayable payload on this node -- fanout mints server tags only
+ * -- so it gets the same 412 an empty PRIVMSG gets rather than a silent drop. */
+void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
+{
+    send_message(s, c, m, "TAGMSG", 0);
+}
+
 /* ---------------------------------------------------------------------------
  * WHO
  * ---------------------------------------------------------------------------

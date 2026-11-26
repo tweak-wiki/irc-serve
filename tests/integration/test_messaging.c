@@ -865,6 +865,42 @@ int main(void)
     }
 
     /* =======================================================================
+     * 11. TAGMSG RELAYS TO MEMBERS, never 421 (issue #672)
+     * ==================================================================== */
+    /* message-tags is advertised, so a TAGMSG must go somewhere: it relays the
+     * trailing parameter through send_message() exactly where a PRIVMSG would
+     * go -- the sender's own echo plus every other member -- with no 421 for
+     * the sender. A non-member sender gets the message-class 404, same as a
+     * PRIVMSG from outside the channel. */
+    {
+        size_t s1 = open_window(&bob);
+        size_t f1 = open_window(&carol);
+        size_t s2, e1;
+
+        TF_CHECK_MSG(tc_send(&bob.c, "TAGMSG #t :+typing=active now") == 0,
+                     "tc_send failed");
+        s2 = drain(&bob); /* sender first -- see section 1 */
+        e1 = drain(&carol);
+        expect_delivered(&carol, f1, e1, "TAGMSG relayed to another member",
+                         "bob", "TAGMSG", "#T", "+typing=active now");
+        expect_delivered(&bob, s1, s2, "TAGMSG echoed to its sender",
+                         "bob", "TAGMSG", "#T", "+typing=active now");
+        expect_absent_in_window(&bob, s1, s2, "TAGMSG sender, no 421",
+                                " 421 ");
+        expect_no_claim_echoed(&carol, f1, e1, "TAGMSG relay");
+    }
+    {
+        size_t s1 = open_window(&dave);
+        size_t s2;
+        (void)snprintf(want, sizeof want, ":%s 404 dave #T :Cannot send to channel\r\n",
+                       BIN_NAME);
+        TF_CHECK_MSG(tc_send(&dave.c, "TAGMSG #t :+typing=active") == 0,
+                     "tc_send failed");
+        s2 = drain(&dave);
+        expect_in_window(&dave, s1, s2, "404 for a TAGMSG from outside", want);
+    }
+
+    /* =======================================================================
      * The node's own accounting
      * ==================================================================== */
     /* n_reply_refused is documented in reply.c as a BUG REPORT rather than a

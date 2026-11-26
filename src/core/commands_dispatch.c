@@ -107,6 +107,10 @@ static const command_t k_commands[] = {
      * the surface reads as the specification does. */
     { "PRIVMSG", handle_privmsg, 0 },
     { "NOTICE",  handle_notice,  0 },
+    /* IRCv3 message-tags: TAGMSG is a PRIVMSG-shaped relay with no other effect
+     * (issue #672). It sits with the messaging surface rather than in 4.1/4.2
+     * order because it is an extension, like SETNAME is where it is. */
+    { "TAGMSG",  handle_tagmsg, 0 },
     { "WHO",     handle_who,     0 },
     { "WHOIS",   handle_whois,   0 },
     { "ISON",    handle_ison,    0 },

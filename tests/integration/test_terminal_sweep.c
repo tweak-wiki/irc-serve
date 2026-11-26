@@ -328,6 +328,10 @@ static const struct sw_exception k_exceptions[] = {
                 "oversight, and it is the only reason this list is not empty. The "
                 "RELAYED path is deliberately not filtered by `emit_numeric_ex()` -- "
                 "that is what mIRC colour would look like if it were."),
+    SW_EXC_MIRC(" TAGMSG ",
+                "The same eight bytes in RELAYED TAGMSG TEXT. TAGMSG is the same "
+                "`send_message()` as PRIVMSG, so the same relay strip applies and "
+                "the same bytes are the feature, not an oversight."),
     { NULL, NULL, NULL, 0, 1 } /* terminator: a real entry needs all five fields */
 };
 
