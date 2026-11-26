@@ -39,7 +39,10 @@
  * ---------------------------------------------------------------------------
  * THE INVARIANT
  * ---------------------------------------------------------------------------
- * In `chan_verbs.c`, no array named `params` is ever assigned from `m->params`.
+ * In the `chan_verbs*.c` family (split for #543; the emissions live in
+ * `chan_verbs_join.c`, `chan_verbs_part.c`, `chan_verbs_topic.c`,
+ * `chan_verbs_kick.c`, `chan_verbs_mode.c` and `chan_verbs_invite.c`),
+ * no array named `params` is ever assigned from `m->params`.
  *
  * `m->params` is the client's own bytes. `params` is the array every emission in
  * this file hands to `deliver_state_change()`. An assignment between them is the
@@ -53,8 +56,8 @@
  * client's PRIVMSG text to `fanout_deliver()`, and it must: relaying a message is
  * what the node is for, the text is the message, and filtering it is a decision
  * about IRC rather than about this shape. This file's claim is scoped to
- * `chan_verbs.c` and to the `params` arrays, and the exemption is named here
- * rather than left for the next reader to wonder about.
+ * the `chan_verbs*.c` family and to the `params` arrays, and the exemption is
+ * named here rather than left for the next reader to wonder about.
  *
  * ---------------------------------------------------------------------------
  * WHY IT IS NOT VACUOUS, WHICH IS THE PART THAT ACTUALLY MATTERS
@@ -73,8 +76,22 @@
 
 #include "harness/test_util.h"
 
-#define RELAY_FILE "src/core/chan_verbs.c"
-#define RELAY_FILE2 "src/core/chan_verbs_mode.c"
+/* Every split piece of the `chan_verbs.c` family (#543 TU-45 through TU-54;
+ * `chan_verbs.c` itself is now only the split map). The emissions this file
+ * is about live in the join/part/topic/kick/mode/invite pieces; the
+ * knock/list/names pieces carry no `deliver_state_change` call but are
+ * listed so a future emission there is covered without touching this file. */
+static const char *const RELAY_FILES[] = {
+    "src/core/chan_verbs_join.c",
+    "src/core/chan_verbs_part.c",
+    "src/core/chan_verbs_topic.c",
+    "src/core/chan_verbs_kick.c",
+    "src/core/chan_verbs_mode.c",
+    "src/core/chan_verbs_invite.c",
+    "src/core/chan_verbs_knock.c",
+    "src/core/chan_verbs_list.c",
+    "src/core/chan_verbs_names.c",
+};
 
 /* Occurrences of `needle` in `code`, as a NON-OVERLAPPING count. Written out here
  * rather than pulled from the harness because `tf_count()` counts a STRING in a
@@ -169,35 +186,33 @@ static void case_no_emission_carries_a_client_parameter(void)
     size_t offenders;
     char first[192];
 
-    /* Both halves of the split: handle_mode()'s five emissions moved to
-     * RELAY_FILE2 for #543 TU-53, and an invariant that stopped looking at
-     * them would be the vacuity this file exists to prevent. */
+    /* The whole family since #543 TU-54 dissolved chan_verbs.c; an invariant
+     * that stopped looking at any piece would be the vacuity this file
+     * exists to prevent. */
     {
-        char *head = tf_read_code(RELAY_FILE, &len);
-        char *tail = NULL;
-        size_t tail_len = 0;
+        size_t i;
 
-        TF_CHECK_MSG(head != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
-                     RELAY_FILE);
-        tail = tf_read_code(RELAY_FILE2, &tail_len);
-        TF_CHECK_MSG(tail != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
-                     RELAY_FILE2);
-        code = (char *)malloc(len + tail_len + 1u);
-        TF_CHECK_MSG(code != NULL, "could not join %s and %s",
-                     RELAY_FILE, RELAY_FILE2);
-        memcpy(code, head, len);
-        memcpy(code + len, tail, tail_len);
-        code[len + tail_len] = '\0';
-        len += tail_len;
-        free(head);
-        free(tail);
+        code = NULL;
+        for (i = 0; i < sizeof RELAY_FILES / sizeof RELAY_FILES[0]; i++) {
+            size_t piece_len = 0;
+            char *piece = tf_read_code(RELAY_FILES[i], &piece_len);
+
+            TF_CHECK_MSG(piece != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
+                         RELAY_FILES[i]);
+            code = (char *)realloc(code, len + piece_len + 1u);
+            TF_CHECK_MSG(code != NULL, "could not join relay files");
+            memcpy(code + len, piece, piece_len);
+            len += piece_len;
+            code[len] = '\0';
+            free(piece);
+        }
     }
-    TF_CHECK_MSG(len > 0, "both relay files read as empty, so every assertion "
+    TF_CHECK_MSG(len > 0, "all relay files read as empty, so every assertion "
                  "below would pass on files this test did not look at");
 
     /* THE SUBJECT IS STILL THERE. Without this, "zero raw assignments" is
      * satisfiable by deleting the emissions, and a test that can be satisfied by
-     * deleting the thing it is about is not a test. Counted across both files:
+     * deleting the thing it is about is not a test. Counted across the family:
      * five in handle_mode() (in chan_verbs_mode.c since #543 TU-53), and one
      * each in chan_admit(), handle_part()'s forward arm, handle_topic()'s
      * forward arm, handle_topic()'s owned arm, handle_kick(), notify_invite()
@@ -206,7 +221,7 @@ static void case_no_emission_carries_a_client_parameter(void)
      * a test that fails on an addition is a test that gets deleted. */
     emissions = occurrences(code, "deliver_state_change");
     TF_CHECK_MSG(emissions >= 7u,
-                 "the two relay files hold %lu call(s) to deliver_state_change() "
+                 "the relay family holds %lu call(s) to deliver_state_change() "
                  "and this test expects at least 7. Either the emissions were "
                  "renamed or removed -- which would make the zero-below vacuous -- "
                  "or the invariant moved somewhere this file does not look. "

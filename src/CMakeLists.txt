@@ -232,7 +232,11 @@ add_library(irc_core STATIC
   # the part that has to be read in one place -- a capability advertised by a
   # literal at a call site is a claim with no owner.
   core/cap.c
-  core/chan_verbs.c
+  # #543 TU-54: 4.1's JOIN (handle_join() + chan_admit() + shared helpers;
+  # the last family out of core/chan_verbs.c, which is now a split-map
+  # pointer file only and is no longer compiled). Declared in
+  # core/chan_verbs.h; reached through it by commands_dispatch.c.
+  core/chan_verbs_join.c
   # #543 TU-45: 4.2's KNOCK (handle_knock()) split out of core/chan_verbs.c.
   # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
   core/chan_verbs_knock.c

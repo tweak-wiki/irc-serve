@@ -169,31 +169,33 @@ typedef enum {
     CHAN_VERDICT_REFUSED
 } chan_verdict_t;
 
-/* 2.2's single-writer decision (defined in core/chan_verbs.c). Shared through
- * this header since #543 TU-46 (core/chan_verbs_list.c is its first outside
- * caller); resolve_joined() stays file-static for the remaining handlers. */
+/* 2.2's single-writer decision (defined in core/chan_verbs_join.c since #543
+ * TU-54 dissolved chan_verbs.c). Shared through this header since #543 TU-46
+ * (core/chan_verbs_list.c is its first outside caller). */
 chan_verdict_t authority_ok(server_t *s, conn_t *c, const chan_t *ch,
                             const char *verb, int stateful);
-/* The one-shape state-change emission (defined in core/chan_verbs.c). Shared
- * through this header since #543 TU-49 (core/chan_verbs_part.c is its first
- * outside caller); the two-shape deliver_state_change_forms() stays
- * file-static for handle_join(). */
+/* The one-shape state-change emission (defined in core/chan_verbs_join.c since
+ * #543 TU-54 dissolved chan_verbs.c). Shared through this header since #543
+ * TU-49 (core/chan_verbs_part.c is its first outside caller); the two-shape
+ * deliver_state_change_forms() stays file-static for handle_join(). */
 void deliver_state_change(server_t *s, conn_t *c, chan_t *ch,
                                  const char *verb, const char *prefix,
                                  const char *const *params, int nparams);
-/* The 331/332/333 answer (defined in core/chan_verbs.c). Shared through
- * this header since #543 TU-50 (core/chan_verbs_topic.c is its first outside
- * caller); still used by handle_join(), so it stays defined in chan_verbs.c. */
+/* The 331/332/333 answer (defined in core/chan_verbs_join.c since #543 TU-54
+ * dissolved chan_verbs.c). Shared through this header since #543 TU-50
+ * (core/chan_verbs_topic.c is its first outside caller); still used by
+ * handle_join(), so it stays defined beside it in chan_verbs_join.c. */
 void send_topic(server_t *s, conn_t *dst, const chan_t *ch);
-/* The 353 roster and its 366 terminator (both defined in core/chan_verbs.c).
- * Shared through this header since #543 TU-51 (core/chan_verbs_names.c is
- * their first outside caller); still used by handle_join(), so they stay
- * defined in chan_verbs.c. */
+/* The 353 roster and its 366 terminator (both defined in core/chan_verbs_join.c
+ * since #543 TU-54 dissolved chan_verbs.c). Shared through this header since
+ * #543 TU-51 (core/chan_verbs_names.c is their first outside caller); still
+ * used by handle_join(), so they stay defined beside it in chan_verbs_join.c. */
 void send_names_list(server_t *s, conn_t *dst, const chan_t *ch);
 void send_end_of_names(server_t *s, conn_t *dst, const char *channel);
-/* The 329 creation-time answer (defined in core/chan_verbs.c). Shared through
- * this header since #543 TU-53 (core/chan_verbs_mode.c is its first outside
- * caller); still used by handle_join(), so it stays defined in chan_verbs.c. */
+/* The 329 creation-time answer (defined in core/chan_verbs_join.c since #543
+ * TU-54 dissolved chan_verbs.c). Shared through this header since #543 TU-53
+ * (core/chan_verbs_mode.c is its first outside caller); still used by
+ * handle_join(), so it stays defined beside it in chan_verbs_join.c. */
 void send_creation_time(server_t *s, conn_t *dst, const chan_t *ch);
 
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
