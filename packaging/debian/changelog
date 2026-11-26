@@ -1,3 +1,11 @@
+irc-serve (1.0.1-1) unstable; urgency=medium
+
+  * Re-release of 1.0.0 with conventional distribution assets:
+  * linux-amd64/darwin-arm64 (GOOS-GOARCH), TLS always on,
+  * aggregated SHA256SUMS + build attestations. No code change.
+
+ -- TheFirstIstari <euphonium.ashe.f@gmail.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
 irc-serve (1.0.0-1) unstable; urgency=medium
 
   * First stable release: 0.8.0's federation paths plus the audit backlog
