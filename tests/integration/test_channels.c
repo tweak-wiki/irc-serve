@@ -1112,6 +1112,43 @@ static void test_join_refuses_empty(nf_node_t *node)
     tc_close(&a.c);
 }
 
+/* JOIN with an over-long channel name: 417, never 461 (issue #677). The input
+ * was too LONG, so "not enough parameters" is the wrong complaint; 417 is
+ * the numeric this node already answers for every other over-long stored
+ * parameter (PART reason above, KICK reason, topic, away). Nothing is joined:
+ * a valid JOIN afterwards reaches the channel. */
+static void test_join_refuses_long_name(nf_node_t *node)
+{
+    client_t a;
+    /* 70 x's after the sigil: over CHAN_MAX_NAME (63), inside the wire line. */
+    char name[72];
+    char line[80];
+    size_t k;
+    size_t ma;
+
+    client_open(&a, node, "jla");
+    name[0] = '#';
+    for (k = 1; k + 1u < sizeof name; k++) {
+        name[k] = 'x';
+    }
+    name[k] = '\0';
+    (void)snprintf(line, sizeof line, "JOIN %s", name);
+    ma = tc_received(&a.c);
+    client_send(&a, line);
+    (void)send_and_drain(&a, "jl-long");
+    expect_line(&a.c, "417 for the over-long channel name",
+                ":irc.test 417 jla :Channel name is too long\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "no JOIN echo for the long name",
+                       " JOIN #");
+    /* Still outside: a valid JOIN afterwards works. */
+    client_send(&a, "JOIN #jl-ok");
+    (void)send_and_drain(&a, "jl-ok");
+    expect_line(&a.c, "the valid JOIN after a refusal",
+                ":jla!jla@127.0.0.1 JOIN #JL-OK\r\n");
+
+    tc_close(&a.c);
+}
+
 /* NAMES and LIST, on a channel and on one that does not exist, and the decision
  * that LIST enumerates channels the requester has not joined. */
 static void test_names_and_list(nf_node_t *node)
@@ -1467,6 +1504,89 @@ static void test_mode(nf_node_t *node)
     (void)send_and_drain(&a, "m-oo-short");
     expect_line(&a.c, "461 when letters outnumber parameters",
                 ":irc.test 461 moa MODE :Not enough parameters\r\n");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
+
+/* MODE <nickname>: user modes (issue #668). A nick target never reaches the
+ * channel path, so it is 221/501/502 instead of 403. +i is the one letter
+ * this node evaluates; it persists on the connection and a later query shows
+ * it. Another user's modes are 502, query or change, and any other letter is
+ * 501 with nothing applied. A name that is no connected nick keeps the old
+ * 403 on the channel path. */
+static void test_user_mode(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+
+    client_open(&a, node, "uma");
+    client_open(&b, node, "umb");
+
+    /* Query with nothing set: "+" is the honest empty modestring. */
+    client_send(&a, "MODE uma");
+    (void)send_and_drain(&a, "u-query0");
+    expect_line(&a.c, "221 for a user with no modes",
+                ":irc.test 221 uma +\r\n");
+
+    /* +i sets, and the query shows it. */
+    client_send(&a, "MODE uma +i");
+    (void)send_and_drain(&a, "u-set");
+    expect_line(&a.c, "221 after setting +i",
+                ":irc.test 221 uma +i\r\n");
+    client_send(&a, "MODE uma");
+    (void)send_and_drain(&a, "u-query1");
+    expect_line(&a.c, "221 still shows +i",
+                ":irc.test 221 uma +i\r\n");
+
+    /* -i clears. */
+    client_send(&a, "MODE uma -i");
+    (void)send_and_drain(&a, "u-clear");
+    expect_line(&a.c, "221 after clearing +i",
+                ":irc.test 221 uma +\r\n");
+
+    /* Another user's modes are 502, whether queried or changed, and the bit
+     * on the other connection is untouched. */
+    client_send(&b, "MODE umb +i");
+    (void)send_and_drain(&b, "u-b-set");
+    client_send(&a, "MODE umb");
+    (void)send_and_drain(&a, "u-other-q");
+    expect_line(&a.c, "502 for querying another user's modes",
+                ":irc.test 502 uma :Cannot change mode for other users\r\n");
+    client_send(&a, "MODE umb +i");
+    (void)send_and_drain(&a, "u-other-c");
+    expect_line(&a.c, "502 for changing another user's modes",
+                ":irc.test 502 uma :Cannot change mode for other users\r\n");
+    client_send(&b, "MODE umb");
+    (void)send_and_drain(&b, "u-b-query");
+    expect_line(&b.c, "the other user's modes are unchanged by the 502",
+                ":irc.test 221 umb +i\r\n");
+
+    /* A letter this node does not evaluate is 501, and changes nothing. */
+    client_send(&a, "MODE uma +z");
+    (void)send_and_drain(&a, "u-bad");
+    expect_line(&a.c, "501 for an unknown user-mode flag",
+                ":irc.test 501 uma :Unknown MODE flag\r\n");
+    client_send(&a, "MODE uma");
+    (void)send_and_drain(&a, "u-query2");
+    expect_line(&a.c, "221 unchanged after the 501",
+                ":irc.test 221 uma +\r\n");
+
+    /* A mixed string is refused whole: +iz sets nothing. */
+    client_send(&a, "MODE uma +iz");
+    (void)send_and_drain(&a, "u-mixed");
+    expect_line(&a.c, "501 for a mixed mode string",
+                ":irc.test 501 uma :Unknown MODE flag\r\n");
+    client_send(&a, "MODE uma");
+    (void)send_and_drain(&a, "u-query3");
+    expect_line(&a.c, "221 unchanged after the mixed string",
+                ":irc.test 221 uma +\r\n");
+
+    /* Unknown to the nick registry: the old 403 on the channel path. */
+    client_send(&a, "MODE nosuchnick");
+    (void)send_and_drain(&a, "u-unknown");
+    expect_line(&a.c, "403 for a name that is no nick",
+                ":irc.test 403 uma NOSUCHNICK :No such channel\r\n");
 
     tc_close(&a.c);
     tc_close(&b.c);
@@ -2271,9 +2391,11 @@ int main(void)
     test_kick_authority(&node);
     test_part(&node);
     test_join_refuses_empty(&node);
+    test_join_refuses_long_name(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
+    test_user_mode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);
 

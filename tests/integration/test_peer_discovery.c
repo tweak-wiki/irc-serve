@@ -18,8 +18,10 @@
  *   1. AN ADVERTISED DIAL HINT IS NEVER DIalled. server_t::advs is a store a peer
  *      writes and only a log reads; this is the SSRF claim, and it is asserted
  *      on the THIRD NODE rather than on a log line (see the next block).
- *   2. A CLEAN LEAVE IS NOT A FAILURE. fed_shutdown: ... retried=0, and -- the
- *      half with teeth -- the count of link_dial: lines on the departing link.
+ *   2. A CLEAN LEAVE IS RE-DIALLED, BOUNDEDLY (#666). fed_shutdown: ...
+ *      retried=0 names the cause, and -- the half with teeth -- the count of
+ *      link_dial: lines on the departing link: one to open it, three bounded
+ *      redials, then link_retry_exhausted: and no more dials.
  *   3. AN ADVERTISE REQUIRES AN ESTABLISHED LINK. fed_preauth_drop:
  *      ... command=ADVERTISE state=PENDING, counted in fed_preauth_drop=.
  *   4. THE LOAD FIGURE PROPAGATES, in BOTH directions: what a peer sends is
@@ -110,8 +112,9 @@
  * The two other numbers that are shortened are named where they are set, with the
  * reason. What is NOT shortened anywhere: the ORDER of the guard chain, the
  * contents of the advertisement store, the shape of the retry ladder (base
- * doubled, capped, bounded by a budget that reports), and the single T7 condition
- * that refuses a diallable link. Those are the claims.
+ * doubled, capped, bounded by a budget that reports). What is NOT there any
+ * more is a T7 condition refusing a diallable link (#666): a suppression that
+ * refused one partitioned the mesh on every peer restart. Those are the claims.
  */
 #include <errno.h>
 #include <netinet/in.h>
@@ -181,18 +184,18 @@
  * and changes only its scale, which is the trade federation/link.h's
  * fed_set_retry() paragraph exists to make.
  *
- * AN UNSUPPRESSED CLEAN LEAVE WOULD BE RE-DIALLED AT
+ * A CLEAN LEAVE IS RE-DIALLED AT (#666), and the budget is what stops it:
  *
  *      60 ms     first rung, from the arm the clean-leave path makes
  *      180 ms    second
  *      420 ms    third, at the ceiling
  *      660 ms    fourth -- and the budget is 3, so this one does not happen;
- *                 irc.a would print link_retry_exhausted:
+ *                 irc.a prints link_retry_exhausted: instead and dials no more
  *
  * and the observation window is " WINDOW_LINES " of irc.d's 60 ms keepalives,
  * which is 960 ms. So the window is past EVERY rung including the budget's last,
- * by 300 ms, and the assertion is made over a span in which an unsuppressed leave
- * would have dialled three times. This margin is not decoration: the first
+ * by 300 ms, and the assertion is made over a span in which the leave dials
+ * three times and then exhausts. This margin is not decoration: the first
  * version of these numbers put the first rung at 420 ms and the window at
  * 800 ms, which sounds generous and was not, because `base` is read before the
  * SHUTDOWN and the inbound lines that open the window start arriving before it.
@@ -880,7 +883,7 @@ static void case_a_hint_is_recorded_and_never_dialled(void)
 }
 
 /* ---------------------------------------------------------------------------
- * CASE 2 -- CLAIM 2: A CLEAN LEAVE IS NOT A FAILURE
+ * CASE 2 -- CLAIM 2: A CLEAN LEAVE IS RE-DIALLED, THEN GIVEN UP ON (#666)
  * ---------------------------------------------------------------------------
  * THE FIXTURE IS THREE THINGS AND EACH IS LOAD-BEARING:
  *
@@ -888,9 +891,9 @@ static void case_a_hint_is_recorded_and_never_dialled(void)
  *           and that is not a detail: T7's arm is guarded by
  *           `link->initiator != 0 && link->addrlen != 0`, because an ACCEPTED link
  *           has no address and could never be dialled anyway. On the accepting
- *           side a clean-leave suppression is therefore untestable -- the redial
- *           would not happen with or without it -- so a test that let irc.a accept
- *           the link would pass against a node that had no suppression at all.
+ *           side a redial policy is therefore untestable -- the redial would not
+ *           happen with or without it -- so a test that let irc.a accept the
+ *           link would pass against a node that never re-dialled at all.
  *
  *   irc.b  this test, which writes the SHUTDOWN. No node in this build can send
  *           one: fed_send_shutdown() has no caller anywhere in src/ (see the file
@@ -915,7 +918,7 @@ static void case_a_hint_is_recorded_and_never_dialled(void)
  * clean-leave path at `silent_ms=0`, not by a threshold expiring, so the first rung
  * does not depend on any of these numbers. See DEAD_MS for the measurement.
  */
-static void case_clean_leave_is_not_a_failure(void)
+static void case_clean_leave_redials_then_gives_up(void)
 {
     nf_node_t a;
     nf_node_t d;
@@ -1088,8 +1091,8 @@ static void case_clean_leave_is_not_a_failure(void)
     /* --- the window -------------------------------------------------------- */
     /* " WINDOW_LINES " inbound lines at irc.d's 60 ms keepalive is 960 ms, read as
      * a deadline over a counter irc.a publishes. Past EVERY rung of the " RETRY_BASE_MS
-     * " ms ladder and past the budget's last, so an unsuppressed clean leave
-     * would have dialled three times inside it. The arithmetic is at
+     * " ms ladder and past the budget's last, so the leave dials three times and
+     * exhausts inside it. The arithmetic is at
      * " WINDOW_LINES " and the margin is not decoration -- see the comment there. */
     /* THE WINDOW'S CLOCK WAS ALIVE WHEN THE WINDOW OPENED, which is the precondition
      * the window below does not check and cannot.
@@ -1137,33 +1140,42 @@ static void case_clean_leave_is_not_a_failure(void)
                  "DEAD_MS for the whole mechanism: %s",
                  (unsigned long long)base, a.out);
 
-    /* THE ASSERTION WITH TEETH. Exactly one dial to " NAME_B " in irc.a's whole
-     * life: the one that opened this socket. A retrying goodbye prints a second
-     * link_dial: line inside this window and fails this, which is the failure the
-     * case exists to catch -- a planned restart spent as three dials, two minutes
-     * of backoff and a link in a dump that looks retryable. */
-    dials = tf_count(a.out, "link_dial: peer=" NAME_B);
-    TF_CHECK_MSG(dials == 1u,
-                 "irc.a dialled peer " NAME_B " %llu times. It dialled it once to "
-                 "open this link, and a peer that said SHUTDOWN must never be "
-                 "dialled again without an operator resetting it: %s",
-                 (unsigned long long)dials, a.out);
-    /* AND THE LADDER WAS STILL ARMED, exactly once. This is what makes the count
-     * above an assertion about the clean-leave guard rather than about a link
-     * that had nothing to retry: T4 armed the schedule on the failure, the
-     * schedule is live and expiring, and T7's `clean_leave == 0` is the only
-     * thing standing between that schedule and a socket. A node that did not arm
-     * it at all would pass the line above for the wrong reason. */
-    arms = tf_count(a.out, "link_retry: peer=" NAME_B);
-    TF_CHECK_MSG(arms == 1u,
-                 "irc.a armed the retry ladder %llu times for a link that had "
-                 "cleanly departed, expected the single arm T4 makes when the "
-                 "socket closed: %s",
-                 (unsigned long long)arms, a.out);
-    TF_CHECK_MSG(strstr(a.out, "link_retry_exhausted: peer=" NAME_B) == NULL,
-                 "irc.a spent a whole retry budget on a peer that said it was "
-                 "leaving, which is the cost clean_leave exists to avoid: %s",
+    /* THE ASSERTION WITH TEETH. The goodbye IS re-dialled, and the budget is
+     * what stops it (#666): one dial opened this socket, three more are the
+     * budget's three attempts, and the fourth arm spends the budget instead of
+     * dialling. A node that never re-dialled would still show one dial here --
+     * the partition #666 reported -- and a node with no budget would dial past
+     * this window for ever. The exhausted wait below is deadline-based, so a
+     * slow loop still converges; the counts after it are exact. */
+    TF_CHECK_MSG(nf_expect(&a, "link_retry_exhausted: peer=" NAME_B,
+                           T_IO_MS) == 0,
+                 "irc.a never reported exhausting its retry budget for departed "
+                 "peer " NAME_B ", so either it is still retrying for ever or it "
+                 "stopped without saying so. The budget is the whole of what "
+                 "makes a failed link a bounded cost rather than a leak: %s",
                  a.out);
+    TF_CHECK_MSG(nf_expect_u64(&a, "fed_retry_exhausted=", 1, T_IO_MS) == 0,
+                 "the exhaustion should have been counted once, and the counter "
+                 "is what a dashboard reads: %s",
+                 a.out);
+    dials = tf_count(a.out, "link_dial: peer=" NAME_B);
+    TF_CHECK_MSG(dials == 4u,
+                 "irc.a dialled peer " NAME_B " %llu times. One dial opened this "
+                 "link and the budget allows three redials, so four is the "
+                 "number a bounded redial produces: %s",
+                 (unsigned long long)dials, a.out);
+    /* AND THE LADDER WAS ARMED exactly three times. This is what makes the
+     * counts above an assertion about the retry policy rather than about a
+     * link that had nothing to retry: T4 armed the schedule on the closure
+     * and each failed redial re-armed it, up to the budget. A node that never
+     * armed it at all would still show the first dial above for the wrong
+     * reason. */
+    arms = tf_count(a.out, "link_retry: peer=" NAME_B);
+    TF_CHECK_MSG(arms == 3u,
+                 "irc.a armed the retry ladder %llu times for a link that had "
+                 "cleanly departed, expected three arms: T4's on the closure "
+                 "and one per failed redial: %s",
+                 (unsigned long long)arms, a.out);
 
     TF_CHECK_MSG(nf_stop(&a) == 0, "node " NAME_A " did not exit cleanly");
     TF_CHECK_MSG(nf_stop(&d) == 0, "node " NAME_D " did not exit cleanly");
@@ -1253,7 +1265,7 @@ static void case_malformed_departure_tears_down_link(void)
 int main(void)
 {
     case_a_hint_is_recorded_and_never_dialled();
-    case_clean_leave_is_not_a_failure();
+    case_clean_leave_redials_then_gives_up();
     case_malformed_departure_tears_down_link();
     tf_done("peer_discovery");
     return 0;

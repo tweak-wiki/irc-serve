@@ -466,6 +466,10 @@ irc_add_integration_test(test_userhost test_userhost.c)
 # stub is which of the other numerics does NOT come back for each input.
 irc_add_integration_test(test_knock test_knock.c)
 
+# #672, IRCv3 TAGMSG relay. Its own file because the property is the relayed
+# bytes on another client's connection, not a numeric on the sender's.
+irc_add_integration_test(test_tagmsg test_tagmsg.c)
+
 # 7/Phase 7, 4.2's LUSERS, ADMIN and INFO. One file rather than three because
 # they are one family with one fixture, and because the file's central assertion
 # is that INFO's list of claims about the node is TRUE -- which is checked by
@@ -686,6 +690,13 @@ irc_add_integration_test(test_failover_reconnect test_failover_reconnect.c)
 # cannot have seen. The retry scale is shortened per process; the policy's shape
 # is test_failover_reconnect's claim, not this one's.
 irc_add_integration_test(test_sync_state test_sync_state.c)
+
+# 2.2/issue #676: fail-closed creation while partitioned. A node with a
+# configured-but-never-established peer refuses a JOIN-create with 437 (the
+# orphan rule extended to creation) and leaves nothing behind, while a node
+# with no peers still creates. Its own file because the claim needs a
+# partitioned node and a solo one side by side on the wire.
+irc_add_integration_test(test_splitbrain_refuse test_splitbrain_refuse.c)
 
 # 2.1: the remote-nick registry, the scoped `nick@server` being ROUTED rather
 # than recognised, and rename-the-loser. Its own file because it is the only

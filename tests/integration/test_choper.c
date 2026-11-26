@@ -1,8 +1,8 @@
 /* test_choper.c -- CHOPER on the wire, against the real binary.
  *
  * docs/SERVER_DESIGN.md 4.2 (CHOPER, Phase 7), 4.4 (401, 464) and RFC 2812
- * 3.4.1. See commands.c's handle_choper() for the argument that 464 is the right
- * refusal and that 381 is never emitted.
+ * 3.4.1. See core/commands_choper.c's handle_choper() for the argument that
+ * 464 is the right refusal and that 381 is never emitted.
  *
  * ---------------------------------------------------------------------------
  * A COMMAND WHOSE WHOLE BEHAVIOUR IS A REFUSAL, AND WHY THAT STILL NEEDS A TEST
@@ -10,11 +10,12 @@
  * Three things distinguish an honest refusal from a stub, and each is a separate
  * assertion:
  *
- *   1. THE TARGET IS LOOKED UP. `CHOPER ghost <password>` is 401 and
- *      `CHOPER alice <password>` is 464. A handler that answered 464 to every
- *      line would be refusing a request about a user who is demonstrably
- *      connected, and 464's text would then be about the wrong thing. Neither
- *      numeral is optional; both are asserted for their own input.
+ *   1. NO LOOKUP HAPPENS (#673). `CHOPER ghost <password>` is 464, not 401:
+ *      the first parameter names a credential account, not an online nick,
+ *      and with no credential store the only honest answer is the refusal
+ *      whether or not the name is online. `CHOPER alice <password>` is 464
+ *      too, byte-identical apart from the echoed name. A handler that 401'd
+ *      the unknown name would make the refusal depend on who holds the nick.
  *   2. 381 RPL_YOUREOPER IS ABSENT. This is the assertion with teeth. A node
  *      that faked the grant passes the 464 check and fails this one, and the
  *      faking is exactly what a stub does.
@@ -231,36 +232,41 @@ int main(void)
                      "credentials\r\n");
 
     /* =======================================================================
-     * 2. A target this node does not hold: 401, and NOT 464
+     * 2. A name this node does not hold: 464, and NOT 401 (#673)
      * ==================================================================== */
+    /* The regression assertion for #673: an unknown credential name gets the
+     * same 464 refusal, naming the name verbatim. A 401 here would make the
+     * refusal depend on whether somebody happens to hold the nick -- a
+     * user-enumeration oracle on top of the wrong numeric. */
     from = mark(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "CHOPER ghost whatever") == 0,
                  "tc_send failed");
     end = mark(&alice);
-    expect_in_window(&alice, from, end, "401 for an unknown target",
-                     ":" BIN_NAME " 401 alice ghost :No such nick/channel\r\n");
-    /* 464 must not also come back. Both would be true statements, and a client
-     * reading two numerics for one line cannot tell which is the answer -- and
-     * 464's text would then be about a server rather than about a user who does
-     * not exist. */
-    expect_absent_in_window(&alice, from, end, "the unknown-target CHOPER",
-                            " 464 ");
+    expect_in_window(&alice, from, end, "464 for an unknown name",
+                     ":" BIN_NAME " 464 alice :ghost cannot become an operator: "
+                     "this server holds no operator flags and no operator "
+                     "credentials\r\n");
+    /* 401 must not come back either. A client reading two numerics for one
+     * line cannot tell which is the answer -- and 401's text is about a user
+     * who, for this command's purposes, is not the thing being addressed. */
+    expect_absent_in_window(&alice, from, end, "the unknown-name CHOPER",
+                            " 401 ");
+    expect_absent_in_window(&alice, from, end, "the unknown-name CHOPER",
+                            " 381 ");
 
-    /* Case folding, because 2.1 makes nicknames case-insensitive and the fold is
-     * the registry's. A CHOPER that 401'd a differently-cased spelling of a
-     * connected user would be refusing somebody who is demonstrably there. */
+    /* No case folding, because there is no registry to fold against: the name
+     * echoes back exactly as typed. A CHOPER that canonicalised the spelling
+     * would be claiming a lookup it never performed. */
     from = mark(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "CHOPER BOB whatever") == 0, "tc_send failed");
     end = mark(&alice);
-    expect_in_window(&alice, from, end, "464 for a differently-cased target",
-                     ":" BIN_NAME " 464 alice :bob cannot become an operator: "
+    expect_in_window(&alice, from, end, "464 echoing the typed spelling",
+                     ":" BIN_NAME " 464 alice :BOB cannot become an operator: "
                      "this server holds no operator flags and no operator "
                      "credentials\r\n");
-    /* And the DISPLAYED case is the target's own, so the 464 names BOB as `bob`.
-     * The absence is the assertion: a node that folded the stored name would
-     * render `BOB` here and every display assertion in the tree would be
-     * ambiguous about which spelling is real. */
-    expect_absent_in_window(&alice, from, end, "the folded CHOPER", "BOB cannot");
+    /* And the FOLDED spelling is absent: a node that rendered `bob` here would
+     * be displaying a registry entry it never consulted. */
+    expect_absent_in_window(&alice, from, end, "the un-folded CHOPER", "bob cannot");
 
     /* =======================================================================
      * 3. Arity

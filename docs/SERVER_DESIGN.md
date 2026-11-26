@@ -202,7 +202,11 @@ not O(users), so it does not reintroduce per-join broadcast cost.
 **Ownership rules:**
 - First server to see a channel owns it. The creation race is broken by
   `(creation_epoch, server_name)`, higher wins; the loser re-keys to the
-  winner's origin. Both halves are single-node-testable in Phase 4.
+  winner's origin. Both halves are single-node-testable in Phase 4. The race
+  rule covers a live link only: while a peer link that was up is down again a
+  JOIN that would create a channel is refused with `437` (re-key on resync
+  collision is future work), and disposal of an empty channel this node
+  originated is delayed so a re-JOIN revives it instead of forking the name.
 - For an **owned** channel: apply joins/parts/topics locally, and forward to
   each peer in `servers[]`.
 - For a **non-owned** channel: forward the action to the owner. Verb-dependent —
@@ -3102,12 +3106,12 @@ Federated:
       because the node that would have sent the `SQUIT` was the one that went away.
       `server_shutdown()` now calls it before it closes anything: the peer marks the
       link **cleanly departed**, purges, relays a `SQUIT` onward to a node two hops
-      away, and **arms no retry at all** (`clean_leave` is the single condition T7
-      checks, and `fed_link_reset()` is the operator's only way back).
-      `tests/integration/test_autoscale.c` asserts all of that over real nodes, and
-      asserts the *counts* — one dial for the life of the node, one ladder arm — rather
-      than the log's own `retried=0`, because a node can print a flag it did not
-      honour.
+      away, and re-dials **boundedly** (#666) — three attempts, then
+      `link_retry_exhausted:` — because suppressing the redial partitioned the mesh
+      on every peer restart. `tests/integration/test_autoscale.c` asserts all of that
+      over real nodes, and asserts the *counts* — four dials, three ladder arms,
+      one exhaustion — rather than the log's own `retried=0`, because a node can
+      print a flag it did not honour.
 - [ ] Two nodes cannot both be named `irc.a` — rejected at handshake
 - [ ] Observability: a way to dump peers + their FSM states, channels with
       origin and local/remote server sets, and the dedup table size.

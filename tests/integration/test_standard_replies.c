@@ -435,10 +435,10 @@ static void case_464(void)
 
     TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
 
-    /* A LIVE target, because CHOPER resolves its first parameter and answers 401
-     * for a nickname this node does not hold -- which would make this case a test
-     * of 401 (a numeric that does not migrate) rather than of 464. The target is
-     * deliberately neither of the two clients under test. */
+    /* Any name answers 464 -- CHOPER performs no nick lookup (#673), so even
+     * a nickname this node does not hold gets the 464 refusal rather than a
+     * 401 (a numeric that does not migrate). The target is deliberately
+     * neither of the two clients under test. */
     tc_init(&target);
     register_caps(&target, node.port, "target", NULL);
 

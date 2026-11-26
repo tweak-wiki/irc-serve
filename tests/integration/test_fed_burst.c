@@ -667,7 +667,7 @@ static void send_truncated_burst(server_t *s, server_link_t *link)
     n1[0] = NICK_A;
     n1[1] = NICK_A;
     n1[2] = "127.0.0.1";
-    n1[3] = "-"; /* no user modes: this build evaluates none */
+    n1[3] = "-"; /* +i is local-only and never crosses the burst */
     n1[4] = signon;
     n1[5] = ""; /* no away */
     c1[0] = CHAN_T;
@@ -2732,6 +2732,24 @@ static void case_foreign_records_refused(void)
     TF_CHECK_MSG(nf_expect_u64(&b, "fed_malformed=", 0, 2000) == 0,
                  "node B counted a refusal as malformed: a well-formed record "
                  "from the wrong peer is refused, not malformed: %s",
+                 b.out);
+    /* THE RECEIVER HAS THE SJOIN, not just the refusal. The waits above are all
+     * about B declining A's burst; none of them says B has READ A's SJOIN, and
+     * the burst was queued behind it on A, not ahead of it -- so a refusal on B
+     * proves B saw the burst, not the membership. Asked before the SJOIN lands,
+     * B holds no #T at all and answers a bare 366, and the line-count check
+     * reports a merge that never happened. That is the Phase 6 CI failure in
+     * this case, and expect_names() cannot save it: its PING drain orders bob's
+     * NAMES behind bob's own PING on B's socket, which proves B processed bob's
+     * question, not that B had processed A's answer to the previous one.
+     * fed_sjoin is printed when B installs the remote member, so it is the
+     * wait that proves the roster below exists before it is asked for. */
+    TF_CHECK_MSG(nf_expect(&b, "fed_sjoin: channel=" CHAN_T " member=" NICK_A
+                                  " server=" NAME_A,
+                           T_IO_MS) == 0,
+                 "node B never applied alice's relayed SJOIN, so the roster "
+                 "below would be answered by a node that does not hold the "
+                 "channel yet: %s",
                  b.out);
     /* 4. THE RECEIVER'S ROSTER IS C'S SILENCE, NOT A'S BURST. B holds #T from
      * alice's relayed SJOIN, so a B-side NAMES lists her -- and only her. A

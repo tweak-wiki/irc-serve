@@ -35,6 +35,13 @@ void fed_link_set_state(server_link_t *link, handshake_state_t state)
 {
     if (link != NULL) {
         link->state = (int)state;
+        /* Issue #676's sticky bit: the one transition that must be
+         * remembered after the link leaves it. Every other transition
+         * writes state and nothing else, and this one line is why that
+         * sentence stays true. */
+        if (state == ESTABLISHED) {
+            link->ever_established = 1;
+        }
     }
 }
 
