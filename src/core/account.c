@@ -164,7 +164,7 @@ void account_notify_current(server_t *s, conn_t *c)
     acct = account_name(c);
     if (acct[0] != '\0') {
         (void)send_line(s, c, prefix, "ACCOUNT",
-                        (const char *const[]){ acct, "PASS" }, 2);
+                        (const char *const[]){ acct }, 1);
         printf("[observable] account_notify: fd=%d nick=%s account=%s state=PASS\n",
                c->fd, c->nick, acct);
         return;
