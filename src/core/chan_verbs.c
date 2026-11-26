@@ -76,17 +76,19 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
         size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
 
         if (len == 0) {
-            return -1; /* empty element names no channel: JOIN #a,,#b refused */
+            /* Empty element: skip (spec channels, Verb arity). A wholly-empty
+             * list still yields n == 0, which the caller refuses with 461. */
+        } else {
+            if (n >= max || len >= stride) {
+                /* An over-long element or more names than `max` still refuses the
+                 * whole list, because the caller cannot honour it in part. */
+                return -1;
+            }
+            memcpy(store + (size_t)n * stride, p, len);
+            store[(size_t)n * stride + len] = '\0';
+            names[n] = store + (size_t)n * stride;
+            n++;
         }
-        if (n >= max || len >= stride) {
-            /* An over-long element or more names than `max` still refuses the
-            * whole list, because the caller cannot honour it in part. */
-            return -1;
-        }
-        memcpy(store + (size_t)n * stride, p, len);
-        store[(size_t)n * stride + len] = '\0';
-        names[n] = store + (size_t)n * stride;
-        n++;
         if (comma == NULL) {
             break;
         }
