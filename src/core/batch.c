@@ -213,6 +213,10 @@ void batch_begin_command(conn_t *c, const message_t *m)
     if (c == NULL || m == NULL) {
         return;
     }
+    /* Client-only reference: ignore it unless the conn negotiated `batch`. */
+    if (cap_enabled(c, CAP_BATCH) == 0) {
+        return;
+    }
     note_reference(c, m, '+');
 }
 

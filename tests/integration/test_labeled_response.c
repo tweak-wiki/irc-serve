@@ -208,19 +208,18 @@ static void case_advertised_and_single_line(void)
 }
 
 /* ---------------------------------------------------------------------------
- * 2. A SINGLE-LINE RESPONSE WITHOUT THE CAPABILITY: THE LABEL, NO `BATCH`, NO `ACK`
+ * 2. A SINGLE-LINE RESPONSE WITHOUT THE CAPABILITY: NO LABEL, NO `BATCH`, NO `ACK`
  * ---------------------------------------------------------------------------
- * The per-destination half, and it is three separate absences on one connection.
+ * The per-destination half, and it is three absences on one connection.
  *
- * A client that sends a `label=` without negotiating `labeled-response` has asked for
- * the TAG -- which costs it nothing it was not already expecting -- and has NOT asked for
- * the `BATCH` verb or the `ACK` verb, which the specification attaches to the
- * negotiation: "Clients requesting this capability indicate that they are capable of
- * handling the message tag, batch type, and ACK response described below from servers."
- *
- * So it gets the label, no grouping batch and no `ACK`. This is the same objection §4.4.3
- * raises against a `FAIL` reaching a client that negotiated nothing, applied to two
- * command words instead of one.
+ * A client that sends a `label=` without negotiating `labeled-response` has sent a
+ * client-only tag the server must not echo: message-tags §4 + labeled-response
+ * §3.1 say the tag block a client receives must only contain tags it asked for.
+ * So it gets a bare numeric -- no `label=`, no grouping `BATCH`, and no `ACK`,
+ * the last two being verbs the specification attaches to the negotiation:
+ * "Clients requesting this capability indicate that they are capable of
+ * handling the message tag, batch type, and ACK response described below from
+ * servers."
  */
 static void case_label_without_capability(void)
 {
@@ -241,12 +240,17 @@ static void case_label_without_capability(void)
 
     mark = tc_received(&a);
     TF_CHECK_MSG(tc_send(&a, line) == 0, "the labelled AWAY failed to send");
-    TF_CHECK_MSG(tc_expect(&a, "@label=plain :" SRV " 417 lr_p :Away message is too "
+    TF_CHECK_MSG(tc_expect(&a, ":" SRV " 417 lr_p :Away message is too "
                            "long\r\n", T_IO_MS) == 0,
-                 "a client that sent a `label=` without negotiating labeled-response did "
-                 "not get the tag on its single-line response. The TAG is the thing the "
-                 "client asked for and it costs nothing it was not expecting.\n"
+                 "a client that sent a `label=` without negotiating labeled-response "
+                 "did not get a bare single-line refusal. The label is a client-only "
+                 "tag and echoing it to an unnegotiated connection leaks it onto a "
+                 "tag block the client never asked for.\n"
                  "  a saw: %s", tc_buffer(&a));
+    TF_CHECK_MSG(count_since(&a, mark, "label=") == 0u,
+                 "%zu lines carry a `label=` tag for a client that never negotiated "
+                 "labeled-response.\n  a saw: %s",
+                 count_since(&a, mark, "label="), tc_buffer(&a) + mark);
     expect_only_replies(&a, mark, "labelled refusal without the capability", 1u);
     TF_CHECK_MSG(count_since(&a, mark, "BATCH") == 0u,
                  "%zu lines are `BATCH` verbs for a client that never negotiated "

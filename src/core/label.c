@@ -82,6 +82,10 @@ void label_begin_command(conn_t *c, const message_t *m)
     c->label_batch[0] = '\0';
     c->label_batch_open = 0;
     c->label_self = 0;
+    /* Client-only tag: ignore it unless the conn negotiated `labeled-response`. */
+    if (cap_enabled(c, CAP_LABELED_RESPONSE) == 0) {
+        return;
+    }
     if (m == NULL || m->tags == NULL) {
         return;
     }
