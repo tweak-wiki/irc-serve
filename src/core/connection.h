@@ -1238,12 +1238,18 @@ int conn_fill(conn_t *c);
  * layer holds a length, and only the counted entry point rejects an embedded
  * NUL (3.2).
  *
- * Terminator handling: a line ends at the first LF. A CR immediately before it
- * belongs to the line, so the CRLF that RFC 1459 2.3 mandates is passed through
- * to the parser intact rather than being stripped here. A bare LF is also
- * accepted as a terminator because message_parse_n() accepts it and the parser
- * -- not the framing layer -- is where the line grammar is enforced. A CR
- * anywhere else stays inside the line and is rejected by the parser. */
+ * Terminator handling: a line ends at the first LF, or at the first CR that
+ * does not start a CRLF pair. A CR immediately before an LF belongs to the
+ * line, so the CRLF that RFC 1459 2.3 mandates is passed through to the
+ * parser intact rather than being stripped here. A bare LF is also accepted
+ * as a terminator because message_parse_n() accepts it and the parser -- not
+ * the framing layer -- is where the line grammar is enforced. A bare CR is
+ * likewise accepted as a terminator (#678): CR-only input frames line by
+ * line instead of sitting in rbuf until the cap closes the connection with
+ * no reply, and each framed line is charged to the flood limiter by the
+ * caller, so CR-stuffing spends rate tokens rather than burning the frame
+ * budget silently. The CR of a CRLF pair stays inside the framed line and is
+ * stripped by the parser. */
 int conn_next_line(conn_t *c, char *dst, size_t dstcap, size_t *len);
 
 /* True when a full line is already buffered. The poll loop uses it to
