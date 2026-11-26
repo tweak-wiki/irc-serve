@@ -349,6 +349,11 @@ irc_add_integration_test(test_userhost_in_names test_userhost_in_names.c)
 # cases are all "this line is on the wire".
 irc_add_integration_test(test_setname test_setname.c)
 
+# #669: USER with an over-long realname is 417 and holds registration, mirroring
+# SETNAME. Its own file because test_registration.c ends by asserting
+# reply_refused=0, which a 417 in that flow would break.
+irc_add_integration_test(test_user_realname_bound test_user_realname_bound.c)
+
 # echo-message (Phase 10.7). Its own file because its assertions are COUNTS and no
 # other capability here has that shape: the defect it invites is two identical
 # deliveries, and a substring search for either one reports success. Every case
