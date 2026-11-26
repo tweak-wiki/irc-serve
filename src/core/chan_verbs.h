@@ -175,6 +175,10 @@ chan_verdict_t authority_ok(server_t *s, conn_t *c, const chan_t *ch,
 void deliver_state_change(server_t *s, conn_t *c, chan_t *ch,
                                  const char *verb, const char *prefix,
                                  const char *const *params, int nparams);
+/* The 331/332/333 answer (defined in core/chan_verbs.c). Shared through
+ * this header since #543 TU-50 (core/chan_verbs_topic.c is its first outside
+ * caller); still used by handle_join(), so it stays defined in chan_verbs.c. */
+void send_topic(server_t *s, conn_t *dst, const chan_t *ch);
 
 /* The command surface. Each is a `command_t::fn` and each obeys the same shape:
  * validate arity, resolve the channel, answer the local preconditions (442/482/

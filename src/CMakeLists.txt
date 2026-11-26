@@ -245,6 +245,9 @@ add_library(irc_core STATIC
   # #543 TU-49: 4.1's PART (handle_part()) split out of core/chan_verbs.c.
   # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
   core/chan_verbs_part.c
+  # #543 TU-50: 4.1's TOPIC (handle_topic()) split out of core/chan_verbs.c.
+  # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
+  core/chan_verbs_topic.c
   core/msg_verbs.c
   # Phase 10.12: IRCv3 `batch`, the client-facing half -- the BATCH verb and the
   # `@`/`+` reference tags. It is a module of its own for the reason cap.c is: the
