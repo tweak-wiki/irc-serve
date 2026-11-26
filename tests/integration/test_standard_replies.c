@@ -1,5 +1,5 @@
-/* test_standard_replies.c -- `standard-replies`, the four migrated numerics, and
- * the KICK reason bound that `KICKLEN` was waiting for.
+/* test_standard_replies.c -- `standard-replies`, the fourteen migrated numerics,
+ * and the KICK reason bound that `KICKLEN` was waiting for.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS BEING CLAIMED
@@ -9,19 +9,33 @@
  *     FAIL <command> <code> [<context>...] :<description>
  *
  * for a client that negotiated it, and as the legacy numeric -- byte-identical --
- * for a client that did not. Four numerics migrate, and the rule is one sentence:
- * **a legacy numeric migrates where it answers more than one question ON THIS
- * NODE**, so the number alone cannot tell a client which refusal happened.
+ * for a client that did not. Fourteen numerics migrate. The first four did
+ * because one number answered several questions (417 four refusals; 461 too few
+ * AND too many with a text that calls both "not enough"; 482 three refusals;
+ * 464 two). The ten #727 added migrate although each answers exactly one
+ * question on this node, because a negotiated client matching on numbers had to
+ * keep the whole legacy table anyway:
  *
  *   417  four refusals (PRIVMSG text, AWAY, SETNAME realname, KICK reason)
  *   461  too few AND too many -- and its text says "Not enough parameters" in the
  *        too-many case too, so the number is ambiguous AND the text is wrong
  *   482  not a channel operator | not an IRC operator | the verb is disabled
  *   464  not an IRC operator (SASL failures are 904, never 464)
+ *   401  no such nick (PRIVMSG/WHOIS/KICK/MODE/INVITE misses)
+ *   403  no such channel (JOIN/KNOCK/LIST/WHO/PRIVMSG name misses)
+ *   404  cannot send (PRIVMSG to a channel the sender is not on)
+ *   441  user not in channel (KICK and MODE +o naming a real nick elsewhere)
+ *   442  not on channel (PART/TOPIC/KICK/MODE/INVITE without membership)
+ *   471  channel full (no emitter on this node; the table row keeps the mapping
+ *        total for a future site)
+ *   472  unknown mode char (every MODE refusal)
+ *   473  invite-only (no emitter on this node; see 471)
+ *   474  banned (JOIN against a ban)
+ *   475  bad key (no emitter on this node; see 471)
  *
- * Every OTHER numeric on this node answers exactly one question and is asserted
- * UNCHANGED here, because "only these four" is half the claim and a test that only
- * checked the four would pass on a migration of all thirty.
+ * Every OTHER numeric on this node (402, 451, 462 and the rest) is asserted
+ * UNCHANGED here, because "only these fourteen" is half the claim and a test
+ * that only checked the fourteen would pass on a migration of all thirty.
  *
  * ---------------------------------------------------------------------------
  * WHY THE NON-NEGOTIATING CLIENT IS THE MORE IMPORTANT HALF
@@ -626,11 +640,326 @@ static void case_kicklen(void)
     nf_free(&node);
 }
 
-/* WHAT DOES NOT MIGRATE, because "only these four" is half the claim.
+/* 401, BOTH BRANCHES.
  *
- * `401` for a nickname this node does not hold answers exactly ONE question, so it
- * reaches a client that negotiated `standard-replies` unchanged. A migration of every
- * numeric would pass every other case in this file and fail this one. */
+ * WHOIS of a nickname nothing holds is the cheapest 401 to reach, and the 318
+ * that must still follow it is asserted on both branches: 318 is not a refusal
+ * and never migrates, and a FAIL that ate the end-of-list marker would leave a
+ * client unable to tell "answered" from "still working". `both_answers()` cannot
+ * express a two-line window, so the two clients are driven by hand here. */
+static void case_401(void)
+{
+    nf_node_t node;
+    test_client_t plain;
+    test_client_t fancy;
+    size_t mark;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    tc_init(&plain);
+    register_caps(&plain, node.port, "p401", NULL);
+    mark = tc_received(&plain);
+    TF_CHECK_MSG(tc_send(&plain, "WHOIS nosuchnick") == 0, "WHOIS send failed");
+    expect_line_since(&plain, mark, "WHOIS of a nickname this node does not hold",
+                      ":" SRV " 401 p401 nosuchnick :No such nick/channel\r\n");
+    expect_line_since(&plain, mark, "the end of the WHOIS",
+                      ":" SRV " 318 p401 nosuchnick :End of /WHOIS list\r\n");
+    expect_only_replies(&plain, mark, "whois-401-plain", 2u, 0);
+
+    tc_init(&fancy);
+    register_caps(&fancy, node.port, "s401", CAP_STANDARD_REPLIES);
+    mark = tc_received(&fancy);
+    TF_CHECK_MSG(tc_send(&fancy, "WHOIS nosuchnick") == 0, "WHOIS send failed");
+    expect_line_since(&fancy, mark, "WHOIS of a nickname this node does not hold",
+                      ":" SRV " FAIL s401 WHOIS ERR_NOSUCHNICK nosuchnick :No "
+                      "such nick/channel\r\n");
+    expect_line_since(&fancy, mark, "the end of the WHOIS",
+                      ":" SRV " 318 s401 nosuchnick :End of /WHOIS list\r\n");
+    expect_only_replies(&fancy, mark, "whois-401-fancy", 2u, 1);
+
+    tc_close(&plain);
+    tc_close(&fancy);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* 403, FOUR PRODUCERS.
+ *
+ * The same number from four different places: KNOCK's existence check, LIST's
+ * existence check, JOIN's name check (a name that is not a channel at all, so
+ * the shared canonical_channel() refuses it), and the shared resolver behind
+ * PRIVMSG. All four carry the channel as FAIL's <context>, and all four leave
+ * the legacy 403 byte-identical. */
+static void case_403(void)
+{
+    nf_node_t node;
+    test_client_t plain;
+    test_client_t fancy;
+    size_t mark;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    both_answers(node.port, "knock-403", "KNOCK of a channel this node holds",
+                 NULL, "KNOCK #NOSUCH", "pk403", "sk403", NULL,
+                 CAP_STANDARD_REPLIES,
+                 ":" SRV " 403 pk403 #NOSUCH :No such channel\r\n",
+                 ":" SRV " FAIL sk403 KNOCK ERR_NOSUCHCHANNEL #NOSUCH :No such "
+                 "channel\r\n");
+
+    both_answers(node.port, "list-403", "LIST of a channel this node holds", NULL,
+                 "LIST #NOSUCH", "pl403", "sl403", NULL, CAP_STANDARD_REPLIES,
+                 ":" SRV " 403 pl403 #NOSUCH :No such channel\r\n",
+                 ":" SRV " FAIL sl403 LIST ERR_NOSUCHCHANNEL #NOSUCH :No such "
+                 "channel\r\n");
+
+    both_answers(node.port, "join-403", "JOIN of a name that is not a channel",
+                 NULL, "JOIN notachannel", "pj403", "sj403", NULL,
+                 CAP_STANDARD_REPLIES,
+                 ":" SRV " 403 pj403 NOTACHANNEL :No such channel\r\n",
+                 ":" SRV " FAIL sj403 JOIN ERR_NOSUCHCHANNEL NOTACHANNEL :No "
+                 "such channel\r\n");
+
+    both_answers(node.port, "privmsg-403", "PRIVMSG at a name nothing holds",
+                 NULL, "PRIVMSG #NOSUCH :hi", "pm403", "sm403", NULL,
+                 CAP_STANDARD_REPLIES,
+                 ":" SRV " 403 pm403 #NOSUCH :No such channel\r\n",
+                 ":" SRV " FAIL sm403 PRIVMSG ERR_NOSUCHCHANNEL #NOSUCH :No "
+                 "such channel\r\n");
+
+    /* WHO names a channel nothing holds: 403 AND the 315 that must still end the
+     * list, on both branches. A two-line window, so by hand like case_401. */
+    tc_init(&plain);
+    register_caps(&plain, node.port, "pwho", NULL);
+    mark = tc_received(&plain);
+    TF_CHECK_MSG(tc_send(&plain, "WHO #NOSUCH") == 0, "WHO send failed");
+    expect_line_since(&plain, mark, "WHO of a channel this node does not hold",
+                      ":" SRV " 403 pwho #NOSUCH :No such channel\r\n");
+    expect_line_since(&plain, mark, "the end of the WHO list",
+                      ":" SRV " 315 pwho #NOSUCH :End of WHO list\r\n");
+    expect_only_replies(&plain, mark, "who-403-plain", 2u, 0);
+
+    tc_init(&fancy);
+    register_caps(&fancy, node.port, "swho", CAP_STANDARD_REPLIES);
+    mark = tc_received(&fancy);
+    TF_CHECK_MSG(tc_send(&fancy, "WHO #NOSUCH") == 0, "WHO send failed");
+    expect_line_since(&fancy, mark, "WHO of a channel this node does not hold",
+                      ":" SRV " FAIL swho WHO ERR_NOSUCHCHANNEL #NOSUCH :No "
+                      "such channel\r\n");
+    expect_line_since(&fancy, mark, "the end of the WHO list",
+                      ":" SRV " 315 swho #NOSUCH :End of WHO list\r\n");
+    expect_only_replies(&fancy, mark, "who-403-fancy", 2u, 1);
+
+    tc_close(&plain);
+    tc_close(&fancy);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* 404: PRIVMSG to a channel that exists, from a sender that is not on it.
+ *
+ * The channel has to EXIST or the answer is 403 instead of 404, so a creator
+ * holds it open while the two clients under test stay off it -- the same shape
+ * as case_482's creator. */
+static void case_404(void)
+{
+    nf_node_t node;
+    test_client_t creator;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    tc_init(&creator);
+    register_caps(&creator, node.port, "creator", NULL);
+    join(&creator, "creator");
+
+    both_answers(node.port, "privmsg-404",
+                 "PRIVMSG to a channel the sender is not on", NULL,
+                 "PRIVMSG " CHAN " :hi", "p404", "s404", NULL,
+                 CAP_STANDARD_REPLIES,
+                 ":" SRV " 404 p404 " CHAN " :Cannot send to channel\r\n",
+                 ":" SRV " FAIL s404 PRIVMSG ERR_CANNOTSENDTOCHAN " CHAN
+                 " :Cannot send to channel\r\n");
+
+    tc_close(&creator);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* 441 AND 442, AND THE KICK-FLAVOURED 401.
+ *
+ * 442 needs nothing to exist: not being on a channel the node never heard of is
+ * still not being on it. 441 needs more -- a kicker with privilege, a target
+ * that is real and elsewhere, and a ghost that is nowhere -- so a plain op and
+ * a negotiated op each own a channel and kick both names. */
+static void case_441_442(void)
+{
+    nf_node_t node;
+    test_client_t boss;
+    test_client_t sboss;
+    test_client_t target;
+    size_t mark;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    both_answers(node.port, "part-442", "PART of a channel the client is not on",
+                 NULL, "PART #NOSUCH", "p442", "s442", NULL,
+                 CAP_STANDARD_REPLIES,
+                 ":" SRV " 442 p442 #NOSUCH :You're not on that channel\r\n",
+                 ":" SRV " FAIL s442 PART ERR_NOTONCHANNEL #NOSUCH :You're not "
+                 "on that channel\r\n");
+
+    tc_init(&boss);
+    register_caps(&boss, node.port, "boss", NULL);
+    join(&boss, "boss");
+
+    tc_init(&target);
+    register_caps(&target, node.port, "target", NULL);
+
+    tc_init(&sboss);
+    register_caps(&sboss, node.port, "sboss", CAP_STANDARD_REPLIES);
+    TF_CHECK_MSG(tc_send(&sboss, "JOIN #U") == 0, "sboss JOIN send failed");
+    TF_CHECK_MSG(tc_expect(&sboss, " JOIN #U\r\n", T_IO_MS) == 0,
+                 "sboss did not join #U");
+    drain(&sboss);
+
+    /* 441: the target is real (registered) and simply elsewhere. */
+    mark = tc_received(&boss);
+    TF_CHECK_MSG(tc_send(&boss, "KICK " CHAN " target :x") == 0,
+                 "the 441 KICK failed to send");
+    expect_line_since(&boss, mark, "KICK of a nick that is not on the channel",
+                      ":" SRV " 441 boss target " CHAN " :They're not on that "
+                      "channel\r\n");
+    expect_only_replies(&boss, mark, "kick-441-plain", 1u, 0);
+
+    mark = tc_received(&sboss);
+    TF_CHECK_MSG(tc_send(&sboss, "KICK #U target :x") == 0,
+                 "the 441 KICK failed to send");
+    expect_line_since(&sboss, mark, "KICK of a nick that is not on the channel",
+                      ":" SRV " FAIL sboss KICK ERR_USERNOTINCHANNEL target #U"
+                      " :They're not on that channel\r\n");
+    expect_only_replies(&sboss, mark, "kick-441-fancy", 1u, 1);
+
+    /* 401: the ghost is nowhere at all. */
+    mark = tc_received(&boss);
+    TF_CHECK_MSG(tc_send(&boss, "KICK " CHAN " ghost :x") == 0,
+                 "the 401 KICK failed to send");
+    expect_line_since(&boss, mark, "KICK of a nick this node does not hold",
+                      ":" SRV " 401 boss ghost :No such nick/channel\r\n");
+    expect_only_replies(&boss, mark, "kick-401-plain", 1u, 0);
+
+    mark = tc_received(&sboss);
+    TF_CHECK_MSG(tc_send(&sboss, "KICK #U ghost :x") == 0,
+                 "the 401 KICK failed to send");
+    expect_line_since(&sboss, mark, "KICK of a nick this node does not hold",
+                      ":" SRV " FAIL sboss KICK ERR_NOSUCHNICK ghost :No such "
+                      "nick/channel\r\n");
+    expect_only_replies(&sboss, mark, "kick-401-fancy", 1u, 1);
+
+    tc_close(&target);
+    tc_close(&sboss);
+    tc_close(&boss);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* 472: MODE with an unknown letter, from an op so the refusal is about the
+ * letter and not about privilege (a non-op gets 482 first). The +z form is
+ * #727's own example; all three 472 sites render the same wire. */
+static void case_472(void)
+{
+    nf_node_t node;
+    test_client_t boss;
+    test_client_t sboss;
+    size_t mark;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    tc_init(&boss);
+    register_caps(&boss, node.port, "boss", NULL);
+    join(&boss, "boss");
+
+    tc_init(&sboss);
+    register_caps(&sboss, node.port, "sboss", CAP_STANDARD_REPLIES);
+    TF_CHECK_MSG(tc_send(&sboss, "JOIN #U") == 0, "sboss JOIN send failed");
+    TF_CHECK_MSG(tc_expect(&sboss, " JOIN #U\r\n", T_IO_MS) == 0,
+                 "sboss did not join #U");
+    drain(&sboss);
+
+    mark = tc_received(&boss);
+    TF_CHECK_MSG(tc_send(&boss, "MODE " CHAN " +z") == 0,
+                 "the 472 MODE failed to send");
+    expect_line_since(&boss, mark, "MODE with an unknown letter",
+                      ":" SRV " 472 boss z :is unknown mode char to me for "
+                      "channel " CHAN "\r\n");
+    expect_only_replies(&boss, mark, "mode-472-plain", 1u, 0);
+
+    mark = tc_received(&sboss);
+    TF_CHECK_MSG(tc_send(&sboss, "MODE #U +z") == 0,
+                 "the 472 MODE failed to send");
+    expect_line_since(&sboss, mark, "MODE with an unknown letter",
+                      ":" SRV " FAIL sboss MODE ERR_UNKNOWNMODE z :is unknown "
+                      "mode char to me for channel #U\r\n");
+    expect_only_replies(&sboss, mark, "mode-472-fancy", 1u, 1);
+
+    tc_close(&sboss);
+    tc_close(&boss);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* 474: JOIN against a ban.
+ *
+ * The creator holds the channel and hangs the ban before either newcomer
+ * arrives, so both JOINs refuse on the same mask and differ in exactly the
+ * negotiated capability. */
+static void case_474(void)
+{
+    nf_node_t node;
+    test_client_t creator;
+    test_client_t plain;
+    test_client_t fancy;
+    size_t mark;
+
+    TF_CHECK_MSG(nf_spawn_binary(&node) == 0, "could not spawn the node");
+
+    tc_init(&creator);
+    register_caps(&creator, node.port, "creator", NULL);
+    join(&creator, "creator");
+    TF_CHECK_MSG(tc_send(&creator, "MODE " CHAN " +b *!*@127.0.0.1") == 0,
+                 "the +b MODE failed to send");
+    drain(&creator);
+
+    tc_init(&plain);
+    register_caps(&plain, node.port, "p474", NULL);
+    mark = tc_received(&plain);
+    TF_CHECK_MSG(tc_send(&plain, "JOIN " CHAN) == 0, "JOIN send failed");
+    expect_line_since(&plain, mark, "JOIN against a ban",
+                      ":" SRV " 474 p474 " CHAN " :Cannot join channel "
+                      "(banned)\r\n");
+    expect_only_replies(&plain, mark, "join-474-plain", 1u, 0);
+
+    tc_init(&fancy);
+    register_caps(&fancy, node.port, "s474", CAP_STANDARD_REPLIES);
+    mark = tc_received(&fancy);
+    TF_CHECK_MSG(tc_send(&fancy, "JOIN " CHAN) == 0, "JOIN send failed");
+    expect_line_since(&fancy, mark, "JOIN against a ban",
+                      ":" SRV " FAIL s474 JOIN ERR_BANNEDFROMCHAN " CHAN
+                      " :Cannot join channel (banned)\r\n");
+    expect_only_replies(&fancy, mark, "join-474-fancy", 1u, 1);
+
+    tc_close(&plain);
+    tc_close(&fancy);
+    tc_close(&creator);
+    TF_CHECK_MSG(nf_stop(&node) == 0, "the node did not exit cleanly");
+    nf_free(&node);
+}
+
+/* WHAT DOES NOT MIGRATE, because "only these fourteen" is half the claim.
+ *
+ * `401` USED to be the example here -- one question, one number, asserted
+ * unchanged for a negotiated client. #727 moved it: a negotiated client gets
+ * `FAIL WHOIS ERR_NOSUCHNICK` now, and the legacy 401 is what a client that
+ * negotiated nothing gets. Both halves are asserted, because the migration must
+ * not move the legacy branch. */
 static void case_unambiguous_numerics_do_not_move(void)
 {
     nf_node_t node;
@@ -642,14 +971,16 @@ static void case_unambiguous_numerics_do_not_move(void)
     tc_init(&fancy);
     register_caps(&fancy, node.port, "unmoved", CAP_STANDARD_REPLIES);
 
-    /* 401: no such nick. One question, one number. */
+    /* 401: no such nick. Migrated by #727; the 318 that follows it is not a
+     * refusal and stays a numeric. Asserting the pairing pins that the
+     * end-of-list marker still follows the FAIL, which is RFC 2812 3.3.4's
+     * pairing and the reason a client can tell "answered" from "still
+     * working". */
     mark = tc_received(&fancy);
     TF_CHECK_MSG(tc_send(&fancy, "WHOIS nosuchnick") == 0, "WHOIS send failed");
     expect_line_since(&fancy, mark, "WHOIS of a nickname this node does not hold",
-                      ":" SRV " 401 unmoved nosuchnick :No such nick/channel\r\n");
-    /* 318 is not a refusal and is not migrated either; asserting it pins the fact
-     * that the end-of-list marker still follows the 401, which is RFC 2812 3.3.4's
-     * pairing and the reason a client can tell "answered" from "still working". */
+                      ":" SRV " FAIL unmoved WHOIS ERR_NOSUCHNICK nosuchnick :No "
+                      "such nick/channel\r\n");
     expect_line_since(&fancy, mark, "the end of the WHOIS",
                       ":" SRV " 318 unmoved nosuchnick :End of /WHOIS list\r\n");
     expect_only_replies(&fancy, mark, "whois-401", 2u, 1);
@@ -775,6 +1106,21 @@ static void case_advertised(void)
  *       256-byte refusal and the ` KICKLEN=255 ` token, and it is the fault that
  *       proves the bound is tested rather than assumed. It also proves the token is
  *       derived: a node that advertised 512 while refusing at 255 fails here too.
+ *
+ *   a TABLE CODE CORRUPTED -- reply.c, k_std_fail_map: the `472` row's code
+ *       replaced with `BOGUS_CODE_FOR_RED_CHECK`. Fails case_472 on the fancy
+ *       needle ONLY -- the client receives `FAIL sboss MODE BOGUS_CODE_FOR_RED_CHECK
+ *       z ...` -- which proves the case executes against the table rather than a
+ *       hardcoded rendering, and that the legacy branch is untouched by a table
+ *       fault. Reverted after the red.
+ *
+ *   an OVERRIDE CODE CORRUPTED -- chan_verbs_knock.c, handle_knock(): the 482
+ *       override replaced with `BOGUS_OVERRIDE_RED_CHECK`. Fails case_482 on the
+ *       fancy side as a TIMEOUT: reply_std() refuses the unlisted code as `bad_code`
+ *       (counted on n_reply_refused, printed as `reply_refused: ... reason=bad_code`)
+ *       and the client receives NOTHING -- which is the fail-closed half of #727's
+ *       allowlist, and why the plain side of the same case still passes.
+ *       Reverted after the red.
  */
 int main(void)
 {
@@ -783,6 +1129,12 @@ int main(void)
     case_461();
     case_482();
     case_464();
+    case_401();
+    case_403();
+    case_404();
+    case_441_442();
+    case_472();
+    case_474();
     case_kicklen();
     case_unambiguous_numerics_do_not_move();
 

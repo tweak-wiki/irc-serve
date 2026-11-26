@@ -66,13 +66,15 @@ void handle_knock(server_t *s, conn_t *c, const message_t *m)
      * the thing the client got wrong rather than about the capability it lacks.
      * That distinction is the only difference a client can act on: one of them
      * is fixable by typing a different channel. */
-    if (!canonical_channel(s, c, m->params[0], canonical, sizeof canonical)) {
+    if (!canonical_channel(s, c, "KNOCK", m->params[0], canonical,
+                           sizeof canonical)) {
         return;
     }
     ch = server_chan_get(s, canonical);
     if (ch == NULL) {
-        (void)reply(s, c, "403", (const char *const[]){ canonical }, 1,
-                    "No such channel");
+        (void)reply_refused(s, c, "KNOCK", NULL, "403",
+                            (const char *const[]){ canonical }, 1,
+                            "No such channel");
         return;
     }
 

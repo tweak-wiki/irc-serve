@@ -120,7 +120,7 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
      * case is in resolve_joined()'s own comment. They are all about the
      * request rather than about the invitee, so they come before anything the
      * invitee is told. */
-    ch = resolve_joined(s, c, chan_arg);
+    ch = resolve_joined(s, c, "INVITE", chan_arg);
     if (ch == NULL) {
         return;
     }
@@ -159,12 +159,13 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
      * on a server this node holds a link to (fanout_resolve refused every
      * other shape of that already), so it proceeds: the mesh half below is
      * what reaches them. */
-    if (fanout_resolve(s, c, nick_arg, FANOUT_MESSAGE, &t) == 0) {
+    if (fanout_resolve_cmd(s, c, "INVITE", nick_arg, FANOUT_MESSAGE, &t) == 0) {
         return; /* 401 or 403 already sent */
     }
     if (t.kind != FANOUT_LOCAL_USER && t.kind != FANOUT_REMOTE_USER) {
-        (void)reply(s, c, "401", (const char *const[]){ t.name }, 1,
-                    "No such nick/channel");
+        (void)reply_refused(s, c, "INVITE", NULL, "401",
+                            (const char *const[]){ t.name }, 1,
+                            "No such nick/channel");
         printf("[observable] chan_invite_refused: nick=%s target=%s kind=%d "
                "reason=not_a_nick\n",
                c->nick, t.name, (int)t.kind);

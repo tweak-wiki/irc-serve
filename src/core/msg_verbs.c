@@ -241,7 +241,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
     if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
         char shown[CONN_LOG_FIELD_MAX + 1u];
 
-        (void)reply(s, c, "404", NULL, 0, "Cannot send to channel");
+        (void)reply_refused(s, c, verb, NULL, "404", NULL, 0, "Cannot send to channel");
         (void)conn_text_logsafe(shown, sizeof shown, m->params[0]);
         printf("[observable] msg_refused: verb=%s nick=%s target=%s "
                "target_len=%zu target_bad_bytes=%zu reason=unrenderable_source\n",
@@ -263,7 +263,7 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
         return;
     }
 
-    if (fanout_resolve(s, c, m->params[0], FANOUT_MESSAGE, &t) == 0) {
+    if (fanout_resolve_cmd(s, c, verb, m->params[0], FANOUT_MESSAGE, &t) == 0) {
         return; /* 401 or 403 already sent */
     }
     /* A `nick@server` target: 3.1's LAST ROW, and it used to be refused here with
@@ -337,8 +337,9 @@ static void send_message(server_t *s, conn_t *c, const message_t *m,
      * about the NAME, and neither 404 nor 442 is true of it.
      */
     if (is_channel != 0 && member == 0 && is_notice == 0) {
-        (void)reply(s, c, "404", (const char *const[]){ t.name }, 1,
-                    "Cannot send to channel");
+        (void)reply_refused(s, c, verb, NULL, "404",
+                            (const char *const[]){ t.name }, 1,
+                            "Cannot send to channel");
         printf("[observable] msg_refused: verb=%s nick=%s target=%s "
                "reason=not_on_channel\n",
                verb, c->nick, t.name);
@@ -696,8 +697,9 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
              * otherwise be the only answer available, and that answer cannot
              * distinguish "no such channel" from "an empty channel". Both are
              * sent: 403 says which, 315 says the list is over. */
-            (void)reply(s, c, "403", (const char *const[]){ canonical }, 1,
-                        "No such channel");
+            (void)reply_refused(s, c, "WHO", NULL, "403",
+                                (const char *const[]){ canonical }, 1,
+                                "No such channel");
             (void)reply(s, c, "315", (const char *const[]){ canonical }, 1,
                         "End of WHO list");
             return;
@@ -1166,8 +1168,9 @@ void handle_whois(server_t *s, conn_t *c, const message_t *m)
          * nick and received only 401 cannot tell "that user does not exist" from
          * "the server is still working on it", and 318 is the end-of-list marker
          * the RFC pairs with every other WHOIS reply. */
-        (void)reply(s, c, "401", (const char *const[]){ nick }, 1,
-                    "No such nick/channel");
+        (void)reply_refused(s, c, "WHOIS", NULL, "401",
+                            (const char *const[]){ nick }, 1,
+                            "No such nick/channel");
         (void)reply(s, c, "318", (const char *const[]){ nick }, 1,
                     "End of /WHOIS list");
         return;
