@@ -32,14 +32,15 @@ into a temporary one that clears on the next resync.
 
 ## Status
 
-**A working server, released as [v0.8.0-federation](https://github.com/tweak-wiki/irc-serve/releases/tag/v0.8.0-federation).
+**A working server, released as [v1.0.1](https://github.com/tweak-wiki/irc-serve/releases/tag/v1.0.1).
 153 tests, 0 skipped, 0 open code-scanning alerts, 0 required third-party dependencies.**
 
 `irc-serve --help` prints the version — one definition, in `src/core/server.h`,
 which CMake, the packaging and every report of it read; `test_version_truth`
-fails the build if any copy disagrees. Tags follow `v0.N.0-<area>`; the newest
-is `v0.8.0-federation`, the federation-integration release (actor echo,
-inbound S-verb emission, SASL 903–908, remote targets, departure propagation),
+fails the build if any copy disagrees. Tags follow `vX.Y.Z`; the newest is
+`v1.0.1`, the first stable line — 0.8.0's federation paths plus the audit
+backlog, IRCv3 compliance work, and conventional binary distribution
+(linux-amd64/darwin-arm64 tarballs with SHA256SUMS and build attestations),
 verified live on a two-node staging mesh.
 
 | | |
@@ -329,14 +330,14 @@ Download the tarball for your platform from the
 (`irc-serve-<version>-<os>-<arch>.tar.gz`), then verify and run:
 
 ```sh
-tar xzf irc-serve-1.0.0-linux-amd64.tar.gz
-cd irc-serve-1.0.0-linux-amd64
+tar xzf irc-serve-1.0.1-linux-amd64.tar.gz
+cd irc-serve-1.0.1-linux-amd64
 
 # integrity: checks every asset against the aggregated list
 sha256sum -c SHA256SUMS
 
 # authenticity: the tarball was built by GitHub Actions, provably
-gh attestation verify irc-serve-1.0.0-linux-amd64.tar.gz --owner tweak-wiki
+gh attestation verify irc-serve-1.0.1-linux-amd64.tar.gz --owner tweak-wiki
 
 ./irc-serve 6667
 ```
