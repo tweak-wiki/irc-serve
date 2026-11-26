@@ -4,6 +4,7 @@ add_executable(test_message_format test_message_format.c)
 add_executable(test_valid_nick test_valid_nick.c)
 add_executable(test_ascii_fold test_ascii_fold.c)
 add_executable(test_cap_bounds test_cap_bounds.c)
+add_executable(test_cap_ls_multiline test_cap_ls_multiline.c)
 add_executable(test_strip_parity test_strip_parity.c)
 
 target_link_libraries(test_message_parse PRIVATE irc_core)
@@ -16,6 +17,7 @@ target_link_libraries(test_strip_parity PRIVATE irc_core)
 # function, with its own failure reporting in the assert(3) style the rest of this
 # directory uses. See the file header for why that is the shape here.
 target_link_libraries(test_cap_bounds PRIVATE irc_core)
+target_link_libraries(test_cap_ls_multiline PRIVATE irc_core)
 
 add_test(NAME MessageParse COMMAND test_message_parse)
 add_test(NAME MessageFormat COMMAND test_message_format)
