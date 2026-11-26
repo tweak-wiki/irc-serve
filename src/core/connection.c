@@ -157,14 +157,16 @@ int conn_fill(conn_t *c)
          * nothing a writer touches -- rbuf is the loop thread's alone, and
          * the publish snapshots the queue tail atomically -- so taking the
          * write-queue lock around it only contends full-duplex peer traffic
-         * against a drain for no reason. tls_active is loop-thread-only
-         * (set in transport_starttls, read here), so the branch itself races
-         * with nothing. */
-        if (c->tls_active != 0) {
+         * against a drain for no reason. tls_active is atomic (release on the
+         * writer's publication in tls_backend_starttls, acquire here): at
+         * N > 0 the handshake is started by a writer out of the pump while
+         * this read runs lock-free on the loop, so the branch must not read
+         * it plain (#743). */
+        if (atomic_load_explicit(&c->tls_active, memory_order_acquire) != 0) {
             pthread_mutex_lock(&c->wq_lock);
         }
         n = transport_recv(c, c->rbuf + c->rlen, room);
-        if (c->tls_active != 0) {
+        if (atomic_load_explicit(&c->tls_active, memory_order_acquire) != 0) {
             pthread_mutex_unlock(&c->wq_lock);
         }
         if (n > 0) {

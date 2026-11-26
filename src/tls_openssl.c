@@ -1902,7 +1902,9 @@ int tls_backend_starttls_peer(conn_t *c, int as_server, const char *peer_host)
     }
     c->t_ops = &k_tls_ops;
     c->t_ctx = ssl;
-    c->tls_active = 1;
+    /* Release: the loop thread reads this flag without wq_lock (see conn_fill),
+     * at N > 0 from a writer thread, so the publication must be atomic. */
+    atomic_store_explicit(&c->tls_active, 1, memory_order_release);
     /* Publish the intent the handshake needs NEXT, which for a handshake that has
      * not started is readability: the first flight we will ever see is a client's
      * ClientHello. SSL_do_handshake() will turn this into writability the moment

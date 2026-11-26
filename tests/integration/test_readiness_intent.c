@@ -305,7 +305,8 @@ static void case_fill_publish_snapshot(void)
             check(0, "read src/core/connection.c", "tf_read_code() failed");
             return;
         }
-        check(strstr(code, "if (c->tls_active != 0)") != NULL,
+        check(strstr(code, "atomic_load_explicit(&c->tls_active, "
+                           "memory_order_acquire) != 0") != NULL,
               "conn_fill() holds wq_lock only around the TLS transport call",
               "the SSL* serialization hold must stay for TLS while the "
               "plaintext read runs lock-free");

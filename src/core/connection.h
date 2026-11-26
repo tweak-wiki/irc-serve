@@ -1094,8 +1094,13 @@ typedef struct conn {
      * agreed and the 670 is queued but the handshake has not been started. The
      * second is the ordering guarantee that the upgrade's confirmation is sent in
      * the CLEAR and the handshake begins only after it has been written: see
-     * conn_pump(). */
-    int         tls_active;
+     * conn_pump().
+     *
+     * Atomic (release/acquire, like state/want_read/want_write below): at N > 0
+     * the handshake is started by a writer thread out of the pump while the
+     * loop thread reads this flag on its read path without holding wq_lock,
+     * so plain publication races (#743). */
+    atomic_int  tls_active;
     int         starttls_pending;
     /* 1 once this connection's TLS HANDSHAKE has been checked for the things that
      * can only be checked once it is finished -- currently the peer's revocation

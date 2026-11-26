@@ -129,7 +129,7 @@ void handle_starttls(server_t *s, conn_t *c, const message_t *m)
                c->fd);
         return;
     }
-    if (c->tls_active != 0) {
+    if (atomic_load_explicit(&c->tls_active, memory_order_acquire) != 0) {
         (void)reply(s, c, "691", NULL, 0,
                     "STARTTLS failed: this connection is already using TLS");
         printf("[observable] starttls_refused: fd=%d reason=ALREADY_TLS\n", c->fd);
