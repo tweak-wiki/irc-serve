@@ -82,10 +82,13 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
                    ch->name, ch->nmembers, ch->nservers);
             sent++;
         }
+        /* A capped LIST is wire-visible: the close carries the flag, so a client
+         * can tell "all channels" from "the first 64". Uncapped closes are byte-identical. */
+        const char *end = (truncated != 0u) ? "End of LIST (truncated)" : "End of LIST";
         if (truncated != 0u) {
             printf("[observable] list_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
                    c->nick, sent, truncated, CHAN_ENUM_MAX);
         }
+        (void)reply(s, c, "323", NULL, 0, "%s", end);
     }
-    (void)reply(s, c, "323", NULL, 0, "End of LIST");
 }

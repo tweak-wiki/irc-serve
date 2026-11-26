@@ -649,7 +649,8 @@ static void remote_who_entry(server_t *s, conn_t *dst, const chan_remote_t *r,
  * nick table and emits one 352 per match, so an unfiltered mask is ~1000x
  * amplification into per-connection queues. Broad masks ('*', '0', empty)
  * enumerate up to the cap with 315 closing the list; only the #217
- * expensive-pattern guard answers 315 alone with no sweep. The channel
+ * expensive-pattern guard answers 315 alone with no sweep. A capped sweep
+ * is wire-visible (#660): the close carries " (truncated)". The channel
  * branch is bounded by membership and is unchanged. */
 #define WHO_MASK_MAX 64
 
@@ -811,13 +812,16 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
         who_entry(s, c, who, NULL, 0u, multiprefix);
         sent++;
     }
+    /* A capped sweep is wire-visible (#660): the close carries the flag, so a
+     * client can tell "all matches" from "the first 64". Uncapped closes
+     * (channel WHO, the #217 guard's 315-alone refusal) are byte-identical. */
     if (truncated != 0u) {
         printf("[observable] who_truncated: nick=%s sent=%zu truncated=%zu cap=%d\n",
                c->nick, sent, truncated, WHO_MASK_MAX);
     }
+    (void)reply(s, c, "315", (const char *const[]){ eomask }, 1, "%s",
+                truncated != 0u ? "End of WHO list (truncated)" : "End of WHO list");
     }
-    (void)reply(s, c, "315", (const char *const[]){ eomask }, 1,
-                "End of WHO list");
 }
 
 /* ---------------------------------------------------------------------------

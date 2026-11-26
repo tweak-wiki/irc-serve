@@ -1028,6 +1028,33 @@ int main(void)
     }
     expect_in_window(&alice, from, end, "WHO bob* terminates",
                      ":" BIN_NAME " 315 alice bob* :End of WHO list\r\n");
+    /* #660: a filtered mask past the 64-row cap truncates visibly. Seventy
+     * nicks under one prefix, so the sweep drops rows at the cap and the 315
+     * close carries the flag; an uncapped mask close stays byte-identical. */
+    {
+        enum { WHO_EXTRA = 70 };
+        static client_t crowd[WHO_EXTRA];
+        char nick[16];
+
+        for (size_t k = 0; k < (size_t)WHO_EXTRA; k++) {
+            (void)snprintf(nick, sizeof nick, "capwho%02u", (unsigned)k);
+            client_open(&crowd[k], &node, nick);
+        }
+        from = open_window(&alice);
+        TF_CHECK_MSG(tc_send(&alice.c, "WHO capwho*") == 0, "tc_send failed");
+        end = drain(&alice);
+        TF_CHECK_MSG(count_in_window(&alice, from, end, ":" BIN_NAME " 352 ") == 64u,
+                     "WHO capwho* produced %zu 352 lines, expected exactly 64 "
+                     "(#170 cap)",
+                     count_in_window(&alice, from, end, ":" BIN_NAME " 352 "));
+        expect_in_window(&alice, from, end, "capped WHO mask 315 carries the flag",
+                         ":" BIN_NAME " 315 alice capwho* :End of WHO list (truncated)\r\n");
+        TF_CHECK_MSG(nf_expect(&node, "who_truncated:", T_IO_MS) == 0,
+                     "the node never reported who_truncated for a WHO past the cap");
+        for (size_t k = 0; k < (size_t)WHO_EXTRA; k++) {
+            tc_close(&crowd[k].c);
+        }
+    }
     /* WHO #chan is bounded by membership, not by the mask cap: unchanged. */
     from = open_window(&alice);
     TF_CHECK_MSG(tc_send(&alice.c, "WHO #Q") == 0, "tc_send failed");

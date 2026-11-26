@@ -1654,7 +1654,16 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
     {
         size_t sent = 0u;
         size_t truncated = 0u;
+        /* Exact live count up front, so the LAST 366 this reply may emit can
+         * carry the flag: a capped bare NAMES is wire-visible, uncapped
+         * per-channel 366s are byte-identical. */
+        size_t live = 0u;
 
+        for (size_t i = 0; i < server_chan_count(s); i++) {
+            if (server_chan_at(s, i) != NULL) {
+                live++;
+            }
+        }
         for (size_t i = 0; i < server_chan_count(s); i++) {
             chan_t *ch = server_chan_at(s, i);
 
@@ -1669,7 +1678,13 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
             printf("[observable] chan_names: channel=%s local=%zu servers=%zu\n",
                    ch->name, ch->nmembers, ch->nservers);
             send_names_list(s, c, ch);
-            send_end_of_names(s, c, ch->name);
+            if (live > (size_t)CHAN_ENUM_MAX &&
+                sent + 1u >= (size_t)CHAN_ENUM_MAX) {
+                (void)reply(s, c, "366", (const char *const[]){ ch->name }, 1,
+                            "%s", "End of /NAMES list (truncated)");
+            } else {
+                send_end_of_names(s, c, ch->name);
+            }
             sent++;
         }
         if (truncated != 0u) {
