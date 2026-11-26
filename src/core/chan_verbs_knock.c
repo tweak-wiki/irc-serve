@@ -25,8 +25,8 @@
  * is not on the channel, so a client has to be able to ask for a favour the
  * origin will not grant to everybody -- and the only thing the RFC names as that
  * authority is an IRC operator. There is no IRCop concept anywhere in this tree:
- * conn_t has no operator field, 004 advertises a user-mode set of "i" that
- * nothing evaluates, and 5's operator model does not exist. A node that answered
+ * conn_t has no operator field, 004 advertises a user-mode set of "i" whose
+ * only evaluated letter is +i, and 5's operator model does not exist. A node
  * KNOCK with 704 RPL_KNOCK would be telling a client that a request was lodged
  * with an origin that has never heard of it, which is the 341-without-the-invite
  * failure this file's INVITE comment describes.

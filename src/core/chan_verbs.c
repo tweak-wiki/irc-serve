@@ -820,6 +820,36 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
     if (n <= 0) {
+        /* An over-long element fails the split exactly like an empty one, but
+         * 461 ("not enough") lies about a name that was too LONG (#677). The
+         * bound is CHAN_MAX_NAME, the same one chan_name_valid() enforces, so
+         * the scan below and the per-name check cannot disagree about which
+         * names fit. Anything else that failed the split -- empty elements,
+         * more names than the list holds -- keeps its 461 below. */
+        const char *p = m->params[0];
+        size_t over_len = 0;
+
+        for (;;) {
+            const char *comma = strchr(p, ',');
+            size_t len = (comma != NULL) ? (size_t)(comma - p) : strlen(p);
+
+            if (len > (size_t)CHAN_MAX_NAME) {
+                over_len = len;
+                break;
+            }
+            if (comma == NULL) {
+                break;
+            }
+            p = comma + 1;
+        }
+        if (over_len > 0) {
+            (void)reply_refused(s, c, "JOIN", NULL, "417", NULL, 0,
+                                "Channel name is too long");
+            printf("[observable] chan_join_refused: nick=%s reason=name_too_long "
+                   "len=%zu max=%d\n",
+                   c->nick, over_len, CHAN_MAX_NAME);
+            return;
+        }
         /* ALSO "TOO FEW", and deliberately NOT a different code: a bare `:` names
          * no channel, so from the client's side it sent nothing usable and
          * NEED_MORE_PARAMS is the true statement. Splitting it would invent a
@@ -2230,6 +2260,56 @@ static void send_ban_list(server_t *s, conn_t *dst, const chan_t *ch)
     printf("[observable] chan_ban_list: channel=%s by=%s masks=%zu\n", ch->name,
            dst->nick, ch->nbans);
 }
+/* MODE <nickname>: RFC 2812 3.1.5 answers a user-mode query with 221, a bad
+ * flag with 501 and another user's modes with 502. The only user mode this
+ * node evaluates is +i, kept on conn_t::invisible; every other letter is 501
+ * rather than a silent accept, so a 221 never disagrees with the bit. The
+ * letters are validated before the bit is touched, so a `+iz` changes nothing.
+ * An empty or sign-only modestring is 461, the same too-FEW shape the channel
+ * path answers it with. Surplus parameters are ignored, not refused: #662
+ * owns MODE's arity and this path must not pre-empt it. */
+static void handle_user_mode(server_t *s, conn_t *c, conn_t *who,
+                             const message_t *m)
+{
+    const char *ms;
+    int plus;
+
+    if (who != c) {
+        (void)reply(s, c, "502", NULL, 0, "Cannot change mode for other users");
+        printf("[observable] user_mode: nick=%s target=%s reason=other\n",
+               c->nick, who->nick);
+        return;
+    }
+    if (m->nparams < 2) {
+        (void)reply(s, c, "221", NULL, 0, "%s", c->invisible ? "+i" : "+");
+        printf("[observable] user_mode: nick=%s modes=%s query=1\n", c->nick,
+               c->invisible ? "+i" : "+");
+        return;
+    }
+    ms = m->params[1];
+    if (ms[0] != '+' && ms[0] != '-') {
+        (void)reply(s, c, "501", NULL, 0, "Unknown MODE flag");
+        printf("[observable] user_mode: nick=%s reason=no_sign\n", c->nick);
+        return;
+    }
+    if (ms[1] == '\0') {
+        (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
+    for (size_t i = 1; ms[i] != '\0'; i++) {
+        if (ms[i] != 'i') {
+            (void)reply(s, c, "501", NULL, 0, "Unknown MODE flag");
+            printf("[observable] user_mode: nick=%s reason=bad_flag\n", c->nick);
+            return;
+        }
+    }
+    plus = (ms[0] == '+');
+    c->invisible = plus;
+    (void)reply(s, c, "221", NULL, 0, "%s", plus ? "+i" : "+");
+    printf("[observable] user_mode: nick=%s modes=%s query=0\n", c->nick,
+           plus ? "+i" : "+");
+}
 
 void handle_mode(server_t *s, conn_t *c, const message_t *m)
 {
@@ -2243,6 +2323,19 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
         (void)reply_refused(s, c, "MODE", NULL, "461", NULL, 0,
                             "Not enough parameters");
         return;
+    }
+    /* A nickname is answered on the user-mode path, never the channel one.
+     * Channel names begin with # or & and nicknames cannot hold either byte,
+     * so the first byte routes with no lookup on the channel side. A name
+     * that is neither a channel sigil nor a connected nick falls through to
+     * resolve_joined() and its 403, exactly as before. */
+    if (m->params[0][0] != CHAN_TYPE1 && m->params[0][0] != CHAN_TYPE2) {
+        conn_t *who = server_nick_lookup(s, m->params[0]);
+
+        if (who != NULL) {
+            handle_user_mode(s, c, who, m);
+            return;
+        }
     }
     ch = resolve_joined(s, c, m->params[0]);
     if (ch == NULL) {

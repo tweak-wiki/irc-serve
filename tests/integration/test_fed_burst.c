@@ -667,7 +667,7 @@ static void send_truncated_burst(server_t *s, server_link_t *link)
     n1[0] = NICK_A;
     n1[1] = NICK_A;
     n1[2] = "127.0.0.1";
-    n1[3] = "-"; /* no user modes: this build evaluates none */
+    n1[3] = "-"; /* +i is local-only and never crosses the burst */
     n1[4] = signon;
     n1[5] = ""; /* no away */
     c1[0] = CHAN_T;
