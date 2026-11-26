@@ -322,6 +322,29 @@ rather than relaxing to `gnu11`. Relaxing would silence a Linux build break by
 giving up the portability guarantee. Read the comment block in
 [`CMakeLists.txt`](CMakeLists.txt) before changing it.
 
+## Install
+
+Download the tarball for your platform from the
+[releases page](https://github.com/tweak-wiki/irc-serve/releases)
+(`irc-serve-<version>-<os>-<arch>.tar.gz`), then verify and run:
+
+```sh
+tar xzf irc-serve-1.0.0-linux-amd64.tar.gz
+cd irc-serve-1.0.0-linux-amd64
+
+# integrity: checks every asset against the aggregated list
+sha256sum -c SHA256SUMS
+
+# authenticity: the tarball was built by GitHub Actions, provably
+gh attestation verify irc-serve-1.0.0-linux-amd64.tar.gz --owner tweak-wiki
+
+./irc-serve 6667
+```
+
+The binary reports its own version on the first `--help` line and in the `002`
+reply at registration; it must match the tag exactly (`test_version_truth`
+fails the build otherwise). TLS is compiled in — there is no `notls` build.
+
 ## Run
 
 ```sh
