@@ -785,51 +785,6 @@ static void refuse_join_too_many(server_t *s, conn_t *c, const char *name)
            shown, c->nick, c->nchans, CONN_MAX_CHANNELS);
 }
 
-/* One channel departure: the authority question, the forward arm, the local
-   write, the detach and the disposal. PART runs it once per resolved channel
-   and JOIN 0 once per channel held (#667); the two calls cannot differ in
-   what "leave" means, so they share the function rather than the shape. A
-   refused (orphaned) channel keeps its membership: fail-closed, and JOIN 0
-   iterates a snapshot so a refusal cannot spin it. */
-static void part_one_channel(server_t *s, conn_t *c, chan_t *ch,
-                             const char *reason, size_t kept_reason,
-                             size_t raw_reason_len)
-{
-    char prefix[CONN_HOSTMASK_MAX];
-    const char *params[1];
-    chan_verdict_t verdict;
-
-    verdict = authority_ok(s, c, ch, "PART", 1);
-    if (verdict == CHAN_VERDICT_REFUSED) {
-        return; /* 437 already sent */
-    }
-    if (verdict == CHAN_VERDICT_FORWARD) {
-        /* No local write, and the client is NOT told: it left a channel it
-         * was on, locally, and that is a fact about this node's membership
-         * that no origin can undo. What differs on a non-owned channel is the
-         * forward: the departure has to reach the origin too, or its roster
-         * keeps a member this node no longer has. */
-        if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
-            return;
-        }
-        params[0] = (reason != NULL) ? reason : c->nick;
-        deliver_state_change(s, c, ch, "PART", prefix, params,
-                             (reason != NULL) ? 1 : 0);
-    }
-    /* The echo reaches the parting client too because it is still a usable
-     * connection and RFC 1459 2.3.1 has it see its own departure. */
-    chan_member_leave(s, ch, c, 1, reason);
-    (void)chan_detach_conn(c, ch);
-    if (kept_reason != raw_reason_len) {
-        printf("[observable] chan_part_stripped: channel=%s nick=%s in_len=%zu "
-               "kept_len=%zu reason=CONTROL_BYTES\n",
-               ch->name, c->nick, raw_reason_len, kept_reason);
-    }
-    /* Disposal AFTER the departure: a channel with no local members AND no
-     * remote members has nothing left to be authoritative about. */
-    (void)chan_dispose_if_empty(s, ch);
-}
-
 /* ---------------------------------------------------------------------------
  * JOIN
  * ---------------------------------------------------------------------------
@@ -864,26 +819,7 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
-    if (strcmp(m->params[0], "0") == 0) {
-        /* RFC 2812 3.2.1: a bare JOIN 0 parts every channel held (#667).
-         * Snapshot first: each departure detaches from c->chans while a
-         * refused one detaches nothing, so draining live would either skip
-         * entries or spin. Only the exact single parameter counts: JOIN 0,#x
-         * takes the list path below, where 0 fails validation per element. */
-        chan_t *leaving[CONN_MAX_CHANNELS];
-        size_t total = c->nchans;
 
-        if (total > CONN_MAX_CHANNELS) {
-            total = CONN_MAX_CHANNELS;
-        }
-        for (size_t k = 0; k < total; k++) {
-            leaving[k] = c->chans[k];
-        }
-        for (size_t k = 0; k < total; k++) {
-            part_one_channel(s, c, leaving[k], NULL, 0, 0);
-        }
-        return;
-    }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
     if (n <= 0) {
@@ -1399,11 +1335,54 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
 
     for (int i = 0; i < n; i++) {
         chan_t *ch = resolve_joined(s, c, names[i]);
+        char prefix[CONN_HOSTMASK_MAX];
+        const char *params[1];
+        chan_verdict_t verdict;
 
         if (ch == NULL) {
             continue;
         }
-        part_one_channel(s, c, ch, reason, kept_reason, raw_reason_len);
+        verdict = authority_ok(s, c, ch, "PART", 1);
+        if (verdict == CHAN_VERDICT_REFUSED) {
+            continue; /* 437 already sent */
+        }
+        if (verdict == CHAN_VERDICT_FORWARD) {
+            /* No local write, and the client is NOT told: it left a channel it
+             * was on, locally, and that is a fact about this node's membership
+             * that no origin can undo. A PART is not a state change to the
+             * channel's state -- it is a withdrawal from it -- and 2.2's
+             * single-writer rule is about the channel's state, so the local half
+             * runs on both paths. What differs is the forward: on a non-owned
+             * channel the departure has to reach the origin too, or its roster
+             * keeps a member this node no longer has. */
+            if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
+                continue;
+            }
+            params[0] = (reason != NULL) ? reason : c->nick;
+            deliver_state_change(s, c, ch, "PART", prefix, params,
+                                 (reason != NULL) ? 1 : 0);
+        }
+        /* The echo reaches the parting client too because it is still a usable
+         * connection and RFC 1459 2.3.1 has it see its own departure -- which is
+         * the SAME emission the origin gets, so the local write is the forwarding
+         * row's write on an owned channel and this explicit one on a non-owned
+         * one, where 3.1 forbids a second pass through the table. */
+        chan_member_leave(s, ch, c, 1, reason);
+        (void)chan_detach_conn(c, ch);
+        if (kept_reason != raw_reason_len) {
+            /* Once per channel the client left, and only when something was
+             * dropped. A client that names five channels in one PART gets five
+             * lines, which is the right count: each is a separate channel's
+             * departure and each was a separate relay. */
+            printf("[observable] chan_part_stripped: channel=%s nick=%s in_len=%zu "
+                   "kept_len=%zu reason=CONTROL_BYTES\n",
+                   ch->name, c->nick, raw_reason_len, kept_reason);
+        }
+        /* Disposal AFTER the departure, and this is the only place a PART frees
+         * a channel. A channel with no local members AND no remote members has
+         * nothing left to be authoritative about; one with remote members
+         * survives, which is the servers[] cache earning its place. */
+        (void)chan_dispose_if_empty(s, ch);
     }
 }
 
