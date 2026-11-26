@@ -1,9 +1,10 @@
 # irc-serve
 
-A federated IRC server in C11. Single-threaded, **no required third-party
-dependencies** — TLS is available and off by default.
+A federated IRC server in C11. Single-threaded by default (**`--writers N`**
+opts into writer threads), **no required third-party dependencies** — TLS is
+available and off by default.
 
-[![CI](https://github.com/TheFirstIstari/irc-serve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TheFirstIstari/irc-serve/actions/workflows/ci.yml)
+[![CI](https://github.com/tweak-wiki/irc-serve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tweak-wiki/irc-serve/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![C](https://img.shields.io/badge/C-C11-00599B.svg)](CMakeLists.txt)
 
@@ -32,7 +33,7 @@ into a temporary one that clears on the next resync.
 ## Status
 
 **A working server, released as [v0.8.0-federation](https://github.com/tweak-wiki/irc-serve/releases/tag/v0.8.0-federation).
-153 tests, 0 skipped, 0 code-scanning alerts, 0 required third-party dependencies.**
+153 tests, 0 skipped, 0 open code-scanning alerts, 0 required third-party dependencies.**
 
 `irc-serve --help` prints the version — one definition, in `src/core/server.h`,
 which CMake, the packaging and every report of it read; `test_version_truth`
@@ -44,11 +45,11 @@ verified live on a two-node staging mesh.
 | | |
 |---|---|
 | Tests | **153 passing, 0 skipped**, 0 failing |
-| Warnings | **0**, on gcc-16, upstream Clang 23 and Apple clang 21 (`-Weverything`), Release **and** Debug |
+| Warnings | **0**, on gcc 16, upstream Clang 23 and Apple clang 21 (`-Weverything`), Release **and** Debug |
 | Sanitizers | ASan + UBSan clean locally; **ASan + LeakSanitizer + UBSan clean on Linux**, on the CI job and in `scripts/gate-linux-cell.sh` |
 | Code scanning | **0 open alerts** (CodeQL) |
 | Language | strict C11, **no required third-party libraries**; TLS (`-DWITH_TLS=ON`) adds the optional one |
-| Size | ~53,400 lines of C (`src/` only) |
+| Size | ~53,700 lines of C (`src/` only) |
 
 Every test that was ever a CTest skip is now a real test and
 `tests/known_skips.txt` is **empty**. What that buys is a bound on **behaviour**: a
@@ -131,7 +132,7 @@ Each is documented where it is excluded.
 | Missing | Why |
 |---|---|
 | Rate limiting | Flood token bucket + 417 exists per connection; no global connection-rate limit. A client may open connections as fast as the node accepts them |
-| Operator (IRCop) model | none. `CHOPER`, `KILL` and `KNOCK` are refused by design (`464`/`481`, `482`), so none can succeed |
+| Operator (IRCop) model | none. `CHOPER` answers `464`, `KILL` answers `421`, `KNOCK` answers `482` — all refused by design, so none can succeed |
 | Services (NickServ, ChanServ) | none. Accounts exist but are **operator-created by editing a file**; `REGISTER` is refused `482` |
 | Account **federation** | the account registry is per node. Two nodes with two registries **disagree** about who somebody is, and `+account` deliberately does not cross a link |
 | Cross-node notifies | `SETNAME`/`AWAY`/`INVITE` notify only the originating node's members until the 4.3 wire bump lands (tracked separately) |
@@ -148,8 +149,10 @@ Each is documented where it is excluded.
 | Refreshing an OCSP staple | a refresh inside the event loop is the thing stapling exists to avoid. A stale staple stays stale until an operator replaces the file and restarts, at which point a waiting peer refuses with `STALE` |
 | Revocation for a **self-signed** peer certificate | there is no issuer, so nobody could have issued a status for it. The link is refused with `NO_ISSUER`, which is a true statement about the configuration: a mesh that wants revocation checking needs a CA in `--tls-ca` |
 
-Client-only IRCv3 specs (`react`, `typing`, `channel-context`, `batch/react`) are
-**N/A for a server** and recorded as such.
+Client-only IRCv3 specs (`react`, `typing`, `reply`, `channel-context`,
+`batch/react`) are **N/A for a server** — their subject is the presentation of
+a message to a human — and recorded as such in SPEC_TRACKING. The server half
+(`TAGMSG` relay, `msgid` stamping) is implemented; the display is the client's.
 
 There is also **no official IRCv3 conformance suite** — `ircv3/ircv3-test-suite`
 does not exist — so IRCv3 support here is hand-written tests against spec text.
@@ -227,7 +230,7 @@ paragraph.
 | `--tls-staple-permissive` | Do **not** refuse a peer link whose stapled revocation status is missing, stale or unverifiable: log the reason and continue. A revoked certificate is then accepted, which is why the default is the strict policy and this is the flag that turns it off. |
 
 ```sh
-git clone https://github.com/TheFirstIstari/irc-serve.git
+git clone https://github.com/tweak-wiki/irc-serve.git
 cd irc-serve
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build build --parallel
@@ -370,8 +373,8 @@ is fastest on an unloaded node — thread handoff costs more than it saves there
 so stay on the default until a loaded node spends its tick budget on sends, then
 try 2 and measure before 4. `--writers 0` is the rollback. The suite passes at
 N=0 and at N=4 (`IRC_WRITERS=4`, a test-harness override in
-`tests/harness/node_fixture.c`). Design:
-`openspec/changes/add-multithreading/specs/threading/spec.md`.
+`tests/harness/node_fixture.c`). Design: `openspec/specs/threading/spec.md`
+(history in `openspec/changes/add-multithreading/`).
 
 
 ## Layout
@@ -420,7 +423,7 @@ The conventions that matter here:
   `tests/known_skips.txt`. Do not write a test asserting behaviour nothing
   implements. CI fails on a skip that is not listed, and on a listed skip that no
   longer skips.
-- No `sleep()` in tests. Use the `select()`-driven helpers in `tests/harness`.
+- No `sleep()` in tests — use the `select()`-driven helpers in `tests/harness`. The one exception is a deliberate rate-limit refill wait, which sleeps because the budget it tests is wall-clock.
 - No platform-specific assertions; Linux and macOS disagree about `SO_SNDBUF`.
 
 ## License
