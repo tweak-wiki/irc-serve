@@ -343,6 +343,11 @@ int cap_available(const server_t *s, const conn_t *c, const char *name);
  * the same node. That difference is the point of the parameter and is asserted on
  * the wire in tests/integration/test_tls.c. */
 size_t cap_available_list(const server_t *s, const conn_t *c, char *out, size_t cap);
+/* Length of the next `CAP LS *` continuation chunk of `list` starting at
+ * `off`: whole space-separated tokens, at most `budget` bytes, 0 past the
+ * end. The multiline sender in cap.c walks the list with this; it is public
+ * so the boundary behaviour is asserted directly in tests/protocol/. */
+size_t cap_ls_chunk(const char *list, size_t off, size_t budget);
 
 /* A buffer that holds every capability this node can advertise plus their
  * separators and a NUL. It is a constant rather than a caller-chosen size so a
