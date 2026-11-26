@@ -28,6 +28,7 @@
 #include "core/channel.h"
 #include "core/connection.h"
 #include "core/fanout.h"
+#include "core/fanout_forward.h"
 #include "core/msg_verbs.h"
 #include "core/reply.h"
 #include "core/server.h"
@@ -65,26 +66,56 @@ typedef struct {
 } command_t;
 
 /* ---------------------------------------------------------------------------
- * TAGMSG (#672)
+ * TAGMSG (#672, #724)
  * ---------------------------------------------------------------------------
  * IRCv3 message-tags' TAGMSG: `@+typing=active TAGMSG #chan`. The tags ARE the
  * payload, so fanout_deliver() cannot carry it -- it mints the emission's own
  * msgid/account block and takes no client block. The walk below is therefore
  * PRIVMSG-shaped routing (resolve, membership, member walk) with the client's
  * tag block relayed verbatim. Only members that negotiated `message-tags` get
- * it (a tagless TAGMSG is meaningless), and the sender is excluded (it already
- * knows its own typing state). Non-channel targets are 403: for this verb a
- * nick is genuinely "no such channel".
+ * it (a tagless TAGMSG is meaningless). Non-channel targets are 403: for this
+ * verb a nick is genuinely "no such channel".
+ * #724: one fanout_stamp() per emission (the same path PRIVMSG mints its msgid
+ * through), rendered per destination so only draft/message-ids members carry
+ * `@msgid`; and an echo to the sender when it negotiated `echo-message` (also
+ * gated on `message-tags`, which the echo without tags would be meaningless
+ * without). Non-negotiated members still get nothing.
  * shortcut: no cross-server TAGMSG forward (no STAGMSG verb); remote targets
  * are 403 until the mesh has one.
  */
+/* One destination's TAGMSG tag block: the client's tags verbatim, prefixed
+ * with this emission's `msgid` when the destination negotiated
+ * draft/message-ids (cap_message_ids_enabled's double gate, the same one
+ * PRIVMSG's path applies). NULL when there is no block at all. */
+static const char *tagmsg_block(conn_t *dst, const irc_serve_tags_t *ident,
+                                const char *tags, char *out, size_t cap)
+{
+    char mid[IRC_MAX_MSGTAG + 1u];
+
+    if (cap_message_ids_enabled(dst) == 0 ||
+        irc_serve_msgid_value(ident, mid, sizeof mid) == 0u) {
+        return tags;
+    }
+    if (tags == NULL) {
+        (void)snprintf(out, cap, "%s=%s", IRCV3_TAG_MSGTAG, mid);
+    } else {
+        (void)snprintf(out, cap, "%s=%s;%s", IRCV3_TAG_MSGTAG, mid, tags);
+    }
+    return (out[0] != '\0') ? out : tags;
+}
 static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
 {
     fanout_target_t t;
+    irc_serve_tags_t ident;
     char prefix[CONN_HOSTMASK_MAX];
+    /* Room for the client's block plus this emission's `msgid=` pair: the tags
+    * arrived inside a legal line, so the pair always fits and snprintf below
+    * never truncates a valid input. */
+    char block[IRC_MAX_LINE + 1u + IRC_MAX_MSGTAG + 8u];
     const char *params[1];
     const char *tags;
     int slots[64];
+    int relayed = 0;
     size_t nslots = 0;
     size_t i;
     int delivered = 0;
@@ -115,6 +146,16 @@ static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
     }
     params[0] = t.name;
     tags = (m->tags != NULL && m->tags[0] != '\0') ? m->tags : NULL;
+    fanout_stamp(s, NULL, &ident, &relayed);
+    if (cap_enabled(c, CAP_ECHO_MESSAGE) != 0 &&
+        cap_enabled(c, CAP_MESSAGE_TAGS) != 0) {
+        int slot = server_writer_slot(s, c->fd);
+        (void)send_line_tagged_quiet(s, c, prefix, "TAGMSG", params, 1,
+                                     tagmsg_block(c, &ident, tags, block,
+                                                  sizeof block));
+        server_writers_kick_slots(s, &slot, 1);
+        delivered++;
+    }
     for (i = 0; i < t.chan->nmembers; i++) {
         conn_t *dst = t.chan->members[i].c;
         int slot;
@@ -126,7 +167,9 @@ static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
         if (cap_enabled(dst, CAP_MESSAGE_TAGS) == 0) {
             continue;
         }
-        (void)send_line_tagged_quiet(s, dst, prefix, "TAGMSG", params, 1, tags);
+        (void)send_line_tagged_quiet(s, dst, prefix, "TAGMSG", params, 1,
+                                     tagmsg_block(dst, &ident, tags, block,
+                                                  sizeof block));
         slot = server_writer_slot(s, dst->fd);
         for (k = 0; k < nslots; k++) {
             if (slots[k] == slot) {
