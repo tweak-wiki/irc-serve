@@ -69,7 +69,7 @@
  *     receives the message with a `msgid` and with no `account`. The decision and
  *     its cost are at fanout.c's fanout_emitter_account().
  *  8. **`account-notify` IS ANSWERED AND IS NOT SOLICITED.** A client that
- *     negotiated it is told `ACCOUNT <account> PASS` or `ACCOUNT *` at the end of
+ *     negotiated it is told `ACCOUNT <account>` or `ACCOUNT *` at the end of
  *     its own registration burst; a client that negotiated nothing is told
  *     nothing; a client that ASKS with a bare `ACCOUNT` is answered; and the
  *     retired one-parameter nickname-change dialect is refused with 461 rather
@@ -1800,7 +1800,7 @@ static void expect_the_tag_charge_is_real(void)
  * ==========================================================================
  * Four clients on one node with a registry, and one property each:
  *
- *   alice   logged in, negotiated account-notify  -> `ACCOUNT alice PASS`
+ *   alice   logged in, negotiated account-notify  -> `ACCOUNT alice`
  *   bob     NOT logged in, negotiated it            -> `ACCOUNT *`
  *   carol   logged in, negotiated NOTHING           -> nothing at all
  *   dave    logged in, negotiated nothing but SENDS `ACCOUNT` -> answered anyway
@@ -1838,11 +1838,10 @@ static void test_account_notify(const char *sasl, const char *registry)
                  "alice did not establish an account, so the PASS below would be "
                  "about nothing");
     /* The line is UNSOLICITED and arrives after the MOTD, so the wait is for the
-     * line itself and the drain follows it. `ACCOUNT <account> PASS` is the form
-     * the task names; the specification's older form omits the PASS, and both are
-     * rendered from one function. */
+     * line itself and the drain follows it. account-notify-1.0 S2 names ONE
+     * param: `ACCOUNT <account>` (logout is `ACCOUNT *`); no trailing PASS. */
     (void)snprintf(want, sizeof want,
-                   ":alice!alice@127.0.0.1 ACCOUNT alice PASS\r\n");
+                   ":alice!alice@127.0.0.1 ACCOUNT alice\r\n");
     TF_CHECK_MSG(tc_expect(&alice.c, want, T_IO_MS) == 0,
                  "a client that negotiated account-notify and logged in was not "
                  "told its association at the end of its registration burst:\n  "
@@ -1881,7 +1880,7 @@ static void test_account_notify(const char *sasl, const char *registry)
     (void)snprintf(line, sizeof line, "ACCOUNT");
     TF_CHECK_MSG(tc_send(&dave.c, line) == 0, "ACCOUNT send failed");
     end = drain(&dave);
-    (void)snprintf(want, sizeof want, ":dave!dave@127.0.0.1 ACCOUNT alice PASS\r\n");
+    (void)snprintf(want, sizeof want, ":dave!dave@127.0.0.1 ACCOUNT alice\r\n");
     expect_in_window(&dave, from, end,
                      "the answer to a bare ACCOUNT from a client that never "
                      "negotiated the capability", want);
@@ -1933,7 +1932,7 @@ static void test_account_notify(const char *sasl, const char *registry)
     TF_CHECK_MSG(tc_send(&dave.c, line) == 0, "the second ACCOUNT send failed");
     end = drain(&dave);
     (void)snprintf(want, sizeof want,
-                   ":dave2!dave@127.0.0.1 ACCOUNT alice PASS\r\n");
+                   ":dave2!dave@127.0.0.1 ACCOUNT alice\r\n");
     expect_in_window(&dave, from, end,
                      "the nickname change that ACCOUNT must not have broken, seen "
                      "in the prefix of the next line the node sends that "
