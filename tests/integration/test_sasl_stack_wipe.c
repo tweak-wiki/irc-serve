@@ -170,16 +170,17 @@ static void expect_wipe_in_source(void)
                  "the credential wipe must cover passwd");
     TF_CHECK_MSG(strstr(code, "auth_wipe(payload, SASL_MAX_PAYLOAD)") != NULL,
                  "the credential wipe must cover payload");
-    /* All eleven exits of handle_authenticate() scrub all four locals (#539
-     * adds the RATE_LIMITED refusal, which wipes like every other exit). */
+    /* All twelve exits of handle_authenticate() scrub all four locals (#539
+     * adds the RATE_LIMITED refusal, which wipes like every other exit; #722
+     * adds the ALREADY_REGISTERED refusal, which wipes like every other exit). */
     at = code;
     while ((at = strstr(at, "auth_wipe_credential(payload, authzid, authcid, "
                             "passwd)")) != NULL) {
         calls++;
         at++;
     }
-    TF_CHECK_MSG(calls == 11,
-                 "expected auth_wipe_credential() at all 11 exits of "
+    TF_CHECK_MSG(calls == 12,
+                 "expected auth_wipe_credential() at all 12 exits of "
                  "handle_authenticate(), found %zu",
                  calls);
     free(code);

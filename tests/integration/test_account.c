@@ -853,7 +853,15 @@ static void test_no_registry(const char *sasl, const char *label)
     TF_CHECK_MSG(nf_expect(&node, "accounts=none", T_READY_MS) == 0,
                  "%s: a node with no registry did not say so at start-up", label);
 
-    client_open(&alice, &node, "alice", NULL);
+    /* #722: the credential goes BEFORE registration -- a registered
+     * connection's AUTHENTICATE is refused with 904, so sasl-3.2 S3.2 order
+     * is CAP, then SASL, then NICK/USER. */
+    client_connect(&alice, &node, "alice");
+    CUR_CLIENT = &alice;
+    authenticate("alice", "correct horse");
+    TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
+                 "%s: a correct credential was refused", label);
+    client_register(&alice);
 
     /* ---- AND THE CAPABILITY IS WITHHELD, WHICH IS THE POINT OF THE REGISTRY
      * CHECK ----
@@ -899,16 +907,12 @@ static void test_no_registry(const char *sasl, const char *label)
                  "%s: account-tag was ACKed by a node that can never write the "
                  "tag", label);
 
-    /* ---- the credential still verifies, because --sasl-store is untouched ----
+    /* ---- the credential verified above, because --sasl-store is untouched ----
      *
-     * This is the whole of "additive". A registry is not what makes a login
-     * work, it is what makes a login ALSO an identity, and refusing the login
-     * because no account was configured would make adding a registry a change to
-     * who can authenticate at all. */
-    CUR_CLIENT = &alice;
-    authenticate("alice", "correct horse");
-    TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
-                 "%s: a correct credential was refused", label);
+     * This is the whole of "additive": the credential went first (#722 forbids
+     * SASL after registration), and what follows is the account half -- a
+     * registry is not what makes a login work, it is what makes a login ALSO
+     * an identity. */
     TF_CHECK_MSG(nf_expect(&node, "outcome=REFUSED reason=NO_REGISTRY", T_IO_MS) == 0,
                  "%s: the node did not refuse an account claim with NO_REGISTRY",
                  label);
@@ -1039,12 +1043,14 @@ static void test_registry_disagrees(const char *sasl, const char *registry)
     TF_CHECK_MSG(nf_expect(&node, "accounts=loaded", T_READY_MS) == 0,
                  "the registry did not load");
 
-    client_open(&alice, &node, "alice", NULL);
+    /* #722: SASL before registration (a registered AUTHENTICATE is 904). */
+    client_connect(&alice, &node, "alice");
     CUR_CLIENT = &alice;
     authenticate("alice", "correct horse");
     TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
                  "the credential did not verify; this case is about the REGISTRY, "
                  "not about authentication");
+    client_register(&alice);
     TF_CHECK_MSG(nf_expect(&node, "outcome=REFUSED reason=NOT_IN_REGISTRY",
                            T_IO_MS) == 0,
                  "an authcid the registry does not hold was reported as something "
@@ -1086,12 +1092,14 @@ static void test_registry_refused(const char *sasl, const char *path,
                  "%s: a node whose registry was refused still reported accounts",
                  label);
 
-    /* And the behaviour is case 2's behaviour, not a third one. */
-    client_open(&alice, &node, "alice", NULL);
+    /* And the behaviour is case 2's behaviour, not a third one. #722: SASL
+     * before registration (a registered AUTHENTICATE is 904). */
+    client_connect(&alice, &node, "alice");
     CUR_CLIENT = &alice;
     authenticate("alice", "correct horse");
     TF_CHECK_MSG(nf_expect(&node, "outcome=COMPLETED", T_IO_MS) == 0,
                  "%s: a correct credential was refused", label);
+    client_register(&alice);
     TF_CHECK_MSG(nf_expect(&node, "logged_in=0", T_IO_MS) == 0,
                  "%s: a refused registry still logged somebody in", label);
     whois_and_check(&alice, "alice", NULL);
