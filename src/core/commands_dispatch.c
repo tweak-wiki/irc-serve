@@ -23,10 +23,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/cap.h"
 #include "core/chan_verbs.h"
+#include "core/channel.h"
 #include "core/connection.h"
+#include "core/fanout.h"
 #include "core/msg_verbs.h"
 #include "core/reply.h"
+#include "core/server.h"
 #include "federation/dispatch.h"
 
 /* ---------------------------------------------------------------------------
@@ -59,6 +63,89 @@ typedef struct {
     void (*fn)(server_t *, conn_t *, const message_t *);
     int pre_reg; /* legal before CONN_REG_READY */
 } command_t;
+
+/* ---------------------------------------------------------------------------
+ * TAGMSG (#672)
+ * ---------------------------------------------------------------------------
+ * IRCv3 message-tags' TAGMSG: `@+typing=active TAGMSG #chan`. The tags ARE the
+ * payload, so fanout_deliver() cannot carry it -- it mints the emission's own
+ * msgid/account block and takes no client block. The walk below is therefore
+ * PRIVMSG-shaped routing (resolve, membership, member walk) with the client's
+ * tag block relayed verbatim. Only members that negotiated `message-tags` get
+ * it (a tagless TAGMSG is meaningless), and the sender is excluded (it already
+ * knows its own typing state). Non-channel targets are 403: for this verb a
+ * nick is genuinely "no such channel".
+ * shortcut: no cross-server TAGMSG forward (no STAGMSG verb); remote targets
+ * are 403 until the mesh has one.
+ */
+static void handle_tagmsg(server_t *s, conn_t *c, const message_t *m)
+{
+    fanout_target_t t;
+    char prefix[CONN_HOSTMASK_MAX];
+    const char *params[1];
+    const char *tags;
+    int slots[64];
+    size_t nslots = 0;
+    size_t i;
+    int delivered = 0;
+
+    if (m->nparams != 1) {
+        (void)reply_refused(s, c, "TAGMSG", "INVALID_PARAMS", "461", NULL, 0,
+                            "Not enough parameters");
+        return;
+    }
+    if (conn_hostmask(c, prefix, sizeof prefix) == 0) {
+        (void)reply(s, c, "404", NULL, 0, "Cannot send to channel");
+        return;
+    }
+    if (fanout_resolve(s, c, m->params[0], FANOUT_MESSAGE, &t) == 0) {
+        return; /* 401 or 403 already sent */
+    }
+    if (t.kind != FANOUT_LOCAL_CHANNEL) {
+        (void)reply(s, c, "403", (const char *const[]){ t.name }, 1,
+                    "No such channel");
+        return;
+    }
+    if (fanout_is_member(&t, c) == 0) {
+        (void)reply(s, c, "404", (const char *const[]){ t.name }, 1,
+                    "Cannot send to channel");
+        printf("[observable] tagmsg_refused: nick=%s target=%s reason=not_on_channel\n",
+               c->nick, t.name);
+        return;
+    }
+    params[0] = t.name;
+    tags = (m->tags != NULL && m->tags[0] != '\0') ? m->tags : NULL;
+    for (i = 0; i < t.chan->nmembers; i++) {
+        conn_t *dst = t.chan->members[i].c;
+        int slot;
+        size_t k;
+
+        if (chan_member_live(&t.chan->members[i]) == 0 || dst == c) {
+            continue;
+        }
+        if (cap_enabled(dst, CAP_MESSAGE_TAGS) == 0) {
+            continue;
+        }
+        (void)send_line_tagged_quiet(s, dst, prefix, "TAGMSG", params, 1, tags);
+        slot = server_writer_slot(s, dst->fd);
+        for (k = 0; k < nslots; k++) {
+            if (slots[k] == slot) {
+                break;
+            }
+        }
+        if (k == nslots) {
+            if (nslots == 64) {
+                server_writers_kick_slots(s, slots, nslots);
+                nslots = 0;
+            }
+            slots[nslots++] = slot;
+        }
+        delivered++;
+    }
+    server_writers_kick_slots(s, slots, nslots);
+    printf("[observable] tagmsg: from=%s target=%s members=%zu delivered=%d\n",
+           c->nick, t.name, t.chan->nmembers, delivered);
+}
 
 static const command_t k_commands[] = {
     { "PASS",    handle_pass,  1 },
@@ -157,7 +244,12 @@ static const command_t k_commands[] = {
      * carries this connection's hostmask and a pre-registration connection has no
      * nickname to put in it -- an unregistered client sending ACCOUNT gets 451,
      * which is the RFC's own answer for "you have not registered yet". */
-    { "ACCOUNT",    handle_account,    0 }
+    { "ACCOUNT",    handle_account,    0 },
+    /* #672: IRCv3 `TAGMSG`. NOT `pre_reg`: the relay renders the sender's
+     * hostmask into the prefix, and a pre-registration connection has no
+     * nickname for it -- so pre-registration gets 451, the RFC's own answer
+     * for "you have not registered yet". */
+    { "TAGMSG",     handle_tagmsg,     0 }
 };
 
 static const command_t *lookup(const char *verb)

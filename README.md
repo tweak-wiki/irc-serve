@@ -137,7 +137,7 @@ Each is documented where it is excluded.
 | Cross-node notifies | `SETNAME`/`AWAY`/`INVITE` notify only the originating node's members until the 4.3 wire bump lands (tracked separately) |
 | `chathistory` | needs per-client message history, which conflicts with §2.2's disposal rule and the fail-closed posture. A design conflict, not a task |
 | `oper-tag`, `account-extban` | blocked on a subsystem that does not exist — an operator model, and a ban-expression parser |
-| `TAGMSG` relay | the verb answers `421`; typing indicators are not relayed (tracked) |
+| `TAGMSG` relay | relayed to channel members with `message-tags`; no cross-server forward, sender excluded |
 | User `MODE <nick>` | answered `403`; user-mode query/set is not implemented (tracked) |
 | `JOIN 0` (part-all) | answered `403`; the bulk-leave special case is not implemented (tracked) |
 | WebSocket transport | a second transport for the `core/transport.h` interface, which now has two implementations |
