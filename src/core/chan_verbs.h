@@ -98,17 +98,22 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
                     const char **names, int max);
 
 /* Canonicalise and validate one channel-name argument. Replies 403 and returns
- * 0 when it is not a channel name this node can speak about. Shared with
- * core/chan_verbs_knock.c (issue #543 TU-45); see chan_verbs.c for why JOIN
- * is the only verb that may find nothing and create it. */
-int canonical_channel(server_t *s, conn_t *c, const char *arg, char *out,
-                      size_t cap);
+ * 0 when it is not a channel name this node can speak about. `command` is the
+ * client's verb, carried for the FAIL line reply_refused() renders for a client
+ * that negotiated `standard-replies` (#727). Shared with core/chan_verbs_knock.c
+ * (issue #543 TU-45); see chan_verbs.c for why JOIN is the only verb that may
+ * find nothing and create it. */
+int canonical_channel(server_t *s, conn_t *c, const char *command, const char *arg,
+                      char *out, size_t cap);
 
 /* Resolve a channel the client must ALREADY be a member of (442/403 on
- * failure, with the reply already sent). Shared with
- * core/chan_verbs_invite.c (issue #543 TU-48); see chan_verbs.c for why
- * JOIN is the only verb that does not come through here. */
-chan_t *resolve_joined(server_t *s, conn_t *c, const char *arg);
+ * failure, with the reply already sent). `command` is the client's verb,
+ * carried for the FAIL line reply_refused() renders for a client that
+ * negotiated `standard-replies` (#727). Shared with core/chan_verbs_invite.c
+ * (issue #543 TU-48); see chan_verbs.c for why JOIN is the only verb that
+ * does not come through here. */
+chan_t *resolve_joined(server_t *s, conn_t *c, const char *command,
+                       const char *arg);
 
 /* Put `c` on `ch` as a member with `flags`, and tell everybody who needs to
  * know: the local members, the mesh (through 3.1's table), and `c` itself

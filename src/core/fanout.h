@@ -188,6 +188,14 @@ typedef struct {
 int fanout_resolve(server_t *s, conn_t *from, const char *arg,
                    fanout_class_t vclass, fanout_target_t *out);
 
+/* As fanout_resolve(), with the client's verb for the refusal: a 401/403 that
+ * fires here becomes `FAIL <command> <code> ...` for a client that negotiated
+ * `standard-replies` (reply_refused(), NULL code for the table's answer) and
+ * stays the legacy numeric otherwise. Callers that know their verb use this;
+ * callers with none (federation, TAGMSG under #724) keep fanout_resolve(). */
+int fanout_resolve_cmd(server_t *s, conn_t *from, const char *command,
+                       const char *arg, fanout_class_t vclass, fanout_target_t *out);
+
 /* Store `src` into `out->name` through the same predicate fanout_resolve()
  * uses: 1 stored, 0 refused. The only way bytes reach the field from outside
  * fanout.c. */

@@ -13,9 +13,21 @@
 #include "core/reply.h"
 /* Reply only when there is a client to refuse to. Federation callers pass
  * from==NULL, and replying to NULL would increment n_reply_refused, the
- * counter reply.c holds at zero forever. */
+ * counter reply.c holds at zero forever. A refusal this node migrates goes
+ * through reply_refused(): `command` is fanout_resolve_cmd()'s own parameter
+ * (NULL from the plain wrapper), read here rather than passed at each of the
+ * eleven sites because every one of them is inside that function and would take
+ * the same argument. A NULL command keeps the legacy numeric: those callers have
+ * no verb to name here (federation passes no client at all, and TAGMSG's own
+ * verb lines migrate with its handler under #724, not from inside resolution).
+ */
 #define REPLY_IF(s, from, ...) \
-    do { if ((from) != NULL) (void)reply((s), (from), __VA_ARGS__); } while (0)
+    do { if ((from) != NULL) { \
+        if ((command) != NULL) \
+            (void)reply_refused((s), (from), (command), NULL, __VA_ARGS__); \
+        else \
+            (void)reply((s), (from), __VA_ARGS__); \
+    } } while (0)
 
 
 /* The 2.4 never-forward-own-origin test is irc_ascii_same() (message.h, issue
@@ -162,8 +174,8 @@ int fanout_target_store_name(fanout_target_t *out, const char *src)
     return fanout_name_store(out, src);
 }
 
-int fanout_resolve(server_t *s, conn_t *from, const char *arg,
-                   fanout_class_t vclass, fanout_target_t *out)
+int fanout_resolve_cmd(server_t *s, conn_t *from, const char *command,
+                       const char *arg, fanout_class_t vclass, fanout_target_t *out)
 {
     conn_t *user;
     size_t len;
@@ -412,6 +424,16 @@ int fanout_resolve(server_t *s, conn_t *from, const char *arg,
     out->user = user;
     out->kind = FANOUT_LOCAL_USER;
     return 1;
+}
+
+/* The verb-less entry: resolution for a caller with no command to name. A NULL
+ * command keeps every refusal on the legacy numeric (see REPLY_IF), so
+ * federation and TAGMSG (#724 owns the verb lines) are byte-identical while
+ * callers that know their verb reach for fanout_resolve_cmd(). */
+int fanout_resolve(server_t *s, conn_t *from, const char *arg,
+                   fanout_class_t vclass, fanout_target_t *out)
+{
+    return fanout_resolve_cmd(s, from, NULL, arg, vclass, out);
 }
 
 int fanout_is_member(const fanout_target_t *t, const conn_t *c)

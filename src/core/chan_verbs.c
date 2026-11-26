@@ -98,15 +98,18 @@ int chan_split_list(char *store, size_t dstcap, const char *src,
 }
 
 /* Canonicalise and validate one channel-name argument. Replies 403 and returns
- * 0 when it is not a channel name this node can speak about.
+ * 0 when it is not a channel name this node can speak about. `command` is the
+ * client's verb, carried for the FAIL line: a client that negotiated
+ * `standard-replies` gets `FAIL <command> ERR_NOSUCHCHANNEL` where it used to
+ * get 403 (reply_refused(), #727), and anyone else gets the byte-identical 403.
  *
  * Split out from resolve_existing() because the two differ in exactly one way
  * and conflating them was a real bug during this phase: "canonicalise and
  * validate" is needed before a lookup, and "look up what already exists" is
  * needed for every verb EXCEPT JOIN. JOIN is the only verb that may find
  * nothing and create it. */
-int canonical_channel(server_t *s, conn_t *c, const char *arg, char *out,
-                      size_t cap)
+int canonical_channel(server_t *s, conn_t *c, const char *command, const char *arg,
+                      char *out, size_t cap)
 {
     (void)chan_name_upper(out, cap, arg);
     if (chan_name_valid(out)) {
@@ -117,7 +120,8 @@ int canonical_channel(server_t *s, conn_t *c, const char *arg, char *out,
      * the trailing text as the complaint and the parameter as the subject. With
      * it omitted the client can only say "no such something", which is the
      * complaint 403 is specifically not. */
-    (void)reply(s, c, "403", (const char *const[]){ out }, 1, "No such channel");
+    (void)reply_refused(s, c, command, NULL, "403",
+                        (const char *const[]){ out }, 1, "No such channel");
     return 0;
 }
 
@@ -136,12 +140,13 @@ int canonical_channel(server_t *s, conn_t *c, const char *arg, char *out,
  * Every path REPLIES before returning NULL, so a caller that returns on NULL has
  * said something. A resolve that returns NULL silently is worse than one that
  * does not exist, because the client waits. */
-chan_t *resolve_joined(server_t *s, conn_t *c, const char *arg)
+chan_t *resolve_joined(server_t *s, conn_t *c, const char *command,
+                       const char *arg)
 {
     char canonical[CHAN_MAX_NAME + 1];
     chan_t *ch;
 
-    if (!canonical_channel(s, c, arg, canonical, sizeof canonical)) {
+    if (!canonical_channel(s, c, command, arg, canonical, sizeof canonical)) {
         return NULL;
     }
     ch = server_chan_get(s, canonical);
@@ -151,8 +156,9 @@ chan_t *resolve_joined(server_t *s, conn_t *c, const char *arg)
          * cannot tell WHICH channel it is not on, and this function answers on
          * behalf of every verb that needs a channel the caller is on -- JOIN is
          * the only exception, and it does not come through here. */
-        (void)reply(s, c, "442", (const char *const[]){ canonical }, 1,
-                    "You're not on that channel");
+        (void)reply_refused(s, c, command, NULL, "442",
+                            (const char *const[]){ canonical }, 1,
+                            "You're not on that channel");
         return NULL;
     }
     return ch;
@@ -729,7 +735,7 @@ static void deliver_state_change_forms(server_t *s, conn_t *c, chan_t *ch,
 {
     fanout_target_t t;
 
-    if (ch == NULL || !fanout_resolve(s, c, ch->name, FANOUT_STATE_CHANGE, &t)) {
+    if (ch == NULL || !fanout_resolve_cmd(s, c, verb, ch->name, FANOUT_STATE_CHANGE, &t)) {
         /* fanout_resolve() answers 403/401 on failure and the channel is one
          * this node holds, so this is a caller that lost its chan_t. Nothing is
          * counted here: it is a bug, and fanout_resolve() has already said
@@ -897,7 +903,7 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
         int created = 0;
         chan_verdict_t verdict;
 
-        if (!canonical_channel(s, c, names[i], canonical, sizeof canonical)) {
+        if (!canonical_channel(s, c, "JOIN", names[i], canonical, sizeof canonical)) {
             continue; /* 403 already sent */
         }
         ch = server_chan_get(s, canonical);
@@ -1030,8 +1036,9 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
             continue; /* 437 already sent; nothing has been touched */
         }
         if (chan_banned(ch, c->nick, c->user, c->host)) {
-            (void)reply(s, c, "474", (const char *const[]){ ch->name }, 1,
-                        "Cannot join channel (banned)");
+            (void)reply_refused(s, c, "JOIN", NULL, "474",
+                                (const char *const[]){ ch->name }, 1,
+                                "Cannot join channel (banned)");
             printf("[observable] chan_ban_enforced: channel=%s nick=%s host=%s\n",
                    ch->name, c->nick, c->host);
             if (created != 0) {
@@ -1362,7 +1369,7 @@ void handle_part(server_t *s, conn_t *c, const message_t *m)
     }
 
     for (int i = 0; i < n; i++) {
-        chan_t *ch = resolve_joined(s, c, names[i]);
+        chan_t *ch = resolve_joined(s, c, "PART", names[i]);
         char prefix[CONN_HOSTMASK_MAX];
         const char *params[1];
         chan_verdict_t verdict;
@@ -1439,7 +1446,7 @@ void handle_topic(server_t *s, conn_t *c, const message_t *m)
         return;
     }
     setting = (m->nparams > 1);
-    ch = resolve_joined(s, c, m->params[0]);
+    ch = resolve_joined(s, c, "TOPIC", m->params[0]);
     if (ch == NULL) {
         return;
     }
@@ -1616,7 +1623,7 @@ void handle_names(server_t *s, conn_t *c, const message_t *m)
         char canonical[CHAN_MAX_NAME + 1];
         chan_t *ch;
 
-        if (!canonical_channel(s, c, m->params[0], canonical, sizeof canonical)) {
+        if (!canonical_channel(s, c, "NAMES", m->params[0], canonical, sizeof canonical)) {
             return; /* 403 already sent */
         }
         ch = server_chan_get(s, canonical);
@@ -1864,7 +1871,7 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
      * log line below is the only record of the difference. */
     kept_reason = conn_text_strip(clean_reason, sizeof clean_reason, reason, STRIP_STORED);
     reason = clean_reason;
-    ch = resolve_joined(s, c, m->params[0]);
+    ch = resolve_joined(s, c, "KICK", m->params[0]);
     if (ch == NULL) {
         return;
     }
@@ -1898,11 +1905,13 @@ void handle_kick(server_t *s, conn_t *c, const message_t *m)
          * while 441 tells it the user is real and is elsewhere. Conflating them
          * is how a client ends up trying to invite someone it already has. */
         if (server_nick_lookup(s, m->params[1]) != NULL) {
-            (void)reply(s, c, "441", (const char *const[]){ m->params[1], ch->name },
-                        2, "They're not on that channel");
+            (void)reply_refused(s, c, "KICK", NULL, "441",
+                                (const char *const[]){ m->params[1], ch->name },
+                                2, "They're not on that channel");
         } else {
-            (void)reply(s, c, "401", (const char *const[]){ m->params[1] }, 1,
-                        "No such nick/channel");
+            (void)reply_refused(s, c, "KICK", NULL, "401",
+                                (const char *const[]){ m->params[1] }, 1,
+                                "No such nick/channel");
         }
         return;
     }
@@ -2406,7 +2415,7 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
             return;
         }
     }
-    ch = resolve_joined(s, c, m->params[0]);
+    ch = resolve_joined(s, c, "MODE", m->params[0]);
     if (ch == NULL) {
         return;
     }
@@ -2482,8 +2491,9 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
          * `shown`, and neither of them can carry a control byte. */
         mode_refusal_render(m->params[1][0], wire, sizeof wire, shown, sizeof shown,
                             &len, &bad);
-        (void)reply(s, c, "472", (const char *const[]){ wire }, 1,
-                    "is unknown mode char to me for channel %s", ch->name);
+        (void)reply_refused(s, c, "MODE", NULL, "472",
+                            (const char *const[]){ wire }, 1,
+                            "is unknown mode char to me for channel %s", ch->name);
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=%s "
                "reason_len=%zu reason_byte=0x%02x reason_bad_bytes=%zu\n",
                ch->name, c->nick, shown, len, (unsigned char)m->params[1][0], bad);
@@ -2672,8 +2682,9 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
 
             mode_refusal_render(mode, wire, sizeof wire, shown, sizeof shown, &len,
                                 &bad);
-            (void)reply(s, c, "472", (const char *const[]){ wire }, 1,
-                        "is unknown mode char to me for channel %s", ch->name);
+            (void)reply_refused(s, c, "MODE", NULL, "472",
+                                (const char *const[]){ wire }, 1,
+                                "is unknown mode char to me for channel %s", ch->name);
             printf("[observable] chan_mode_refused: channel=%s nick=%s reason=%s "
                    "reason_len=%zu reason_byte=0x%02x reason_bad_bytes=%zu\n",
                    ch->name, c->nick, shown, len, (unsigned char)mode, bad);
@@ -2715,11 +2726,12 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
                      * nickname that is not on the channel is a client bug, and 441
                      * says precisely which bug. */
                     if (server_nick_lookup(s, nick) != NULL) {
-                        (void)reply(s, c, "441",
+                        (void)reply_refused(s, c, "MODE", NULL, "441",
                                     (const char *const[]){ nick, ch->name }, 2,
                                     "They're not on that channel");
                     } else {
-                        (void)reply(s, c, "401", (const char *const[]){ nick },
+                        (void)reply_refused(s, c, "MODE", NULL, "401",
+                                    (const char *const[]){ nick },
                                     1, "No such nick/channel");
                     }
                     return;
@@ -2925,8 +2937,9 @@ void handle_mode(server_t *s, conn_t *c, const message_t *m)
          * same reason: the field list and the placeholder must not be able to differ
          * between two sites that answer the same numeric. */
         mode_refusal_render(mode, wire, sizeof wire, shown, sizeof shown, &len, &bad);
-        (void)reply(s, c, "472", (const char *const[]){ wire }, 1,
-                    "is unknown mode char to me for channel %s", ch->name);
+        (void)reply_refused(s, c, "MODE", NULL, "472",
+                            (const char *const[]){ wire }, 1,
+                            "is unknown mode char to me for channel %s", ch->name);
         (void)chan_mode_implemented(mode); /* the predicate that routed us here */
         printf("[observable] chan_mode_refused: channel=%s nick=%s reason=%s "
                "reason_len=%zu reason_byte=0x%02x reason_bad_bytes=%zu\n",

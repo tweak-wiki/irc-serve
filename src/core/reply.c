@@ -581,6 +581,10 @@ int send_line_tagged_quiet(server_t *s, conn_t *dst, const char *prefix,
  * in particular" and a client branching on the field can tell them apart. */
 #define STD_COMMAND_NONE "*"
 
+/* Forward: the FAIL-code allowlist lives with the migration table below, but
+ * reply_std() enforces it above. One predicate, one enforcement point. */
+static int std_fail_code_known(const char *code);
+
 /* One emitter for all three types, and the ONLY place a standard-replies line is
  * built. The refusals are reply()'s, in the same order and for the same reasons:
  * a NULL destination, a peer link (3's federation invariant), a CLOSING target, a
@@ -608,6 +612,16 @@ int reply_std(server_t *s, conn_t *src, const char *type, const char *command,
     }
     if (command == NULL || command[0] == '\0') {
         command = STD_COMMAND_NONE;
+    }
+    /* THE ALLOWLIST, enforced at the one place a standard-replies line is built.
+     * `code` is free text at every call site, so without this a typo ships a
+     * bogus code to every negotiated client. An unlisted code is refused with
+     * `bad_code` -- counted and printed like any other refusal -- rather than
+     * downgraded to the legacy numeric, because a silent fallback would hide the
+     * typo and this node's tests hold n_reply_refused at zero precisely so a
+     * refusal here goes red instead of shipping. */
+    if (std_fail_code_known(code) == 0) {
+        return refuse(s, src, type, "bad_code");
     }
     /* target + <command> + <code> + contexts + description. */
     want = nctx + 3u;
@@ -647,10 +661,14 @@ int reply_std(server_t *s, conn_t *src, const char *type, const char *command,
  *
  * 461 ERR_NEEDMOREPARAMS is "<client> <command> :Not enough parameters", and it is
  * the ONLY numeric this file renders whose RFC field list has a field before the
- * trailing text that the caller does not already supply. The four other codes that
- * come through reply_refused() are the opposite cases and the check is written to
+ * trailing text that the caller does not already supply. Every other code that
+ * comes through reply_refused() is the opposite case and the check is written to
  * make that explicit rather than accidental:
  *
+ *   401/403/404/441/442/471/472/473/474/475  every one is
+ *        "<client> [<target>] :<text>" in RFC 2812 5.2 -- the target is a field
+ *        the CALLER passes (a nick, a channel, a mode char), never the command
+ *        word, so there is nothing to prepend.
  *   417  not an RFC 2812 numeric at all -- it is in this node's own de-facto
  *        registry (see docs/RFC2812_CONFORMANCE.md section 4), so there is no
  *        RFC field list to conform to and nothing to add.
@@ -673,58 +691,115 @@ static int numeric_carries_command(const char *numeric)
            numeric[2] == '1' && numeric[3] == '\0';
 }
 
-/* The four numerics this node uses for MORE THAN ONE distinct refusal, and the
- * `FAIL` code each becomes. This is the whole of the migration table and it is
- * here rather than at the call sites for the reason this file is the one place a
- * numeric is emitted: a mapping transcribed per handler is a mapping with forty
- * copies to keep in step.
+/* The refusal numerics this node migrates to `FAIL` for a client that
+ * negotiated `standard-replies`, and the `FAIL` code each becomes. This is the
+ * whole of the migration table and it is here rather than at the call sites for
+ * the reason this file is the one place a numeric is emitted: a mapping
+ * transcribed per handler is a mapping with forty copies to keep in step.
  *
- * THE RULE, in one sentence: a legacy numeric migrates where that numeric answers
- * more than one question ON THIS NODE, so the number alone cannot tell a client
- * which refusal happened.
+ * THE RULE (#727): every refusal numeric migrates, so a negotiated client gets
+ * one shape -- `FAIL <command> <code> [<context>...] :<description>` -- for
+ * every refusal. The first four migrated because one number answered several
+ * questions (417 four refusals; 461 too-few AND too-many with a text that calls
+ * both "not enough"; 482 three refusals, two of them three letters apart; 464
+ * an operator refusal and a credential failure). The ten that followed migrate
+ * although each answers exactly one question, because section 2 of the
+ * specification SHOULD use FAIL for errors when negotiated and the per-numeric
+ * exemption was the gap #727 named: a negotiated client matching on numbers had
+ * to keep the whole legacy table anyway, which is the inconsistency the
+ * capability exists to remove.
  *
- *   417  PRIVMSG text too long | AWAY too long | SETNAME realname unacceptable |
- *        KICK reason too long.  Four refusals, one number.
- *   461  too few parameters AND too many -- and its text reads "Not enough
- *        parameters" in the too-many case too, so the number is ambiguous AND the
- *        text is wrong.  Two refusals, one number, one lie.
- *   482  not a channel operator (KICK, MODE, INVITE) | not an IRC operator
- *        (KNOCK) | the verb is disabled here (REGISTER, UNREGISTER).  Three
- *        refusals, one number -- and the KNOCK one is the sharpest, because
- *        "not a channel operator" and "not an IRC operator" differ by three
- *        letters and mean entirely different things.
- *   464  not an IRC operator | SASL authentication failed.  Two refusals, one
- *        number.
+ *   401  no such nick -- every PRIVMSG/WHOIS/KICK/MODE/INVITE miss.
+ *   403  no such channel -- every JOIN/KNOCK/LIST/WHO/PRIVMSG name miss.
+ *   404  cannot send -- a PRIVMSG to a channel the sender is not on.
+ *   441  user not in channel -- KICK and MODE +o naming a real nick elsewhere.
+ *   442  not on channel -- PART/TOPIC/KICK/MODE/INVITE without membership.
+ *   471  channel full -- no emitter on this node yet; the row is still here so
+ *        the mapping is total and a future site needs no table edit.
+ *   472  unknown mode char -- every MODE refusal.
+ *   473  invite-only -- no emitter on this node yet (see 471).
+ *   474  banned -- JOIN against a ban.
+ *   475  bad key -- no emitter on this node yet (see 471).
  *
- * EVERY OTHER NUMERIC STAYS, and the reason is the same rule pointed the other
- * way: `401`, `403`, `404`, `421`, `431`, `432`, `433`, `437`, `441`, `442`, `451`,
- * `472` and the rest each answer exactly ONE question on this node, so the number
- * is unambiguous, and replacing it would take away the name the client already
- * handles in exchange for a line it must now learn. The specification's own
- * introduction states the complaint this table answers -- "numerics themselves and
- * the mapping of numerics to names can be unclear or conflicting" -- and these
- * are the four where this node's own use makes them unclear.
+ * NUMERICS THAT STAY: 402, 405, 421, 431-433, 436, 437, 451, 452, 462 and every
+ * successful reply. They are not this node's target/membership/mode refusals and
+ * #727 named exactly the ten above; each still answers one question and keeps
+ * the name clients already handle.
  *
- * ON THE CODES. The specification says "implementers MUST use an existing code if
- * one is already defined", and the IRCv3 reply-code registry holds
- * `NEED_MORE_PARAMS` and `INVALID_PARAMS`. The rest of this table uses an `ERR_`
- * prefix, which is this node's marker for "a code that is ours and is not in the
- * registry" -- so a client switching on an unregistered code and an unregistered
- * code this node made up are never confused for one another.
- * `ERR_CHANOPRIVSNEEDED` and `ERR_NOPRIVILEGES` are RFC 1459/2812's own names for
- * 482 and 464, carried over because the numbers they replace were named after
- * them. */
+ * ON THE CODES. The specification says "implementers MUST use an existing code
+ * if one is already defined", and the IRCv3 reply-code registry holds
+ * `NEED_MORE_PARAMS` and `INVALID_PARAMS` (already the 461 default and the arity
+ * override). For the ten there is no registered code -- the registry's FAIL list
+ * is per-command codes like `INVALID_TARGET`, none of which names these refusals
+ * -- so each takes the RFC 2812 section 5 symbolic name of the numeric it
+ * replaces, with the `ERR_` prefix this node already uses to mark "ours and not
+ * in the registry". Precedent: `ERR_CHANOPRIVSNEEDED` and `ERR_NOPRIVILEGES` are
+ * the RFC's own names for 482 and 464, carried over because the numbers they
+ * replace were named after them. */
 typedef struct {
     const char *numeric;   /* the legacy code, as a caller writes it */
     const char *fail_code; /* what it becomes for a negotiating client */
 } std_fail_map_t;
 
 static const std_fail_map_t k_std_fail_map[] = {
+    { "401", "ERR_NOSUCHNICK" },
+    { "403", "ERR_NOSUCHCHANNEL" },
+    { "404", "ERR_CANNOTSENDTOCHAN" },
+    { "441", "ERR_USERNOTINCHANNEL" },
+    { "442", "ERR_NOTONCHANNEL" },
+    { "471", "ERR_CHANNELISFULL" },
+    { "472", "ERR_UNKNOWNMODE" },
+    { "473", "ERR_INVITEONLYCHAN" },
+    { "474", "ERR_BANNEDFROMCHAN" },
+    { "475", "ERR_BADCHANNELKEY" },
     { "417", "ERR_INPUTTOOLONG" },
     { "461", "NEED_MORE_PARAMS" },
     { "482", "ERR_CHANOPRIVSNEEDED" },
     { "464", "ERR_NOPRIVILEGES" }
 };
+
+/* Every override code a call site may pass, and the ONLY override codes a call
+ * site may pass. reply_refused() resolves the emitted code as
+ * override-wins-over-table, so without this the `fail_code` argument is free
+ * text and a typo ships a bogus code to every negotiated client. std_fail_code()
+ * consults the table above first, so this list holds only what the table does
+ * not: the arity answers (461 has one number and two meanings) and the two
+ * single-site codes. AUTHENTICATE's `ERR_AUTHENTICATIONFAILED` and
+ * `INVALID_AUTHENTICATE` are absent on purpose: 904 is not a migrated numeric,
+ * so those codes never reach the FAIL branch, and listing them would bless codes
+ * no client can receive. */
+static const char *const k_fail_override_codes[] = {
+    "TOO_MANY_PARAMS",
+    "INVALID_PARAMS",
+    "INVALID_REFTAG",
+    "ERR_INVALID_PARAM",
+    "ERR_ACCOUNTREGISTRATIONDISABLED"
+};
+
+/* Whether `code` is one this node may emit on a FAIL line: a table value or a
+ * listed override. The one predicate behind the bad_code refusal in reply_std(),
+ * and deliberately not a table of its own: a code added to the migration table
+ * above is automatically emittable, so the two cannot disagree. */
+static int std_fail_code_known(const char *code)
+{
+    size_t i;
+
+    if (code == NULL || code[0] == '\0') {
+        return 0;
+    }
+    for (i = 0; i < sizeof k_std_fail_map / sizeof k_std_fail_map[0]; i++) {
+        if (strcmp(k_std_fail_map[i].fail_code, code) == 0) {
+            return 1;
+        }
+    }
+    for (i = 0; i < sizeof k_fail_override_codes /
+                    sizeof k_fail_override_codes[0]; i++) {
+        if (strcmp(k_fail_override_codes[i], code) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 /* The `FAIL` code for `numeric`, or NULL when this node does not migrate it.
  *

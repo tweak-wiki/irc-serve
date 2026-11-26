@@ -41,13 +41,15 @@ void handle_list(server_t *s, conn_t *c, const message_t *m)
         char canonical[CHAN_MAX_NAME + 1];
         chan_t *ch;
 
-        if (!canonical_channel(s, c, m->params[0], canonical, sizeof canonical)) {
+        if (!canonical_channel(s, c, "LIST", m->params[0], canonical,
+                               sizeof canonical)) {
             return; /* 403 already sent */
         }
         ch = server_chan_get(s, canonical);
         if (ch == NULL) {
-            (void)reply(s, c, "403", (const char *const[]){ canonical }, 1,
-                        "No such channel");
+            (void)reply_refused(s, c, "LIST", NULL, "403",
+                                (const char *const[]){ canonical }, 1,
+                                "No such channel");
             return;
         }
         (void)authority_ok(s, c, ch, "LIST", 0);

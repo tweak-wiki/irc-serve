@@ -268,10 +268,14 @@ int send_line_tagged_quiet(server_t *s, conn_t *dst, const char *prefix,
  *             warning about it) or "NOTE" (an informational message about it).
  *   command   the command the reply relates to, REQUIRED, or "*" when it was not
  *             spawned by one. A NULL or empty `command` here renders "*".
- *   code      a machine-readable reply code. The IRCv3 reply-code registry holds
- *             some of these; the rest of this node's are `ERR_`-prefixed, which is
- *             the marker for "ours and not registered" so a client switching on an
- *             unregistered code and one this node invented are never confused.
+ *   code      a machine-readable reply code, and ONLY a listed one: reply_std()
+ *             refuses an unlisted code with `bad_code` rather than emitting it,
+ *             so a typo in a `fail_code` argument cannot ship a bogus code to a
+ *             negotiated client. The IRCv3 reply-code registry holds some of
+ *             these (`NEED_MORE_PARAMS`, `INVALID_PARAMS`); the rest of this
+ *             node's are `ERR_`-prefixed, which is the marker for "ours and not
+ *             registered" so a client switching on an unregistered code and one
+ *             this node invented are never confused.
  *   ctx       optional extra context, "not intended for end users but for
  *             developers". Counted against the same 15-parameter cap as `nmid`.
  *   fmt       the description, which is colonned exactly when the formatter needs
@@ -321,16 +325,15 @@ int reply_std(server_t *s, conn_t *src, const char *type, const char *command,
  * `legacy`, ALSO takes the legacy branch -- so this function is safe at any call
  * site, including one whose numeric happens not to be on the migration list.
  *
- * WHICH NUMERICS MIGRATE, and why the list is short: a legacy numeric migrates
- * where it answers more than one question ON THIS NODE, so the number alone
- * cannot tell a client which refusal happened. Four qualify -- `417` (four
- * refusals), `461` (too few and too many, with a text that calls both "not
- * enough"), `482` (three refusals, two of which are "not a channel operator" and
- * "not an IRC operator") and `464` (an operator refusal and a credential
- * failure) -- and every other numeric on this node answers exactly one question
- * and stays. reply.c carries the table, the per-refusal argument and the code
- * strings; cap.h carries the cost, which is that those four numbers stop reaching
- * a client that negotiated the capability.
+ * WHICH NUMERICS MIGRATE: the fourteen in reply.c's table -- `417`, `461`,
+ * `482`, `464`, and the ten #727 added (`401`, `403`, `404`, `441`, `442`,
+ * `471`, `472`, `473`, `474`, `475`). The first four migrate because one number
+ * answered several questions on this node; the ten migrate although each answers
+ * exactly one, because a negotiated client matching on numbers had to keep the
+ * whole legacy table anyway. Every other numeric on this node (402, 451, 462
+ * and the rest) stays. reply.c carries the table, the per-refusal argument and
+ * the code strings; cap.h carries the cost, which is that those fourteen numbers
+ * stop reaching a client that negotiated the capability.
  *
  * THE COST IN CALL SITES, and it is why this function takes the command word as a
  * parameter rather than deriving it: `reply()` cannot know which command produced

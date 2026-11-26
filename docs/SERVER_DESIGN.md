@@ -227,7 +227,7 @@ order is therefore: arity → local preconditions (membership, privilege,
 bounds) → routing verdict (`437` only if the first two passed). Collapsing
 permission failures into `437` sends the client down the "server down, retry
 later" path for a refusal that will never clear — the same ambiguity §4.4.3
-removes from the other four numerics.
+removes from the other refusal numerics.
 
 **Owner death — fail closed.** Origin is immutable for a channel's lifetime.
 With no ESTABLISHED link to the origin the channel is **locally orphaned**:
@@ -1837,7 +1837,7 @@ the token would mean making the mode letters constants and threading them throug
 the mode evaluator — a change to what a mode *is* in this tree, made for the sake
 of one string. It is named here as a finding rather than done quietly.
 
-#### 4.4.3 `standard-replies`, and the four numerics this node got wrong
+#### 4.4.3 `standard-replies`, and the refusal numerics it migrates
 
 Phase 10.9 adds IRCv3's `standard-replies`: `FAIL <command> <code> [<context>...]
 :description`, plus `WARN` and `NOTE`, rendered **only for a client that negotiated
@@ -1853,9 +1853,11 @@ would be putting a command word on the wire that no client negotiated the capabi
 **for**. `WARN` and `NOTE` have **no producer on this node** — it has no command that
 warns and none that notes — and their absence is a named limit, not a claim.
 
-**THE LINE, IN ONE SENTENCE: a legacy numeric migrates where that numeric answers
-more than one question ON THIS NODE**, so the number alone cannot tell a client which
-refusal happened.
+**THE LINE, IN ONE SENTENCE (#727): every refusal numeric migrates**, so a negotiated
+client gets one shape for every refusal. Phase 10.9 drew it narrower — a numeric
+migrated where it answered more than one question ON THIS NODE — and the ten that
+followed migrate although each answers exactly one, because a negotiated client
+matching on numbers had to keep the whole legacy table anyway.
 
 | Numeric | The questions it answers here | Becomes |
 |---|---|---|
@@ -1863,6 +1865,16 @@ refusal happened.
 | `461` `ERR_NEEDMOREPARAMS` | too few **and** too many — and its text reads "Not enough parameters" in the too-many case too | `NEED_MORE_PARAMS` / `TOO_MANY_PARAMS` / `INVALID_PARAMS` |
 | `482` `ERR_CHANOPRIVSNEEDED` | not a channel operator (`KICK`, `MODE`, `INVITE`), not an IRC operator (`KNOCK`), the verb is disabled (`REGISTER`) — **three** | `ERR_CHANOPRIVSNEEDED` / `ERR_NOPRIVILEGES` / `ERR_ACCOUNTREGISTRATIONDISABLED` |
 | `464` `ERR_NOPRIVILEGES` | not an IRC operator (`CHOPER`), SASL authentication failed (`AUTHENTICATE`) | `ERR_NOPRIVILEGES` / `INVALID_AUTHENTICATE` / `ERR_AUTHENTICATIONFAILED` |
+| `401` `ERR_NOSUCHNICK` | no such nick — every `PRIVMSG`/`WHOIS`/`KICK`/`MODE`/`INVITE` miss | `ERR_NOSUCHNICK` |
+| `403` `ERR_NOSUCHCHANNEL` | no such channel — every `JOIN`/`KNOCK`/`LIST`/`WHO`/`PRIVMSG` name miss | `ERR_NOSUCHCHANNEL` |
+| `404` `ERR_CANNOTSENDTOCHAN` | cannot send — a `PRIVMSG` to a channel the sender is not on | `ERR_CANNOTSENDTOCHAN` |
+| `441` `ERR_USERNOTINCHANNEL` | a real nick that is not on the channel (`KICK`, `MODE +o`) | `ERR_USERNOTINCHANNEL` |
+| `442` `ERR_NOTONCHANNEL` | not on the channel (`PART`, `TOPIC`, `KICK`, `MODE`, `INVITE`) | `ERR_NOTONCHANNEL` |
+| `471` `ERR_CHANNELISFULL` | channel full — no emitter on this node yet; the table row keeps the mapping total | `ERR_CHANNELISFULL` |
+| `472` `ERR_UNKNOWNMODE` | unknown mode char — every `MODE` refusal | `ERR_UNKNOWNMODE` |
+| `473` `ERR_INVITEONLYCHAN` | invite-only — no emitter on this node yet (see `471`) | `ERR_INVITEONLYCHAN` |
+| `474` `ERR_BANNEDFROMCHAN` | banned — `JOIN` against a ban | `ERR_BANNEDFROMCHAN` |
+| `475` `ERR_BADCHANNELKEY` | bad key — no emitter on this node yet (see `471`) | `ERR_BADCHANNELKEY` |
 
 **SASL completion is NOT a `464` — it is `903`–`908`, unconditionally.** The
 `464` row above names `AUTHENTICATE` failures, and that was wrong in the same
@@ -1881,18 +1893,14 @@ legacy ones being migrated. `464` keeps only `CHOPER`. `standard-replies`
 clients additionally get `FAIL AUTHENTICATE ERR_AUTHENTICATIONFAILED` on the
 `904` path, per the existing migration.
 
-**EVERY OTHER NUMERIC STAYS**, and the reason is the same rule pointed the other way:
-`401`, `403`, `404`, `421`, `431`, `432`, `433`, `437`, `441`, `442`, `451`, `472`
-and the rest each answer exactly **one** question on this node, so the number is
-unambiguous and replacing it would take away the name the client already handles in
-exchange for a line it must now learn. The specification's own introduction states
-the complaint this table answers — *"numerics themselves and the mapping of numerics
-to names can be unclear or conflicting"* — and these four are where this node's own
-use makes them unclear. `test_standard_replies.c` asserts both halves: the four, and
-`401` and `451` reaching a negotiating client **unchanged**, because a migration of
-every numeric would pass every other case in that file.
+**EVERY OTHER NUMERIC STAYS**: `402`, `405`, `421`, `431`-`433`, `436`, `437`, `451`,
+`452`, `462` and the rest. They are not target, membership or mode refusals on this
+node, and #727 named exactly the ten above; each still answers one question and keeps
+the name the client already handles. `test_standard_replies.c` asserts both halves:
+the fourteen, and `402` and `451` reaching a negotiating client **unchanged**, because
+a migration of every numeric would pass every other case in that file.
 
-**THE COST, and who pays it.** After this, `417`, `461`, `482` and `464` stop
+**THE COST, and who pays it.** After this, fourteen numerics stop
 reaching a client that negotiated `standard-replies`. A client that pattern-matches
 `417` for "line too long" must read `FAIL <cmd> ERR_INPUTTOOLONG` instead. That is a
 real cost and it is the price of the ambiguity being fixed. **No client that
@@ -1903,13 +1911,15 @@ why the legacy rendering is left byte-identical rather than tidied.
 **AND THE TENSION WITH THE SPECIFICATION'S OWN SENTENCE, recorded rather than
 glossed:** it says servers "SHOULD NOT replace standardised error numerics with
 standard replies, unless the replacement is explicitly described by some other
-specification", and all four of these are standardised by RFC 1459/2812. Three
-things make the partial migration defensible here, and none of them is that the
+specification", and all fourteen of these are standardised by RFC 1459/2812. Three
+things make the migration defensible here, and none of them is that the
 sentence is wrong:
 
 - the exception's **purpose** is served. The introduction's complaint is precisely
   that these mappings are unclear, and on this node they are. A node with one 482
-  meaning three unrelated things has the defect the sentence is aimed at.
+  meaning three unrelated things has the defect the sentence is aimed at; #727's
+  ten migrate although each answers one question, because section 2 SHOULD use
+  FAIL for errors when negotiated and uniformity is the capability's point.
 - the replacement is **per destination**, so nothing is taken away from anybody who
   did not ask for it — which the sentence's own framing ("to a client which supports
   this capability") presupposes.
@@ -1923,7 +1933,7 @@ sentence is wrong:
 there. `reply_refused()` renders the text **once** and hands it to whichever shape was
 chosen, so the legacy and `FAIL` renderings are guaranteed to be the same string; and
 a `legacy` this node does not migrate takes the legacy branch, which makes the
-function safe at any call site rather than only at the 39 that are on the list.
+function safe at any call site rather than only at the sites that are on the list.
 
 #### 4.4.4 `KICKLEN`, and the bound it names
 
@@ -2241,11 +2251,13 @@ Two smaller decisions, both load-bearing:
   message cannot be processed at all. Answering `461 Not enough parameters` to a client that
   sent the very same four parameters a moment ago and was answered `001` would be a numeric
   describing a problem the client does not have.
-- **`462` is NOT migrated**, which looks inconsistent beside the four numerics §4.4.3 does
-  migrate. Those four answer **more than one question** on this node, so the number alone
-  cannot say which refusal happened. `462` answers exactly one — "you are already
-  registered" — so the number is unambiguous and it stays legacy, which is what a NULL
-  `fail_code` selects. The cost is named: a client matching on `462` keeps working.
+- **`462` is NOT migrated**, which looks inconsistent beside the fourteen numerics §4.4.3
+  does migrate. Those migrate as command refusals — the first four because one number
+  answered several questions, the ten #727 added as one shape for every refusal — and
+  `462` is not a command refusal at all: registration state, not a refused command.
+  "You are already registered" answers exactly one question, so the number is
+  unambiguous and it stays legacy, which is what an unmapped `legacy` selects. The
+  cost is named: a client matching on `462` keeps working.
 
 `tests/integration/test_chghost.c` is the deliverable on both halves. Case 3 is the
 **inversion** of Phase 10.8's hole-proving case — the identical sequence, now requiring the
@@ -3010,20 +3022,23 @@ Single node:
       count** for the member who did not negotiate and for the member of the other
       channel, exactly one line for a member of one of two channels, and no
       notification at all for a **refused** over-long `AWAY`.
-- [x] *Phase 10.9:* **the four ambiguous refusals are `FAIL`s for a client that
-      asked, and byte-identical numerics for one that did not.** §4.4.3. The line is
+- [x] *Phase 10.9:* **the ambiguous refusals are `FAIL`s for a client that
+      asked, and byte-identical numerics for one that did not.** §4.4.3. The line was
       one sentence — a legacy numeric migrates where it answers more than one
-      question on this node — and it names exactly four: `417` (four refusals),
+      question on this node — and it named four: `417` (four refusals),
       `461` (too few **and** too many, with a text that calls both "not enough"),
       `482` (three refusals, two of which differ by three letters and mean unrelated
-      things) and `464` (an operator refusal and a credential failure). Every other
-      numeric answers exactly one question and is untouched, which
-      `test_standard_replies.c` asserts on `401` and `451` as well as on the four: a
-      migration of everything would pass every other case in that file.
+      things) and `464` (an operator refusal and a credential failure). **#727
+      extended the same treatment to every refusal numeric** (`401`, `403`, `404`,
+      `441`, `442`, `471`, `472`, `473`, `474`, `475`), although each answers exactly
+      one question, because section 2 of the specification SHOULD use FAIL when
+      negotiated. Every other numeric (`402`, `451`, `462` and the rest) is untouched,
+      which `test_standard_replies.c` asserts on `402` and `451` as well as on the
+      fourteen: a migration of everything would pass every other case in that file.
       The guarantee is **structural** — `reply_refused()` has one branch and it is
       the old `reply()` call — and the text is rendered once and handed to whichever
       shape was chosen, so the two renderings are the same string by construction.
-      The cost is stated where it is paid: those four numbers stop reaching a
+      The cost is stated where it is paid: those fourteen numbers stop reaching a
       negotiating client, and nothing that connected to an earlier build is affected
       because the capability did not exist to negotiate.
 - [x] *Phase 10.8:* **`chghost` is ABSENT, and the finding is the deliverable.**
@@ -3268,5 +3283,5 @@ Quality:
 | **A client changes its own ident after registration, silently** (Phase 10.8) | `handle_user()` writes `conn_t::user` unconditionally and `USER` is `pre_reg`, so the dispatch table routes it for a REGISTERED connection: a client could re-send `USER` and move its own ident with **no line to anyone** — not to itself and not to the members of its channels. Every roster this node draws (`311`, `352`, `353`, the message prefix, `302`) then reported an ident the target's peers were never told about, a `userhost-in-names` client was shown a hostmask that changed without a word, `resume.c` silently invalidated the client's own session record, and a banned user could change its ident and re-`JOIN` | **CLOSED IN PHASE 10.10, and the threat model is what decides the fix.** Nothing on this node is GRANTED to an ident — no privilege and no account reads `c->user` alone, it is client-asserted and unverified at registration, and two users may already hold the same one — so this is **not impersonation**. It IS an access-control bypass: `chan_banned()` runs on every `JOIN` and matches a stored mask against the composite `nick!user@host`, and the suite exercises that form (`MODE #mo +b *!*@127.0.0.1` → `474`), so a mask of the shape `mallory!*@*` could only be defeated by moving the ident and re-joining. `handle_user()` now refuses a second `USER` with **`462 ERR_ALREADYREGISTRED` and returns before the write**, and the gate is `commands_registered()` rather than "has seen a `USER` before", so a client that sends `USER` twice *while registering* still works last-one-wins and nobody is stranded. The previous row's stated reason for not acting — that refusing "is a behaviour change to an RFC 1459 MUST command with nothing in the RFC requiring it" — **was wrong**: RFC 2812 3.1.3 lists `ERR_ALREADYREGISTRED` among `USER`'s numeric replies and RFC 2812 9 names the case, "user details from second USER message". `462` is not migrated, because 4.4.3's rule migrates only numerics that answer more than one question on this node. `test_chghost.c` case 3 is the **inversion** of Phase 10.8's hole-proving case, not a deletion of it | 
 | **An unsolicited notification reaching a client that did not ask** (Phase 10.8a) | the notification is an ASSERTION about a user — their realname changed, their ident and host changed, they are away or no longer away — so sending it to a client that did not negotiate is as wrong as not sending it to one that did. `away-notify` is the sharp case: the line's whole grammar is `:nick!user@host AWAY [:message]`, so a "notification" with no message asserts the user is no longer away | **There is ONE per-destination gate, inside the one walk that decides who gets what (§3.1.1), and it is the absence of a line rather than a third shape.** A gate that returned a third *shape* would still have sent a line, and an empty one reads as "no longer away". The three-handler alternative was rejected for the same reason `fanout.c` exists: `chan_verbs.c`'s own broadcast helper lost a forward arm that way in Phase 4. `test_fanout_gate.c` asserts **zero queued bytes** for the refused member rather than the absence of a needle, because absence-from-a-buffer is satisfied by a line that arrived elsewhere in the stream |
 | **`FAIL` reaching a client that did not negotiate `standard-replies`** (Phase 10.9) | `FAIL` is a command word no such client has ever been told to expect and RFC 1459 2.3 parses it as an unknown command — so the migration would break exactly the clients it was supposed to leave alone, and the breakage is a client that stops rendering errors rather than one that fails loudly | **The branch is `reply.c`'s, and there is exactly one of them.** `reply_refused()` asks `cap_standard_replies_enabled(src)` before it does anything else; a client that did not negotiate reaches `reply()` with the legacy numeric, the same middle parameters and the same text, and the two renderings are the same string because the format is rendered ONCE and handed to whichever branch was chosen. `test_standard_replies.c` runs every case on two connections differing in exactly that one negotiation and asserts **both** answers byte-for-byte, plus the absence of `FAIL`, `WARN` and `NOTE` and a line COUNT for the window — a list of absent numerics would pass a fault that answered with a number nobody thought of |
-| **A legacy numeric migrated for a client that did not ask** (Phase 10.9) | the client loses the numeric it was matching on, and the four that stop arriving are four that clients most often match | **The migration is per destination and the legacy rendering is byte-identical**, and no client that connected to an earlier build can be affected because the capability did not exist to negotiate. The list is four numerics and not thirty, and the rule that chose them is a property of THIS NODE (one number, several questions) rather than a preference: `test_standard_replies.c` asserts `401` and `451` still arrive at a negotiating client unchanged, so the list cannot grow by accident |
+| **A legacy numeric migrated for a client that did not ask** (Phase 10.9, extended by #727) | the client loses the numeric it was matching on, and the fourteen that stop arriving include the ones clients most often match | **The migration is per destination and the legacy rendering is byte-identical**, and no client that connected to an earlier build can be affected because the capability did not exist to negotiate. The list is fourteen numerics and not thirty — the first four by THIS NODE's one-number-several-questions rule, the ten by #727's refusal-numeric list — and `test_standard_replies.c` asserts `402` and `451` still arrive at a negotiating client unchanged, so the list cannot grow by accident |
 | ~~**`KICKLEN` has no bound to advertise**~~ (Phase 10.4) | an over-long KICK reason is not refused with a numeric; it reaches `message_format()`, which refuses it as `unrepresentable` — a non-zero `n_reply_refused`, the counter `reply.c` holds at zero because a non-zero value of it is a bug report | **RESOLVED in Phase 10.9, and by adding the bound rather than by muting the symptom.** `CHAN_MAX_KICK_REASON` (255) refuses it with `417` before anything is applied, and `KICKLEN` is advertised from the same constant (§4.4.4). The refusal leaves the roster untouched, so a node that answered 417 *after* removing the member — which both 417 assertions would have passed — is caught by a PRIVMSG from the kicked connection arriving as a delivery rather than a 404 |
