@@ -75,9 +75,10 @@
 /* How many channels a bare LIST or bare NAMES enumerates (#220). A bare LIST
  * queues a 322 per channel and a bare NAMES a whole roster per channel, so an
  * uncapped walk turns one line into up to SERVER_MAX_CHANNELS replies inside
- * one tick. Past this the walk stops and the normal terminator (323, or the
- * last 366) still closes the reply, with a `list_truncated`/`names_truncated`
- * observable saying so -- the same shape as WHO's WHO_MASK_MAX truncation. */
+ * one tick. Past this the walk stops and the close carries the flag (#660:
+ * "End of LIST (truncated)", or the last 366 as "End of /NAMES list
+ * (truncated)"), with a `list_truncated`/`names_truncated` observable saying
+ * so -- the same shape as WHO's WHO_MASK_MAX truncation. */
 #define CHAN_ENUM_MAX 64
 
 /* Split a comma-separated channel list into NUL-terminated names.
