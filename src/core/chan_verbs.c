@@ -819,7 +819,35 @@ void handle_join(server_t *s, conn_t *c, const message_t *m)
                             "Not enough parameters");
         return;
     }
-
+    /* RFC 2812 3.2.1: a bare `JOIN 0` parts the client from every channel it
+     * is on. Exact single parameter only, checked before list splitting so
+     * `JOIN 0,#x` still takes the list path and refuses the 0 element. */
+    if (strcmp(m->params[0], "0") == 0) {
+        /* Snapshot: each departure detaches from c->chans while iterating. */
+        chan_t *leaving[CONN_MAX_CHANNELS];
+        size_t total = c->nchans < CONN_MAX_CHANNELS ? c->nchans
+                                                     : CONN_MAX_CHANNELS;
+        for (size_t k = 0; k < total; k++) {
+            leaving[k] = c->chans[k];
+        }
+        for (size_t k = 0; k < total; k++) {
+            chan_t *ch = leaving[k];
+            char prefix[CONN_HOSTMASK_MAX];
+            chan_verdict_t verdict = authority_ok(s, c, ch, "PART", 1);
+            if (verdict == CHAN_VERDICT_REFUSED) {
+                continue;
+            }
+            if (verdict == CHAN_VERDICT_FORWARD &&
+                conn_hostmask(c, prefix, sizeof prefix) != 0) {
+                /* No reason: the 0-param PART shape, as in handle_part. */
+                deliver_state_change(s, c, ch, "PART", prefix, NULL, 0);
+            }
+            chan_member_leave(s, ch, c, 1, NULL);
+            (void)chan_detach_conn(c, ch);
+            (void)chan_dispose_if_empty(s, ch);
+        }
+        return;
+    }
     n = chan_split_list(store, sizeof store, m->params[0], names,
                         CHAN_MAX_LIST_ARGS);
     if (n <= 0) {
