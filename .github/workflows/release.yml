@@ -1,0 +1,124 @@
+name: Release binaries
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build binaries for (must exist)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: build (${{ matrix.runner }}, TLS=${{ matrix.tls }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: linux-x64
+            runs_on: [self-hosted, tweak-ci]
+            tls: "OFF"
+          - runner: linux-x64
+            runs_on: [self-hosted, tweak-ci]
+            tls: "ON"
+          - runner: macos-arm64
+            runs_on: macos-latest
+            tls: "OFF"
+          - runner: macos-arm64
+            runs_on: macos-latest
+            tls: "ON"
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.ref }}
+      - name: Install OpenSSL dev (TLS=ON, apt systems only)
+        if: matrix.tls == 'ON' && matrix.runner == 'linux-x64'
+        run: |
+          set -euo pipefail
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y --no-install-recommends libssl-dev
+      - name: Install OpenSSL (TLS=ON, macOS only)
+        if: matrix.tls == 'ON' && matrix.runner == 'macos-arm64'
+        run: |
+          set -euo pipefail
+          brew install openssl@3 || true
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Build Release
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DWITH_TLS=${{ matrix.tls }} -DBUILD_TESTING=OFF
+          cmake --build build --parallel "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          ls -la build/src/irc-serve
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          ./build/src/irc-serve --help 2>&1 | head -3
+          ./build/src/irc-serve --help 2>&1 | head -1 | grep -q "^irc-serve-" || { echo "binary does not report a version"; exit 1; }
+      - name: Assert TLS linkage matches cell
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.runner }}" = "macos-arm64" ]; then
+            linked=$(otool -L build/src/irc-serve | grep -cE 'libssl|libcrypto' || true)
+          else
+            linked=$(ldd build/src/irc-serve | grep -cE 'libssl|libcrypto' || true)
+          fi
+          if [ "${{ matrix.tls }}" = "ON" ]; then
+            [ "$linked" -gt 0 ] || { echo "TLS=ON cell produced a binary with no libssl"; exit 1; }
+          else
+            [ "$linked" = 0 ] || { echo "TLS=OFF cell linked libssl — dependency claim broken"; exit 1; }
+          fi
+          echo "linkage OK (tls=${{ matrix.tls }}, ssl_refs=$linked)"
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver=$(./build/src/irc-serve --help 2>&1 | head -1 | sed 's/^irc-serve-//')
+          [ -n "$ver" ] || { echo "could not read version from binary"; exit 1; }
+          name="irc-serve-${ver}-${{ matrix.runner }}-tls${{ matrix.tls }}"
+          mkdir -p "dist/$name"
+          cp build/src/irc-serve "dist/$name/"
+          cp LICENSE NOTICE "dist/$name/" 2>/dev/null || cp LICENSE "dist/$name/"
+          (cd dist && tar czf "$name.tar.gz" "$name" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          ls -la dist/
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$name.tar.gz.sha256" >> "$GITHUB_ENV"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            dist/${{ env.ASSET }}
+            dist/${{ env.CHECKSUM }}
+          if-no-files-found: error
+
+  publish:
+    name: publish to GitHub release
+    needs: build
+    runs-on: [self-hosted, tweak-ci]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/rel-assets
+          merge-multiple: true
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          ls -la /tmp/rel-assets/
+          gh release upload "$tag" /tmp/rel-assets/*.tar.gz /tmp/rel-assets/*.sha256 --clobber
+          echo "Published binaries to release $tag"
