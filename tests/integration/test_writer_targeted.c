@@ -7,6 +7,7 @@
  * the drain happened.
  */
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,17 +97,38 @@ int main(void)
     owner = slots[0];
     TF_CHECK_MSG(server_queue(&s, conns[0], PAYLOAD, strlen(PAYLOAD)) == 0,
                  "queue refused");
+    /* #681: wait for the bytes on the wire (poll, no wq_lock held) instead
+     * of polling conn_write_pending_locked() every millisecond. That poll
+     * grabbed the conn's wq_lock, which the owner's drain takes as a
+     * trylock: one collision parked the writer past its single consumed
+     * wakeup with no re-kick coming, stalling to the deadline. The locked
+     * read below runs only after bytes arrive, so it cannot collide with
+     * the drain; the deadline still fails loudly on a genuine stall. */
+    int delivered = 0;
+
     deadline = now_us() + (long long)DEADLINE_MS * 1000LL;
     for (;;) {
         char sink[1024];
+        struct pollfd pfd;
+        long long remain_us;
+        int timeout_ms;
 
         while (read(peers[0], sink, sizeof sink) > 0) {
+            delivered = 1;
         }
-        if (conn_write_pending_locked(conns[0]) == 0u) {
+        if (delivered && conn_write_pending_locked(conns[0]) == 0u) {
             break;
         }
         TF_CHECK_MSG(now_us() < deadline, "stall: owner never drained");
-        (void)usleep(1000);
+        remain_us = deadline - now_us();
+        timeout_ms = (remain_us > 0) ? (int)(remain_us / 1000LL) : 0;
+        if (timeout_ms > 1000) {
+            timeout_ms = 1000;
+        }
+        memset(&pfd, 0, sizeof pfd);
+        pfd.fd = peers[0];
+        pfd.events = POLLIN;
+        (void)poll(&pfd, 1u, timeout_ms);
     }
     TF_CHECK_MSG(wakes(&s, owner) == before[owner] + 1u,
                  "owner slot %d woke %lu times, want exactly one more than %lu",
