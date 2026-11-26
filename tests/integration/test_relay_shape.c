@@ -74,6 +74,7 @@
 #include "harness/test_util.h"
 
 #define RELAY_FILE "src/core/chan_verbs.c"
+#define RELAY_FILE2 "src/core/chan_verbs_mode.c"
 
 /* Occurrences of `needle` in `code`, as a NON-OVERLAPPING count. Written out here
  * rather than pulled from the harness because `tf_count()` counts a STRING in a
@@ -168,33 +169,55 @@ static void case_no_emission_carries_a_client_parameter(void)
     size_t offenders;
     char first[192];
 
-    code = tf_read_code(RELAY_FILE, &len);
-    TF_CHECK_MSG(code != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
-                 RELAY_FILE);
-    TF_CHECK_MSG(len > 0, "%s read as empty, so every assertion below would pass "
-                 "on a file this test did not look at", RELAY_FILE);
+    /* Both halves of the split: handle_mode()'s five emissions moved to
+     * RELAY_FILE2 for #543 TU-53, and an invariant that stopped looking at
+     * them would be the vacuity this file exists to prevent. */
+    {
+        char *head = tf_read_code(RELAY_FILE, &len);
+        char *tail = NULL;
+        size_t tail_len = 0;
+
+        TF_CHECK_MSG(head != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
+                     RELAY_FILE);
+        tail = tf_read_code(RELAY_FILE2, &tail_len);
+        TF_CHECK_MSG(tail != NULL, "could not read %s (is IRCSERVE_SRC_DIR set?)",
+                     RELAY_FILE2);
+        code = (char *)malloc(len + tail_len + 1u);
+        TF_CHECK_MSG(code != NULL, "could not join %s and %s",
+                     RELAY_FILE, RELAY_FILE2);
+        memcpy(code, head, len);
+        memcpy(code + len, tail, tail_len);
+        code[len + tail_len] = '\0';
+        len += tail_len;
+        free(head);
+        free(tail);
+    }
+    TF_CHECK_MSG(len > 0, "both relay files read as empty, so every assertion "
+                 "below would pass on files this test did not look at");
 
     /* THE SUBJECT IS STILL THERE. Without this, "zero raw assignments" is
      * satisfiable by deleting the emissions, and a test that can be satisfied by
-     * deleting the thing it is about is not a test. Nine is what the tree has:
-     * five in handle_mode(), and one each in chan_admit(), handle_part()'s forward
-     * arm, handle_topic()'s forward arm, handle_topic()'s owned arm, handle_kick(),
-     * notify_invite() and chan_member_leave(). It is written as a RANGE rather than
+     * deleting the thing it is about is not a test. Counted across both files:
+     * five in handle_mode() (in chan_verbs_mode.c since #543 TU-53), and one
+     * each in chan_admit(), handle_part()'s forward arm, handle_topic()'s
+     * forward arm, handle_topic()'s owned arm, handle_kick(), notify_invite()
+     * and chan_member_leave(). It is written as a RANGE rather than
      * an equality because a new verb that emits something legitimately adds one, and
      * a test that fails on an addition is a test that gets deleted. */
     emissions = occurrences(code, "deliver_state_change");
     TF_CHECK_MSG(emissions >= 7u,
-                 "%s holds %lu call(s) to deliver_state_change() and this test "
-                 "expects at least 7. Either the emissions were renamed or removed -- "
-                 "which would make the zero-below vacuous -- or the invariant moved "
-                 "somewhere this file does not look. A structural assertion whose "
-                 "subject can disappear has stopped asserting anything.",
-                 RELAY_FILE, (unsigned long)emissions);
+                 "the two relay files hold %lu call(s) to deliver_state_change() "
+                 "and this test expects at least 7. Either the emissions were "
+                 "renamed or removed -- which would make the zero-below vacuous -- "
+                 "or the invariant moved somewhere this file does not look. "
+                 "A structural assertion whose subject can disappear has stopped "
+                 "asserting anything.",
+                 (unsigned long)emissions);
 
     /* AND THE INVARIANT. */
     offenders = raw_param_assignments(code, first, sizeof first);
     TF_CHECK_MSG(offenders == 0u,
-                 "%s assigns an emission's parameter array from the client's own "
+                 "a relay emission assigns its parameter array from the client's own "
                  "parameter %lu time(s). Every one of those is a field and its "
                  "announcement being two different values: the emission says one "
                  "thing and the node's state says another, and the only reader who "
@@ -205,7 +228,7 @@ static void case_no_emission_carries_a_client_parameter(void)
                  "hand the emission the value the node decided on: `ch->topic`, a "
                  "stripped copy, or `effective` computed once above both the store "
                  "and the broadcast.\n  offending statement: %s",
-                 RELAY_FILE, (unsigned long)offenders, first);
+                 (unsigned long)offenders, first);
 
     /* THE EXEMPTION, CHECKED RATHER THAN ASSERTED IN PROSE. msg_verbs.c really does
      * relay a client's PRIVMSG text to a fan-out, and this file's claim is scoped so
