@@ -336,6 +336,19 @@ void handle_authenticate(server_t *s, conn_t *c, const message_t *m)
                                 "SASL PLAIN payload was not base64 or not three "
                                 "NUL-separated fields");
         }
+        /* Flush NOW at N == 0: the loop's write step runs before its read step
+         * per iteration and a CLOSING conn leaves the poll set, so the refusal
+         * queued above would die in the reaper's close() unsent. Mirrors the
+         * flood path in poll_loop.c. conn_pump() never closes; the mark below
+         * still does. At N > 0 writers own the queue; kick and let the reaper
+         * defer close until drained (see server_reap). */
+        if (s->writer_threads <= 0) {
+            if (conn_pump(c) < 0) {
+                conn_mark_closing(c);
+            }
+        } else {
+            server_writers_kick_conn(s, c);
+        }
         conn_mark_closing(c);
         printf("[observable] sasl: fd=%d outcome=REJECTED reason=%s\n", c->fd,
                strlen(arg) > (size_t)SASL_MAX_RESPONSE ? "RESPONSE_TOO_LONG"
