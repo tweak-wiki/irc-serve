@@ -224,10 +224,10 @@ static void expect_absent_in_window(test_client_t *c, size_t from, size_t end,
 
 /* One WHO *o*, answered between two drains. The mask covers both nicks under
  * test ("ghost" and "probe" both contain 'o') while staying a filtered mask:
- * since #170 a bare WHO answers 315 alone with no 352 sweep, so it cannot
- * enumerate anything. Leaves the window in `from`/`end` and asserts the list
- * is terminated, which is what makes the window a complete answer rather than
- * a prefix of one. */
+ * a bare WHO would also enumerate them since #674, but the filtered mask is
+ * the precise probe here. Leaves the window in `from`/`end` and asserts the
+ * list is terminated, which is what makes the window a complete answer rather
+ * than a prefix of one. */
 static void who_window(test_client_t *c, size_t *from, size_t *end)
 {
     *from = drain(c);

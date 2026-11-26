@@ -584,11 +584,11 @@ static void who_entry(server_t *s, conn_t *dst, const conn_t *who,
  * (per-channel user/host/account/flags). Every remote value is cached (#562
  * notify-locality: no freshness claim), and a nick known nowhere is still
  * 401 + 318.
- *
- * Bare WHO and mask-form WHO stay local: the broad-mask arm answers 315 alone
- * by design (#170 amplification), and the mask sweep walks the local table.
- * Channel WHO, WHOIS and ISON -- the forms that name a shared roster -- see
- * remotes. */
+ * Bare WHO and mask-form WHO stay local: the broad-mask arm ('*', '0', empty)
+ * sweeps the local table up to WHO_MASK_MAX (#674 enumerates; #170's 315-alone
+ * answer is kept only for the #217 expensive-pattern guard), and the mask
+ * sweep walks the local table. Channel WHO, WHOIS and ISON -- the forms that
+ * name a shared roster -- see remotes. */
 
 /* The server a 352/312 names for a remote roster row: the member's own server
  * when a burst carried it, else the peer that reported them -- exact on a
@@ -645,11 +645,12 @@ static void remote_who_entry(server_t *s, conn_t *dst, const chan_remote_t *r,
                 6, "1 %s", r->nick);
 }
 
-/* WHO's mask-form row cap (#170). One input line walks the nick table and
- * emits one 352 per match, so an unfiltered mask is ~1000x amplification
- * into per-connection queues. Broad masks answer 315 alone; anything else
- * is truncated at the cap with 315 closing the list. The channel branch is
- * bounded by membership and is unchanged. */
+/* WHO's mask-form row cap (#170, reshaped by #674). One input line walks the
+ * nick table and emits one 352 per match, so an unfiltered mask is ~1000x
+ * amplification into per-connection queues. Broad masks ('*', '0', empty)
+ * enumerate up to the cap with 315 closing the list; only the #217
+ * expensive-pattern guard answers 315 alone with no sweep. The channel
+ * branch is bounded by membership and is unchanged. */
 #define WHO_MASK_MAX 64
 
 void handle_who(server_t *s, conn_t *c, const message_t *m)
@@ -754,26 +755,20 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
                c->nick, shown, strlen(mask), conn_text_bad_count(mask),
                server_nick_count(s));
     }
-    /* Broad masks sweep the whole table for no information: "WHO *", "WHO 0"
-     * and bare WHO (mask "*") or an empty mask match every nick, so one line
-     * in becomes one 352 per user. Answer 315 alone with no 352 sweep. */
-    if (mask[0] == '\0' || strcmp(mask, "*") == 0 || strcmp(mask, "0") == 0) {
-        /* An empty mask cannot be echoed as a MIDDLE parameter -- 3.2 refuses
-         * those -- so 315 names '*' for it, the mask a bare WHO implies. */
-        const char *eomask = (mask[0] != '\0') ? mask : "*";
-
-        printf("[observable] who_truncated: nick=%s mask_len=%zu reason=broad_mask "
-               "replies=0\n",
-               c->nick, strlen(mask));
-        (void)reply(s, c, "315", (const char *const[]){ eomask }, 1,
-                    "End of WHO list");
-        return;
-    }
+    /* RFC 2812 3.3.4: '*', '0' and an absent mask list every visible user
+     * (#674). The old #170 arm answered 315 alone here; one line in is now
+     * one 352 per user, still bounded by the WHO_MASK_MAX cap in the sweep
+     * below. An empty mask cannot be echoed as a MIDDLE parameter -- 3.2
+     * refuses those -- so 315 names '*' for it, the mask a bare WHO implies. */
+    int match_all = (mask[0] == '\0' || strcmp(mask, "*") == 0 ||
+                     strcmp(mask, "0") == 0) ? 1 : 0;
+    const char *eomask = (mask[0] != '\0') ? mask : "*";
     /* #217: the matcher is cheap per nick, but a mask of many wildcards (or a
      * very long one) burns it once per nickname with nothing to show: the
      * reply cap below already bounds the ROWS, not the MATCHING. Count the
      * pattern cost up front -- more than two wildcards or longer than a nick
-     * can ever need -- and answer 315 alone like the broad-mask arm above. */
+     * can ever need -- and answer 315 alone. Genuinely broad masks ('*', '0',
+     * empty) never reach here: match_all above already claimed them. */
     {
         size_t wilds = 0;
         size_t mlen = 0;
@@ -806,7 +801,7 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
         if (who == NULL || who->nick[0] == '\0' || atomic_load_explicit(&who->state, memory_order_acquire) == CONN_CLOSING) {
             continue;
         }
-        if (fanout_mask_match(mask, who->nick) == 0) {
+        if (match_all == 0 && fanout_mask_match(mask, who->nick) == 0) {
             continue;
         }
         if (sent >= WHO_MASK_MAX) {
@@ -821,7 +816,7 @@ void handle_who(server_t *s, conn_t *c, const message_t *m)
                c->nick, sent, truncated, WHO_MASK_MAX);
     }
     }
-    (void)reply(s, c, "315", (const char *const[]){ mask }, 1,
+    (void)reply(s, c, "315", (const char *const[]){ eomask }, 1,
                 "End of WHO list");
 }
 
@@ -958,10 +953,10 @@ static void send_whois_channels(server_t *s, conn_t *dst, const conn_t *who)
  * that holder's records, and a nick held elsewhere is still unknown.
  *
  * 301 is absent: neither the registry nor the roster carries away state.
- * 317 carries idle 0 with the cached signon (0 when never told): the idle of
- * a user this node holds no socket for is unknowable, and 0 is the saturating
- * floor rather than a measurement. Field order is the local one: 311, 312,
- * 319, 317, 330, 318. */
+ * 317 carries idle 0 alone (#671: one middle parameter per RFC 2812 5.1): the
+ * idle of a user this node holds no socket for is unknowable, and 0 is the
+ * saturating floor rather than a measurement. Field order is the local one:
+ * 311, 312, 319, 317, 330, 318. */
 static int whois_remote(server_t *s, conn_t *dst, const char *base,
                         const char *qserver)
 {
@@ -972,9 +967,7 @@ static int whois_remote(server_t *s, conn_t *dst, const char *base,
     char account[CONN_MAX_ACCOUNT + 1];
     char chans[WHOIS_CHANNELS_LINE + 1];
     char idle[24];
-    char signon[24];
     const char *dsrv;
-    uint64_t signon_ms = 0;
     size_t used = 0;
     int lines = 0;
     int have = 0;
@@ -990,8 +983,7 @@ static int whois_remote(server_t *s, conn_t *dst, const char *base,
         return 0;
     }
     if (fed_nickreg_info(s, base, qserver, nick, sizeof nick, srv, sizeof srv,
-                         user, sizeof user, host, sizeof host,
-                         &signon_ms) != 0) {
+                         user, sizeof user, host, sizeof host, NULL) != 0) {
         have = 1;
         have_reg = 1;
     }
@@ -1081,9 +1073,7 @@ static int whois_remote(server_t *s, conn_t *dst, const char *base,
         lines++;
     }
     (void)snprintf(idle, sizeof idle, "0");
-    (void)snprintf(signon, sizeof signon, "%llu",
-                   (unsigned long long)signon_ms);
-    (void)reply(s, dst, "317", (const char *const[]){ nick, idle, signon }, 3,
+    (void)reply(s, dst, "317", (const char *const[]){ nick, idle }, 2,
                 "seconds idle");
     if (account[0] != '\0') {
         (void)reply(s, dst, "330", (const char *const[]){ nick, account }, 2,
@@ -1110,8 +1100,8 @@ static int whois_remote(server_t *s, conn_t *dst, const char *base,
  * is the one Phase 3 gave for 432: the LIST has a hole, the protocol does not.
  * For 301 the RFC is not optional -- RFC 2812 3.3.4 requires it for an away user
  * and it is the ONLY numeric that can carry the fact at all: 311 holds
- * user/host/realname, 312 holds a server name, 317 holds two timestamps, and none
- * of them has a field for away. For 319 the same argument is stronger still,
+ * user/host/realname, 312 holds a server name, 317 holds the idle time, and
+ * none of them has a field for away. For 319 the same argument is stronger still,
  * because nothing else in the reply set names a channel at all. Flagged here and
  * in the conformance document rather than papered over.
  */
@@ -1120,7 +1110,6 @@ void handle_whois(server_t *s, conn_t *c, const message_t *m)
     conn_t *who;
     const char *nick;
     char idle[24];
-    char signon[24];
     uint64_t now_ms;
     unsigned long long secs;
 
@@ -1208,78 +1197,21 @@ void handle_whois(server_t *s, conn_t *c, const message_t *m)
      * send_whois_channels() for the grammar and the chunking argument. */
     send_whois_channels(s, c, who);
 
-    /* ------------------------------------------------------------------------
-     * 317: <idle> <signon>, both real values. conn_t records them at accept and
-     * on every read (see connection.c), so neither number is a placeholder --
-     * which is the standard Phase 4 set for 329, where borrowing topic_when
-     * would have been "a numeric that lies about what it is".
-     *
-     * ------------------------------------------------------------------------
-     * TWO MIDDLE PARAMETERS WHERE RFC 2812 3.3.4 SPECIFIES ONE, AND THE
-     * TRAILING TEXT IS DELIBERATELY LEFT AT THE RFC'S OWN LITERAL STRING.
-     * ------------------------------------------------------------------------
-     * Both halves of that are decisions this phase took and is recording rather
-     * than accidents, so here is the argument.
-     *
-     * THE EXTRA NUMBER. RFC 2812 5.1 writes 317 as "<nick> <integer> :seconds
-     * idle" -- one number. This line carries <nick> <idle> <signon>, two. That is
-     * the de-facto convention every widely deployed client parses (irssi,
-     * weechat and hexchat all read two, and fall back gracefully), and it is the
-     * form that makes 317 carry the signon time at all: 311 gives a real name,
-     * 312 gives a server, 317 is the only place a WHOIS reply carries a
-     * timestamp of any kind, and dropping <signon> to satisfy the RFC's field
-     * count would delete the only signon information on the wire. The cost is
-     * that a client reading 317 STRICTLY positionally against the RFC's field
-     * list will find a second number where it expected the trailing parameter.
-     * The mitigating fact is that <signon> is a middle parameter, not text, so
-     * the trailing text stays exactly where the RFC puts it and a client that
-     * reads only the trailing text is unaffected. That is the shape the whole
-     * reply path is built around -- 3.2 will not format a number into a
-     * non-final position -- so <signon> had to be a parameter rather than be
-     * folded into the sentence.
-     *
-     * THE TRAILING TEXT, which is the question the phase asked and the one worth
-     * being explicit about because "seconds idle, signon time" is the other
-     * convention in circulation. RFC 2812 3.3.4 makes the trailing parameter
-     * free text, so BOTH strings are conformant, and the choice between them
-     * cannot be made on conformance grounds. It is left as "seconds idle" for
-     * three reasons, in descending order of weight:
-     *
-     *   1. It is the RFC's OWN literal string for this numeric. A client whose
-     *      numeric table carries the RFC's text matches this line byte for byte,
-     *      and would not match a rewritten sentence. When two forms are equally
-     *      legal, the one that is the specification's literal is the one that
-     *      cannot lose.
-     *   2. Clients do not read it. Every client that matters dispatches 317 on
-     *      the NUMERIC and reads the middle parameters by position; none parses
-     *      the trailing text of 317, because the numeric exists to carry two
-     *      numbers and the text is decoration. Changing decoration that nothing
-     *      reads buys no compatibility.
-     *   3. An anchored match is the only consumer the rewrite would help, and
-     *      anchored matches break. A client, script or log parser anchored on
-     *      ":seconds idle" -- a suffix, not a substring -- is a real thing in
-     *      the wild, and "seconds idle, signon time" does not satisfy it. The
-     *      rewrite trades a hypothetical reader who reads decoration for a
-     *      concrete reader who matches it.
-     *
-     * The observation behind the question -- that a line carrying two numbers
-     * reads oddly against a sentence describing one -- is fair, and the reason
-     * it is not acted on is that the sentence is not this numeric's contract.
-     * RFC 2812 3.3.4's field list is, and it is satisfied. A reader who wants
-     * both numbers already has both.
-     */
-    /* Monotonic idle (#175): last_active_ms is server_now_ms() ms, so
+    /* 317: <idle> alone (#671). RFC 2812 5.1 names one integer middle
+     * parameter, and the second number this line used to carry (<signon>)
+     * broke strict positional readers: they took it for the start of
+     * trailing and misparsed idle. Dropped rather than moved into the
+     * sentence, which stays the RFC's own literal "seconds idle".
+     * Monotonic idle (#175): last_active_ms is server_now_ms() ms, so
      * the difference is a duration no wall-clock step can warp.
      * Saturating, so a stamp from the future reports 0 rather than
-     * wrapping. signon_at stays wall-clock: 317's <signon> is a Unix
-     * time the client compares against its own clock. */
+     * wrapping. */
     now_ms = server_now_ms();
     secs = (now_ms >= who->last_active_ms)
                ? (unsigned long long)((now_ms - who->last_active_ms) / 1000u)
                : 0ull;
     (void)snprintf(idle, sizeof idle, "%llu", secs);
-    (void)snprintf(signon, sizeof signon, "%lld", (long long)who->signon_at);
-    (void)reply(s, c, "317", (const char *const[]){ who->nick, idle, signon }, 3,
+    (void)reply(s, c, "317", (const char *const[]){ who->nick, idle }, 2,
                 "seconds idle");
 
     /* ------------------------------------------------------------------------

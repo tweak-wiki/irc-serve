@@ -95,7 +95,7 @@ can repeat it:
 verifies the *arity* of each numeric — how many middle parameters reach the wire —
 and it cannot verify the *values*, the text, or whether the numeric is the right
 answer to the question being asked. §5 is where the judgement calls live and they
-are not mechanical: `317` carrying two numbers where the RFC names one is an arity
+are not mechanical: `302`'s duplicated middle parameter is an arity
 mismatch a scan finds, but `401` being used for `WHO <a b>` is a mapping question
 no scan can reach. **The field-list re-vet was the arity half, run against all 176
 call sites**, and it is what found the three new findings in §6.11 to §6.13 and the
@@ -161,7 +161,7 @@ conformant.
 | 313 | RPL_WHOISOPERATOR | `<nick> :is an IRC operator` | A | No IRC operators exist; 258 says so on the wire. |
 | 314 | RPL_WHOWASUSER | `<nick> <user> <host> * :<real name>` | A | No WHOWAS command (421) and no nickname history: this node keeps none by design. |
 | 315 | RPL_ENDOFWHO | `<name> :End of WHO list` | E | ✓ Always emitted, including after 403. |
-| 317 | RPL_WHOISIDLE | `<nick> <integer> :seconds idle` | E | **deviation** — two middle parameters, §5.2. |
+| 317 | RPL_WHOISIDLE | `<nick> <integer> :seconds idle` | E | ✓ One middle parameter since #671; §5.2 records the choice. |
 | 318 | RPL_ENDOFWHOIS | `<nick> :End of /WHOIS list` | E | ✓ Always emitted, including after 401. |
 | 319 | RPL_WHOISCHANNELS | `<nick> :*( ( "@" / "+" ) <channel> " " )` | E | **Added in Phase 11.** Chunked at 400 bytes, which 3.3.4 sanctions in the sentence that defines the numeric. |
 
@@ -335,23 +335,24 @@ know where it came from.
 
 ## 5. Deviations: emitted, and not quite the RFC
 
-**Six entries, covering six numerics.** Four are Phase 11's and were re-verified
-against the RFC by the scan; **one is new** (`302`'s duplicated middle parameter),
-and **one is gone** — `303` was recorded here through Phase 11c and is now conformant,
-because the two numerics this section used to lump together are not the same shape.
-§5.1 says so with the evidence. Two of the six are not fixable without a decision
-that is not this document's to make.
+**Five entries, covering five numerics.** Four are Phase 11's and were re-verified
+against the RFC by the scan; **one is new** (`302`'s duplicated middle parameter).
+**Two are gone** — `303` was recorded here through Phase 11c and is now conformant,
+because the two numerics this section used to lump together are not the same shape
+(§5.1 says so with the evidence) — and `317`, which §5.2 records as conformant since
+#671, when the second number left the wire. Two of the five are not fixable without
+a decision that is not this document's to make.
 
 | | Numeric | What |
 |---|---|---|
 | [§5.1](#51-302-puts-a-nick-list-in-a-middle-parameter-and-303-no-longer-does) | `302` | a nick list in a middle parameter the RFC does not have, plus the `+`/`-` spelling |
-| [§5.2](#52-317-carries-two-numbers-where-the-rfcs-field-list-has-one) | `317` | two numbers where the RFC names one |
+| [§5.2](#52-317-carries-one-number-per-the-rfcs-field-list-671) | `317` | conformant since #671 — kept here as the record of the choice |
 | [§5.3](#53-368-is-also-used-as-a-refusal-with-two-middle-parameters) | `368` | a refusal role the RFC does not give it |
 | [§5.4](#54-324-adds-a-trailing-parameter-where-the-rfc-has-none) | `324` | a trailing sentence where the RFC's field list has no trailing parameter at all |
 | [§5.5](#55-432-puts-the-nickname-in-the-trailing-text) | `432` | the nickname in the trailing text |
 | [§5.6](#56-256-puts-the-server-name-in-the-sentence) | `256` | the server name in the sentence |
 
-**`302`, `317`, `324`, `368`, `432` and `256` are deviations. `366`, `404` and
+**`302`, `324`, `368`, `432` and `256` are deviations. `366`, `404` and
 `482` are in §6 instead**, because each of those three is conformant on most of its
 sites and the non-conformance is one call out of several — a different kind of thing
 from a numeric this node always gets wrong. **`303` is on neither list now**: it was
@@ -451,22 +452,24 @@ call site, which is where `302`'s does not apply: `302` can afford the duplicate
 field precisely because both readers being right is worth `strlen(reply)` bytes, and
 `303` cannot afford to be ambiguous about which of its two fields is the list.
 
-### 5.2 `317` carries two numbers where the RFC's field list has one
+### 5.2 `317` carries one number, per the RFC's field list (#671)
 
 RFC 2812 5.1: `<nick> <integer> :seconds idle`. This node sends
-`<nick> <idle> <signon> :seconds idle`. See the call site for the full argument.
-Short version: 317 is the only place a WHOIS reply carries a timestamp at all, the
-two-number form is what clients parse, and `<signon>` had to be a *parameter*
-rather than part of the sentence because 3.2 will not format a number into a
-non-final position — so the trailing text stays exactly where the RFC puts it.
-Re-verified by the Phase 11b scan: three middle parameters, where the RFC names two.
+`<nick> <idle> :seconds idle` — exactly one middle parameter. Through #671 it
+sent `<nick> <idle> <signon> :seconds idle`, the de-facto two-number form, and
+the strict positional reader that issue reports took `<signon>` for the start
+of trailing and misparsed idle. The signon time left the wire rather than
+moving into the sentence: the trailing text stays the RFC's own literal
+`"seconds idle"`, for the reasons below, and a number cannot live anywhere
+else on the line — 3.2 formats numbers into middle parameters, and the only
+middle slot the RFC names is taken by `<idle>`.
 
 **The trailing text is left at the RFC's own literal `"seconds idle"`.** RFC 2812
 3.3.4 makes it free text, so `"seconds idle, signon time"` would be equally
 conformant and conformance cannot decide it. It is left alone because (1) it is the
 specification's literal string and a client whose numeric table carries the RFC's
 text matches this line byte for byte; (2) no client parses the trailing text of 317
-— every one dispatches on the numeric and reads the middle parameters by position —
+— every one dispatches on the numeric and reads the middle parameter by position —
 so rewriting decoration nothing reads buys no compatibility; and (3) an anchored
 `:seconds idle` match is a real thing in the wild and a rewritten sentence does not
 satisfy it. The trade is a hypothetical reader of decoration against a concrete
@@ -1162,10 +1165,10 @@ phase.
   scope and §7 is the boundary.
 - **The "Here" column is about emission, not correctness.** A numeric marked `E` is
   emitted; whether its field list is right is the last column's job and, where the
-  answer is "no", §5 or §6 says so. Nine rows are `E` and deviate in some way:
-  `256`, `302`, `317`, `324`, `368`, `432` in §5, plus `366` (its trailing text,
+  answer is "no", §5 or §6 says so. Eight rows are `E` and deviate in some way:
+  `256`, `302`, `324`, `368`, `432` in §5, plus `366` (its trailing text,
   §6.14) and `482`, whose field-list deviation is one site out of several and is in
-  §6. `303` was on that list until Phase 11c and is not any more.
+  §6. `303` was on that list until Phase 11c, and `317` until #671; neither is any more.
 - **It is a snapshot of `src/` at this commit.** A numeric added in a later phase
   does not appear here, and the check-skips and CI gates do not read this file — a
   stale row is invisible to the build.
