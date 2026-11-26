@@ -150,6 +150,11 @@ static void fed_link_established(server_t *s, server_link_t *link, conn_t *c,
     link->retries = 0u;
     link->gave_up = 0;
     link->retry_at_ms = 0u;
+    /* #666: a link that has just come up is a link whose goodbye -- if it ever
+     * sent one -- is stale. Leaving clean_leave set would hide the NEXT
+     * departure's log line (fed_mark_clean_leave() prints only on transition)
+     * behind this generation's. */
+    link->clean_leave = 0;
     printf("[observable] link_established: peer=%s fd=%d initiator=%d "
            "epoch=%llu\n",
            link->name, link->fd, link->initiator,

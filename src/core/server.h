@@ -444,13 +444,13 @@ typedef struct server_link {
     /* PHASE 9 ITEM 4: THIS PEER SAID IT IS LEAVING. It is a FIELD rather than a
      * fifth handshake state because the FSM is 2.1's and has exactly four states,
      * and adding one would be a change to a specification this phase does not own.
-     * The distinction it carries needs no new state, either: a departing peer is a
-     * link that must not be dialled rather than a link in a new place.
      *
-     * WHAT IT SUPPRESSES IS EXACTLY ONE THING: the T7 arm's dial. Not the
-     * keepalive, not the dump, not the handshake -- the link stays ESTABLISHED
-     * until the peer's own teardown closes its socket, and everything this node
-     * knows about the peer stays readable.
+     * WHAT IT RECORDS IS EXACTLY ONE THING: the last departure was graceful
+     * rather than a failure, so the log and the dump can tell a planned stop
+     * from a crash. It is NOT a dial suppression any more (#666): suppressing
+     * the redial until an operator reset a link -- with no operator reset path
+     * in the shipped binary -- partitioned the mesh on every peer restart, and
+     * a departed peer is bounded by the retry budget instead.
      *
      * IT IS A SEPARATE FLAG FROM `gave_up` BECAUSE THE TWO SAY OPPOSITE THINGS, and
      * overloading one for both would make a peer that left on purpose look like a
@@ -460,11 +460,10 @@ typedef struct server_link {
      * server.h's own comment about the three integers makes, one level up: a
      * number that means two things is a number nobody can act on.
      *
-     * IT IS CLEARED BY fed_link_reset() ONLY, because that is the OPERATOR's door:
-     * an operator who resets a link is saying "I want this peer back", and a peer
-     * that left cleanly comes back if an operator asks for it. Nothing else clears
-     * it -- not a tick, not a sweep, not the link's own socket closing -- so a
-     * clean leave is not undone by a later event on the same link. */
+     * IT IS CLEARED by fed_link_reset() and by fed_link_established(): a link
+     * that has just come up is a link whose goodbye is stale, and leaving the
+     * mark set would hide the next departure's log line behind this
+     * generation's. */
     int      clean_leave;
 
     /* PHASE 9 ITEM 4, THE PROPAGATION HALF: the load figure this link's peer last
@@ -1447,9 +1446,12 @@ int server_init(server_t *s, const char *name);
  *               and gives up -- and the departing node's name stays in the roster
  *               of every node until a SQUIT arrives, which it never will, because
  *               the node that would have sent it is the one that went away.
- *   with it     each peer gets a SHUTDOWN, marks the link CLEANLY departed
- *               (link.c's T7 arm refuses a link with clean_leave set), purges that
- *               origin's roster, and tells its own peers onward as a SQUIT.
+ *   with it     each peer gets a SHUTDOWN, marks the link CLEANLY departed,
+ *               purges that origin's roster, and tells its own peers onward as
+ *               a SQUIT. The redial is NOT suppressed (#666): a peer that
+ *               restarted answers inside one backoff window, and a peer that
+ *               never comes back costs the bounded budget and an exhausted
+ *               report.
  *
  * IT IS BEST EFFORT and the limit is real: the line is queued and flushed by a
  * bounded poll(WRITE) write drain (one FED_SHUTDOWN_FLUSH_MS deadline shared by

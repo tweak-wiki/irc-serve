@@ -417,6 +417,15 @@ static void case_the_loser_renames_and_the_winner_keeps(void)
                  "the renamed user was never told on the wire, so its own display "
                  "still shows a name the server no longer holds: %s",
                  since(&z_zed, mark));
+    /* AND WITH ITS OWN HOSTMASK, not a server prefix (#675). RFC 2812 3.2.2 says
+     * a client MUST receive NICK for its own rename, and a `:server NICK new`
+     * line is one real clients ignore for self -- which left the loser
+     * believing it still held the old name until its next JOIN. */
+    TF_CHECK_MSG(strstr(since(&z_zed, mark), ":zed!") != NULL,
+                 "the renamed user was told with a server prefix rather than "
+                 "its own :old!user@host mask, so real clients ignore the "
+                 "rename: %s",
+                 since(&z_zed, mark));
 
     /* 3. THE LOCAL CHANNELS. The watcher shares a channel with the renamed user,
      * and a rename no other member can see is the divergence 2.1's policy is about
@@ -431,6 +440,10 @@ static void case_the_loser_renames_and_the_winner_keeps(void)
     TF_CHECK_MSG(strstr(since(&watch, mark), " NICK ") != NULL,
                  "a client sharing " CHAN " with the renamed user was never told, "
                  "so two clients in one channel show two names for one user: %s",
+                 since(&watch, mark));
+    TF_CHECK_MSG(strstr(since(&watch, mark), ":zed!") != NULL,
+                 "the watcher was told with a server prefix rather than the "
+                 "renamed user's :old!user@host mask: %s",
                  since(&watch, mark));
 
     /* 4. THE MESH. irc.b rekeys what it learned, and the observable proves the

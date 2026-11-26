@@ -681,6 +681,7 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
     char holder[IRC_MAX_SERVER_NAME + 1];
     char fresh[IRC_MAX_NICK + 1];
     char oldnick[IRC_MAX_NICK + 1];
+    char oldmask[CONN_HOSTMASK_MAX];
     conn_t *c;
 
     if (s == NULL || nick == NULL || nick[0] == '\0' || !valid_nick(nick)) {
@@ -798,17 +799,21 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
      * folded, and a caller that passed `Bob` must not produce a line that names
      * the client's own spelling. */
     (void)bounded_copy(oldnick, sizeof oldnick, nick);
+    /* Built from the same fields handle_nick() uses, with the same fallbacks:
+     * conn_hostmask() cannot render it because c->nick is overwritten below. */
+    (void)snprintf(oldmask, sizeof oldmask, "%s!%s@%s", nick,
+                   (c->user[0] != '\0') ? c->user : "-",
+                   (c->host[0] != '\0') ? c->host : "*");
     memcpy(c->nick, fresh, strlen(fresh) + 1u);
 
     /* 1. THE CLIENT, through send_line() and not a fanout: there is exactly one
      * addressee, and 3 makes the reply path the single place that decides where
-     * an outbound client message may be written. The prefix is this node's own
-     * name rather than the user's old hostmask -- 3.3.1's prefix exists so a
-     * receiver can ATTRIBUTE the line, and the receiver here is a connection this
-     * node already attributes -- and the observable is the same shape a
-     * client-issued rename produces, which is worth more to a reader than the
-     * extra bytes. */
-    (void)send_line(s, c, NULL, "NICK", (const char *const[]){ fresh }, 1);
+     * an outbound client message may be written. The prefix is the user's OLD
+     * hostmask -- RFC 2812 3.2.2 says a client MUST receive NICK for its own
+     * rename, and a server-prefixed line is one real clients ignore for self,
+     * which left the loser believing it still held the old name. Same shape as
+     * the client-issued rename in handle_nick(). */
+    (void)send_line(s, c, oldmask, "NICK", (const char *const[]){ fresh }, 1);
 
     /* 2. THE CHANNELS, through the resolve-then-deliver pair every channel state
      * change already uses, so a rename reaches a channel's clients by the one path
@@ -827,7 +832,7 @@ int fed_nickreg_resolve_local(server_t *s, const char *nick, uint64_t now_ms)
                 continue;
             }
             if (fanout_resolve(s, c, ch->name, FANOUT_STATE_CHANGE, &ct) != 0) {
-                (void)fanout_deliver_local(s, &ct, oldnick, "NICK",
+                (void)fanout_deliver_local(s, &ct, oldmask, "NICK",
                                            (const char *const[]){ fresh }, 1, NULL);
             }
         }
