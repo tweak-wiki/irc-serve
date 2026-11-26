@@ -1585,6 +1585,43 @@ static void test_mode(nf_node_t *node)
     tc_close(&a.c);
     tc_close(&b.c);
 }
+/* MODE with surplus parameters answers 461 and changes nothing (issue #662).
+ * The exact shape still applies, as the control proves; the surplus window
+ * holds the 461 and no MODE echo -- every letter the loop applies announces
+ * itself with one, so no echo means no prefix of the request was applied. */
+static void test_mode_surplus(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+
+    client_open(&a, node, "msa");
+    client_open(&b, node, "msb");
+    client_send(&a, "JOIN #ms");
+    (void)send_and_drain(&a, "ms-join-a");
+    client_send(&b, "JOIN #ms");
+    (void)send_and_drain(&b, "ms-join-b");
+
+    /* Exact shape first, as the control: b becomes an op. */
+    client_send(&a, "MODE #ms +o msb");
+    (void)send_and_drain(&a, "ms-exact");
+    expect_line(&a.c, "exact MODE +o applies",
+                ":msa!msa@127.0.0.1 MODE #MS +o msb\r\n");
+
+    /* Drain b as well: the +o echo above is fanned out to b asynchronously and
+       must not fall inside the surplus window below. */
+    (void)send_and_drain(&b, "ms-drain-b");
+    ma = tc_received(&b.c);
+    client_send(&b, "MODE #ms +v msa extra-garbage");
+    (void)send_and_drain(&b, "ms-surplus");
+    expect_line(&b.c, "461 for surplus MODE parameters",
+                ":irc.test 461 msb MODE :Not enough parameters\r\n");
+    expect_absent_from(tc_buffer(&b.c), ma, "surplus MODE applies nothing",
+                       " MODE #");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
 
 /* MODE <nickname>: user modes (issue #668). A nick target never reaches the
  * channel path, so it is 221/501/502 instead of 403. +i is the one letter
@@ -2473,6 +2510,7 @@ int main(void)
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
+    test_mode_surplus(&node);
     test_user_mode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);
