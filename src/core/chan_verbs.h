@@ -60,6 +60,7 @@
 #ifndef IRC_CORE_CHAN_VERBS_H
 #define IRC_CORE_CHAN_VERBS_H
 
+#include "core/channel.h"
 #include "core/connection.h"
 #include "core/message.h"
 #include "core/server.h"
@@ -114,6 +115,11 @@ int canonical_channel(server_t *s, conn_t *c, const char *command, const char *a
  * does not come through here. */
 chan_t *resolve_joined(server_t *s, conn_t *c, const char *command,
                        const char *arg);
+/* The federated half of target resolution (#606), defined in
+ * core/chan_verbs_kick.c. Shared through this header since #543 TU-52 (it
+ * moved with handle_kick(); handle_mode()'s +o/+v path is the second caller).
+ * Returns the remote roster entry or NULL; the caller owns nothing. */
+chan_remote_t *chan_remote_by_nick(chan_t *ch, const char *nick);
 
 /* Put `c` on `ch` as a member with `flags`, and tell everybody who needs to
  * know: the local members, the mesh (through 3.1's table), and `c` itself
