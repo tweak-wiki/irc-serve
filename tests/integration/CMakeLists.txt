@@ -794,6 +794,21 @@ irc_add_integration_test(test_autoscale test_autoscale.c)
 # not identified (that is the "account == \"\" is indistinguishable from no
 # account system" invariant), and the only way to assert that is to run one set of
 # assertions over both configurations.
+# #719: test_account under TSan only. The rate-limit case sends logins until
+# the process-wide verification budget refuses: ~64 KDF-backed attempts on a
+# fast machine, more under a sanitizer because the 2/sec refill accrues
+# mid-loop while each attempt runs slow (the loop's own comment says as
+# much), and every attempt is a fresh TCP connect plus a SASL round trip
+# through an instrumented node. Measured 7s native (Release, WITH_TLS=ON)
+# and 14s TSan on the maintainer's machine, but past the 120s CLI backstop on
+# a loaded CI runner while an identical-tree rerun passed -- the ~12x TSan
+# factor test_fed_burst shows there (1s native, 12.4s TSan) puts the typical
+# TSan run near 84s, so load tips it over. TIMEOUT 300 is 2.5x headroom over
+# the flake point; a wedged run still fails its first 15s tc_expect loudly,
+# so the backstop stays meaningful. Native keeps the suite default.
+if(IRC_TSAN)
+  set(irc_timeout_test_account 300)
+endif()
 irc_add_integration_test(test_account test_account.c)
 
 # 7/Phase 10.8a: the fanout contract's THIRD outcome. `fanout_form_t` chose
