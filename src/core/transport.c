@@ -235,7 +235,7 @@ int transport_is_tls(const conn_t *c)
      * happen to be OpenSSL's would work too and would make this file have to know
      * what OpenSSL's ops look like, which is the coupling the vtable exists to
      * remove. So the answer is one int, and the int is documented at the field. */
-    return (c != NULL && c->tls_active) ? 1 : 0;
+    return (c != NULL && atomic_load_explicit(&c->tls_active, memory_order_acquire)) ? 1 : 0;
 }
 
 /* ---------------------------------------------------------------------------

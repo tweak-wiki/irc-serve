@@ -38,12 +38,17 @@
  * runner can stall either side past 15 s without anything being wrong. */
 #define T_CLOSE_MS 120000
 /* Send-until-refused batches: the limiter refills 50 tokens/s against a 256
- * burst, so one fixed burst is a race against wall time on a loaded runner.
- * 20 batches of 150 outrun ~55 s of refill stall; the per-batch overshoot
- * past the refusal (~61 KiB) still fits in kernel buffers. */
+ * burst, so the mid-flood wait must be short -- a 2 s wait per batch used to
+ * grant the refill time to catch up, and on a slow runner the bucket never
+ * drained and the 417 never came (#743). 20 batches of 150 with 100 ms
+ * waits grant at most ~100 refill tokens against 3000 sent, so the refusal
+ * still lands mid-backlog on any runner; the waits are load-bearing the
+ * other way too, draining the reply side so the server's final pump never
+ * meets a full socket. The per-batch overshoot past the refusal (~61 KiB)
+ * still fits in kernel buffers. */
 #define FLOOD_BATCH 150
 #define FLOOD_BATCHES 20
-#define FLOOD_BATCH_MS 2000
+#define FLOOD_BATCH_MS 100
 
 #define T_DIR_MAX 512
 #define T_PATH (T_DIR_MAX + 128)
@@ -139,21 +144,28 @@ static void flood_leg(int port, int big)
                  "the flooding client never registered");
     /* Send in batches until the 417 shows up (see FLOOD_BATCH): a send error
      * just means the server already closed us, and tc_expect scans what is
-     * already buffered, so the poll is free once the refusal has landed. */
-    {
-        int batch, got = 0;
-        for (batch = 0; batch < FLOOD_BATCHES && !got; batch++) {
-            for (i = 0; i < FLOOD_BATCH; i++) {
-                if (big) {
-                    (void)snprintf(line, sizeof line, "PING :%s", tok);
-                } else {
-                    (void)snprintf(line, sizeof line, "PING :flood500");
-                }
-                if (tc_send(&flood, line) != 0) {
-                    break;
-                }
-            }
+     * already buffered, so the poll is free once the refusal has landed. The
+     * per-batch wait doubles as the reply-side drain that keeps the
+     * server-to-client pipe empty for the reaper's final pump. */
+     {
+         int batch, got = 0;
+         for (batch = 0; batch < FLOOD_BATCHES && !got; batch++) {
+             for (i = 0; i < FLOOD_BATCH; i++) {
+                 if (big) {
+                     (void)snprintf(line, sizeof line, "PING :%s", tok);
+                 } else {
+                     (void)snprintf(line, sizeof line, "PING :flood500");
+                 }
+                 if (tc_send(&flood, line) != 0) {
+                     break;
+                 }
+             }
             got = (tc_expect(&flood, " 417 ", FLOOD_BATCH_MS) == 0);
+         }
+        /* A slow server may still be working the backlog when the last batch
+         * goes out; one final bounded wait covers the lagging refusal. */
+        if (!got) {
+            got = (tc_expect(&flood, " 417 ", T_IO_MS) == 0);
         }
         {
             const char *saw = tc_buffer(&flood);
