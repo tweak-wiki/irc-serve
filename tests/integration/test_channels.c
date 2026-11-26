@@ -1137,6 +1137,61 @@ static void test_join_refuses_long_name(nf_node_t *node)
 
     tc_close(&a.c);
 }
+/* JOIN 0 parts every channel held (RFC 2812 3.2.1, issue #667). With nothing
+ * held it is a no-op, not an error; JOIN 0,#x is not a bare 0 and goes through
+ * the list below, where 0 fails validation per element. */
+static void test_join_zero(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+    size_t mb;
+
+    client_open(&a, node, "jza");
+    client_send(&a, "JOIN #jz0a");
+    (void)send_and_drain(&a, "jz-join-a");
+    client_send(&a, "JOIN #jz0b");
+    (void)send_and_drain(&a, "jz-join-b");
+
+    ma = tc_received(&a.c);
+    client_send(&a, "JOIN 0");
+    (void)send_and_drain(&a, "jz-zero");
+    expect_line(&a.c, "JOIN 0 parts #jz0a",
+                ":jza!jza@127.0.0.1 PART #JZ0A\r\n");
+    expect_line(&a.c, "JOIN 0 parts #jz0b",
+                ":jza!jza@127.0.0.1 PART #JZ0B\r\n");
+    expect_absent_from(tc_buffer(&a.c), ma, "JOIN 0 answers no error",
+                       " 403 ");
+
+    /* Membership is really gone: re-joining recreates the channel with the
+     * joiner as creator and op. */
+    client_send(&a, "JOIN #jz0a");
+    (void)send_and_drain(&a, "jz-rejoin");
+    expect_line(&a.c, "re-join after JOIN 0 recreates as op",
+                ":irc.test 353 jza = #JZ0A @jza\r\n");
+
+    /* JOIN 0 with nothing held is a no-op. */
+    client_open(&b, node, "jzb");
+    ma = tc_received(&b.c);
+    client_send(&b, "JOIN 0");
+    (void)send_and_drain(&b, "jz-zero-empty");
+    expect_absent_from(tc_buffer(&b.c), ma, "no PART echo for an empty JOIN 0",
+                       "PART #");
+    expect_absent_from(tc_buffer(&b.c), ma, "no error for an empty JOIN 0",
+                       " 403 ");
+
+    /* Not a bare 0: the list path answers, with 403 for the 0 element. */
+    mb = tc_received(&b.c);
+    client_send(&b, "JOIN 0,#jz0d");
+    (void)send_and_drain(&b, "jz-mixed");
+    expect_line(&b.c, "403 for the 0 element of a JOIN list",
+                ":irc.test 403 jzb 0 :No such channel\r\n");
+    expect_absent_from(tc_buffer(&b.c), mb, "no mass PART for JOIN 0,#jz0d",
+                       " PART #");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
 
 /* NAMES and LIST, on a channel and on one that does not exist, and the decision
  * that LIST enumerates channels the requester has not joined. */
@@ -1493,6 +1548,43 @@ static void test_mode(nf_node_t *node)
     (void)send_and_drain(&a, "m-oo-short");
     expect_line(&a.c, "461 when letters outnumber parameters",
                 ":irc.test 461 moa MODE :Not enough parameters\r\n");
+
+    tc_close(&a.c);
+    tc_close(&b.c);
+}
+/* MODE with surplus parameters answers 461 and changes nothing (issue #662).
+ * The exact shape still applies, as the control proves; the surplus window
+ * holds the 461 and no MODE echo -- every letter the loop applies announces
+ * itself with one, so no echo means no prefix of the request was applied. */
+static void test_mode_surplus(nf_node_t *node)
+{
+    client_t a;
+    client_t b;
+    size_t ma;
+
+    client_open(&a, node, "msa");
+    client_open(&b, node, "msb");
+    client_send(&a, "JOIN #ms");
+    (void)send_and_drain(&a, "ms-join-a");
+    client_send(&b, "JOIN #ms");
+    (void)send_and_drain(&b, "ms-join-b");
+
+    /* Exact shape first, as the control: b becomes an op. */
+    client_send(&a, "MODE #ms +o msb");
+    (void)send_and_drain(&a, "ms-exact");
+    expect_line(&a.c, "exact MODE +o applies",
+                ":msa!msa@127.0.0.1 MODE #MS +o msb\r\n");
+
+    /* Drain b as well: the +o echo above is fanned out to b asynchronously and
+       must not fall inside the surplus window below. */
+    (void)send_and_drain(&b, "ms-drain-b");
+    ma = tc_received(&b.c);
+    client_send(&b, "MODE #ms +v msa extra-garbage");
+    (void)send_and_drain(&b, "ms-surplus");
+    expect_line(&b.c, "461 for surplus MODE parameters",
+                ":irc.test 461 msb MODE :Not enough parameters\r\n");
+    expect_absent_from(tc_buffer(&b.c), ma, "surplus MODE applies nothing",
+                       " MODE #");
 
     tc_close(&a.c);
     tc_close(&b.c);
@@ -2381,9 +2473,11 @@ int main(void)
     test_part(&node);
     test_join_refuses_empty(&node);
     test_join_refuses_long_name(&node);
+    test_join_zero(&node);
     test_names_and_list(&node);
     test_list_names_truncation(&node);
     test_mode(&node);
+    test_mode_surplus(&node);
     test_user_mode(&node);
     test_long_roster_chunks(&node);
     test_reaper_leaves_channel(&node);
