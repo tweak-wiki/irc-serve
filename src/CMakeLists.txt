@@ -254,6 +254,9 @@ add_library(irc_core STATIC
   # #543 TU-52: 4.1's KICK (handle_kick() + chan_remote_by_nick()) split out of core/chan_verbs.c.
   # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
   core/chan_verbs_kick.c
+  # #543 TU-53: 4.1's MODE (handle_mode() + mode_refusal/ban helpers) split out of core/chan_verbs.c.
+  # Declared in core/chan_verbs.h; reached through it by commands_dispatch.c.
+  core/chan_verbs_mode.c
   core/msg_verbs.c
   # Phase 10.12: IRCv3 `batch`, the client-facing half -- the BATCH verb and the
   # `@`/`+` reference tags. It is a module of its own for the reason cap.c is: the
