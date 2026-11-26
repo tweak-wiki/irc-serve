@@ -202,7 +202,11 @@ not O(users), so it does not reintroduce per-join broadcast cost.
 **Ownership rules:**
 - First server to see a channel owns it. The creation race is broken by
   `(creation_epoch, server_name)`, higher wins; the loser re-keys to the
-  winner's origin. Both halves are single-node-testable in Phase 4.
+  winner's origin. Both halves are single-node-testable in Phase 4. The race
+  rule covers a live link only: while a peer link that was up is down again a
+  JOIN that would create a channel is refused with `437` (re-key on resync
+  collision is future work), and disposal of an empty channel this node
+  originated is delayed so a re-JOIN revives it instead of forking the name.
 - For an **owned** channel: apply joins/parts/topics locally, and forward to
   each peer in `servers[]`.
 - For a **non-owned** channel: forward the action to the owner. Verb-dependent —

@@ -1216,6 +1216,22 @@ int chan_origin_is_self(const server_t *s, const chan_t *ch)
     return (chan_origin_state(s, ch) == CHAN_ORIGIN_SELF) ? 1 : 0;
 }
 
+int chan_partitioned(const server_t *s)
+{
+    size_t i;
+
+    if (s == NULL || s->links == NULL) {
+        return 0;
+    }
+    for (i = 0; i < s->nlinks; i++) {
+        if (s->links[i].ever_established != 0 &&
+            s->links[i].state != (int)ESTABLISHED) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int chan_origin_wins(uint64_t a_epoch, const char *a_name,
                      uint64_t b_epoch, const char *b_name)
 {
@@ -1361,6 +1377,19 @@ int chan_dispose_if_empty(server_t *s, chan_t *ch)
      * check covers all of them, and a path that forgot it would dispose a channel
      * a returning client is about to be restored into. */
     if (resume_holds(s, ch->name)) {
+        return 0;
+    }
+    /* Issue #676: disposal of a channel THIS NODE ORIGINATED is DELAYED while
+     * partitioned, and this is the reason re-JOINs keep working across a flap.
+     * Creation of an unknown name is refused while partitioned (437), so a
+     * disposed own channel could never come back: every member that PARTed
+     * during the outage would stay out, and the channel would drain itself
+     * into nothing. Holding the empty shell means a re-JOIN revives the
+     * existing channel -- same origin, so the resync still converges -- and
+     * the establishment sweep (in fed_link_established) collects shells nobody
+     * revived once the mesh is whole. Foreign-origin channels are NOT held:
+     * this node is not their authority and nothing revives them. */
+    if (chan_origin_is_self(s, ch) != 0 && chan_partitioned(s) != 0) {
         return 0;
     }
     printf("[observable] chan_destroy: channel=%s reason=empty\n", ch->name);
