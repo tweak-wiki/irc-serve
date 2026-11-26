@@ -2085,12 +2085,15 @@ the other way round puts the label on two messages. `ACK` is `:srv ACK` with no
 parameters and **no grouping batch**, because it is the one response that is one line by
 definition.
 
-**PER DESTINATION, AND THE SPLIT IS THREE-WAY.** A client that negotiated gets the label,
-the `BATCH` and the `ACK`. A client that sent a `label=` **without** negotiating gets the
-**label only** — no `BATCH`, no `ACK`. The specification's own sentence is "Clients
-requesting this capability indicate that they are capable of handling the message tag,
-batch type, and ACK response", and a command word on the wire to a client that was never
-told to expect it is §4.4.3's objection applied to two verbs.
+**PER DESTINATION, AND THE SPLIT IS TWO-WAY.** A client that negotiated gets the label,
+the `BATCH` and the `ACK`. A client that sent a `label=` **without** negotiating gets
+**none of the three** -- no `label=`, no `BATCH`, no `ACK`. The inbound tag is ignored at
+intake (`label_begin_command()` returns before parsing unless the capability is enabled),
+because message-tags §4 + labeled-response §3.1 say the tag block a client receives must
+only contain tags it asked for (#725, fixed by #734). The specification's own sentence is
+"Clients requesting this capability indicate that they are capable of handling the message
+tag, batch type, and ACK response", and a command word on the wire to a client that was
+never told to expect it is §4.4.3's objection applied to two verbs.
 
 **A LABELLED COMMAND THAT PRODUCED NOTHING GETS `ACK`**, and the operational test is
 "produced no response" rather than "normally produces no response", because the distinction
