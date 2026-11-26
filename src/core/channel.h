@@ -997,6 +997,12 @@ int chan_origin_is_self(const server_t *s, const chan_t *ch);
  * file header for why. */
 chan_origin_state_t chan_origin_state(const server_t *s, const chan_t *ch);
 
+/* Whether this node is partitioned: a peer link that was ESTABLISHED and is
+ * not anymore (issue #676). 2.2's fail-closed creation and disposal rules both
+ * consult it, so it is ONE function in channel.c rather than a test each
+ * caller spells. */
+int chan_partitioned(const server_t *s);
+
 /* THE CREATION-RACE TIE-BREAK, as a pure function over the two pairs.
  *
  * 2.2: "First server to see a channel owns it. The creation race is broken by

@@ -466,6 +466,15 @@ typedef struct server_link {
      * generation's. */
     int      clean_leave;
 
+    /* ISSUE #676: WHETHER THIS LINK HAS EVER BEEN UP. Sticky: set the first
+     * time the link reaches ESTABLISHED and never cleared, because the
+     * question it answers is "did this node ever share a mesh with this
+     * peer" and a later outage does not un-ask it. JOIN-creation consults it
+     * (fail closed only across a real partition, never for a peer that was
+     * only ever configured), which is why it is a FIELD on the link rather
+     * than a scan over the dump log. */
+    int      ever_established;
+
     /* PHASE 9 ITEM 4, THE PROPAGATION HALF: the load figure this link's peer last
      * ADVERTISED, and whether T8 has already reported it as shedding.
      *

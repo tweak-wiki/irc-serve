@@ -187,6 +187,25 @@ static void fed_link_established(server_t *s, server_link_t *link, conn_t *c,
      * ordering to agree on because neither transaction depends on the other -- a
      * burst is a statement about the sender, and the sender's state does not
      * change because somebody received it. */
+    /* Issue #676: collect the empty own-origin shells the partition held.
+     * chan_dispose_if_empty() delays disposal of those while partitioned so a
+     * re-JOIN revives the existing channel instead of minting a second
+     * origin; once any link is whole again the shells nobody revived are
+     * garbage, and leaving them would pin cap slots. Backward over the
+     * registry, because detach shifts the tail down and only indices already
+     * visited move. Before the resync, so our own burst does not carry the
+     * shells it is about to drop. */
+    {
+        size_t i = server_chan_count(s);
+
+        while (i-- > 0u) {
+            chan_t *ch = server_chan_at(s, i);
+
+            if (ch != NULL) {
+                (void)chan_dispose_if_empty(s, ch);
+            }
+        }
+    }
     (void)federation_resync(s, link);
     /* AND IT ADVERTISES ITSELF, ONCE, HERE. The first ADVERTISE has to go out on
      * ESTABLISHMENT and not on the first interval tick, because a peer that has

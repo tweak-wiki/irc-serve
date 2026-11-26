@@ -691,6 +691,13 @@ irc_add_integration_test(test_failover_reconnect test_failover_reconnect.c)
 # is test_failover_reconnect's claim, not this one's.
 irc_add_integration_test(test_sync_state test_sync_state.c)
 
+# 2.2/issue #676: fail-closed creation while partitioned. A node with a
+# configured-but-never-established peer refuses a JOIN-create with 437 (the
+# orphan rule extended to creation) and leaves nothing behind, while a node
+# with no peers still creates. Its own file because the claim needs a
+# partitioned node and a solo one side by side on the wire.
+irc_add_integration_test(test_splitbrain_refuse test_splitbrain_refuse.c)
+
 # 2.1: the remote-nick registry, the scoped `nick@server` being ROUTED rather
 # than recognised, and rename-the-loser. Its own file because it is the only
 # feature whose claim is visible in FOUR places at once -- the renamed client's
