@@ -1201,6 +1201,20 @@ static void test_join_zero(nf_node_t *node)
     expect_absent_from(tc_buffer(&b.c), mb, "no mass PART for JOIN 0,#j0d",
                        " PART #J0C");
 
+    /* `JOIN 0,` is not a bare 0 either, even with #683's empty-skip: the raw
+     * param is "0,", so the list path 403s the 0 element and parts nothing. */
+    mb = tc_received(&b.c);
+    client_send(&b, "JOIN 0,");
+    (void)send_and_drain(&b, "j0-trailing");
+    expect_line(&b.c, "403 for the trailing-comma 0",
+                ":irc.test 403 j0mix 0 :No such channel\r\n");
+    expect_absent_from(tc_buffer(&b.c), mb, "no PART echo for JOIN 0,",
+                       " PART #");
+    client_send(&b, "NAMES #j0c");
+    (void)send_and_drain(&b, "j0-still-there");
+    expect_line(&b.c, "still a member after JOIN 0,",
+                ":irc.test 353 j0mix = #J0C @j0mix\r\n");
+
     tc_close(&a.c);
     tc_close(&b.c);
 }
