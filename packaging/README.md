@@ -202,7 +202,7 @@ The text checks below run anywhere, without any of the builders:
   `make -n` with a stub `dh` on `PATH`, and every `override_` it declares is a target
   debhelper 13 actually defines (an `override_` for a target `dh` lacks is silently
   ignored, so a typo there reads as policy and does nothing).
-* `packaging/arch/PKGBUILD`'s `pkgver` derivation **executes** and produces `0.8.0`.
+* `packaging/arch/PKGBUILD`'s `pkgver` derivation **executes** and produces `1.0.0`.
   It is executed rather than read, because a BSD-vs-GNU `sed` difference produces an
   empty match rather than an error.
 * `packaging/arch/PKGBUILD` is valid shell: `bash -n` passes.
