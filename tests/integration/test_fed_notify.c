@@ -13,7 +13,9 @@
  *      C's log shows the SAWAY it applied.
  *   4. INVITE by the owner on A reaches carol on C as an INVITE line, and B --
  *      which holds a member but no invitee -- logs the SINVITE it relayed.
- *   5. A FEDERATE naming irc-serve-0.1.0 is refused with BAD_VERSION and
+ *   5. INVITE to `carol@irc.c` reaches carol on C herself (#664): the 341 goes
+ *      to the inviter, the SINVITE crosses, C delivers, and no 401 is sent.
+ *   6. A FEDERATE naming irc-serve-0.1.0 is refused with BAD_VERSION and
  *      establishes nothing: the version bump is what keeps a 0.1.x node from
  *      misparsing the six-parameter SJOIN.
  *
@@ -289,10 +291,11 @@ static void case_invite_federates(void)
 
     setup_star(&a, &b, &c, &alice, &bob, &carol);
 
-    /* INVITE names a LOCAL user: a bare nick resolves only on its own node
-     * and the handler refuses anything else, so the invitee is dave, who is
-     * registered on A and is on no channel. What federates is the notify to
-     * the channel's members on the other nodes. */
+    /* INVITE names a LOCAL user here: a bare nick resolves only on its own
+     * node. (A `nick@server` names a remote user and is covered by the next
+     * case.) The invitee is dave, who is registered on A and is on no
+     * channel. What federates is the notify to the channel's members on the
+     * other nodes. */
     register_caps(&dave, a.port, "dave", NULL);
     drain(&dave);
 
@@ -327,7 +330,41 @@ static void case_invite_federates(void)
     teardown_star(&a, &b, &c, &alice, &bob, &carol);
 }
 
-/* 5. A 0.1.0 FEDERATE is refused before it can misparse the new shapes. */
+/* 5. INVITE to a `nick@server` reaches the invitee on their own node (#664). */
+static void case_invite_remote_user(void)
+{
+    nf_node_t a, b, c;
+    test_client_t alice, bob, carol;
+
+    setup_star(&a, &b, &c, &alice, &bob, &carol);
+
+    /* alice owns #T on A; carol is registered on C and the mesh roster holds
+     * her at irc.c, so A resolves `carol@irc.c` to a route instead of 401. */
+    TF_CHECK_MSG(tc_send(&alice, "INVITE carol@irc.c " CHAN) == 0,
+                 "alice's INVITE send failed");
+    TF_CHECK_MSG(tc_expect(&alice, " 341 ", T_IO_MS) == 0,
+                 "alice got no 341, so the remote INVITE was refused: %s",
+                 tc_buffer(&alice));
+    /* The invitee's own copy, delivered on C from the SINVITE -- the same
+     * `:inviter INVITE <target> <channel>` shape a local invite carries. */
+    TF_CHECK_MSG(tc_expect(&carol, ":alice!alice@127.0.0.1 INVITE carol " CHAN,
+                           T_IO_MS) == 0,
+                 "carol never saw alice's INVITE, so the SINVITE did not "
+                 "deliver it on C.\n  carol saw: %s",
+                 tc_buffer(&carol));
+    TF_CHECK_MSG(nf_expect(&c, "fed_sinvite: server=" NAME_A
+                               " channel=" CHAN " target=carol",
+                           T_IO_MS) == 0,
+                 "node C never applied the SINVITE: %s", c.out);
+    drain(&alice);
+    TF_CHECK_MSG(strstr(tc_buffer(&alice), " 401 ") == NULL,
+                 "alice was answered 401 for a held remote nick: %s",
+                 tc_buffer(&alice));
+
+    teardown_star(&a, &b, &c, &alice, &bob, &carol);
+}
+
+/* 6. A 0.1.0 FEDERATE is refused before it can misparse the new shapes. */
 static void case_old_version_refused(void)
 {
     nf_node_t a;
@@ -366,6 +403,7 @@ int main(void)
     case_setname_federates();
     case_away_federates();
     case_invite_federates();
+    case_invite_remote_user();
     case_old_version_refused();
     tf_done("fed_notify");
     return 0;

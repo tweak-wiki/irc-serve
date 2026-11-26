@@ -3003,10 +3003,12 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
 {
     const char *nick_arg;
     const char *chan_arg;
+    const char *invitee;
     chan_t *ch;
     fanout_target_t t;
     chan_verdict_t verdict;
     char prefix[CONN_HOSTMASK_MAX];
+    char nick[IRC_MAX_NICK + 1];
     const char *params[1];
 
     if (m->nparams != 2) {
@@ -3068,11 +3070,14 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
      * the same discipline every other emitter in the tree follows, and the
      * reason a second write path cannot grow here. A name that resolves to a
      * CHANNEL is 401: an invite names a person, and "no such nick" is the
-     * honest answer for a name that is not one. */
+     * honest answer for a name that is not one. A REMOTE_USER is a person too,
+     * on a server this node holds a link to (fanout_resolve refused every
+     * other shape of that already), so it proceeds: the mesh half below is
+     * what reaches them. */
     if (fanout_resolve(s, c, nick_arg, FANOUT_MESSAGE, &t) == 0) {
         return; /* 401 or 403 already sent */
     }
-    if (t.kind != FANOUT_LOCAL_USER) {
+    if (t.kind != FANOUT_LOCAL_USER && t.kind != FANOUT_REMOTE_USER) {
         (void)reply(s, c, "401", (const char *const[]){ t.name }, 1,
                     "No such nick/channel");
         printf("[observable] chan_invite_refused: nick=%s target=%s kind=%d "
@@ -3091,20 +3096,41 @@ void handle_invite(server_t *s, conn_t *c, const message_t *m)
      * its modes" and says nothing about suppressing the channel for somebody who
      * is already there, so the unconditional form is the one that is always
      * answerable by a client. */
-    params[0] = ch->name;
-    (void)fanout_deliver(s, &t, prefix, "INVITE", params, 1, NULL, NULL);
+    if (t.kind == FANOUT_REMOTE_USER) {
+        /* No local delivery: the invitee is not here, and INVITE has no
+         * targeted forward (SINVITE rides the mesh flood below, which the
+         * inbound half relays first and delivers from if the invitee is
+         * local there). t.name is `nick@server`, split at the LAST '@' per
+         * 2.1's scoped identity; the bare nick is what the 341, the notify
+         * and the SINVITE all name, because a `nick@server` in SINVITE's
+         * nickname parameter would be malformed on the receiving node. The
+         * holder lookup resolved this exact nick against the registry, so it
+         * fits a nick field. */
+        const char *at = strrchr(t.name, '@');
+        size_t nlen = (at != NULL) ? (size_t)(at - t.name) : strlen(t.name);
+        if (nlen >= sizeof nick) {
+            nlen = sizeof nick - 1;
+        }
+        memcpy(nick, t.name, nlen);
+        nick[nlen] = '\0';
+        invitee = nick;
+    } else {
+        params[0] = ch->name;
+        (void)fanout_deliver(s, &t, prefix, "INVITE", params, 1, NULL, NULL);
+        invitee = t.user->nick;
+    }
 
-    /* The inviter is told, and only the inviter. t.user->nick is the spelling
+    /* The inviter is told, and only the inviter. `invitee` is the spelling
      * the INVITEE chose (2.1: the registry folds the key and the display case is
      * the user's), so the 341 names them the way every other numeric does. */
-    (void)reply(s, c, "341", (const char *const[]){ ch->name, t.user->nick }, 2,
+    (void)reply(s, c, "341", (const char *const[]){ ch->name, invitee }, 2,
                 "%s has invited you to channel %s", c->nick, ch->name);
-    notify_invite(s, c, ch, prefix, t.user->nick);
+    notify_invite(s, c, ch, prefix, invitee);
     /* Originated SINVITE: the mesh half of this invite. The inviter's hostmask
      * rides as the prefix because the inbound half delivers from it. */
-    { const char *sip[2]; sip[0] = ch->name; sip[1] = t.user->nick; (void)fed_forward_all(s, "SINVITE", prefix, sip, 2); }
+    { const char *sip[2]; sip[0] = ch->name; sip[1] = invitee; (void)fed_forward_all(s, "SINVITE", prefix, sip, 2); }
     printf("[observable] chan_invite: channel=%s by=%s target=%s\n", ch->name,
-           c->nick, t.user->nick);
+           c->nick, invitee);
 }
 
 /* ---------------------------------------------------------------------------
