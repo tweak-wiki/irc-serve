@@ -1,3 +1,13 @@
+irc-serve (1.0.0-1) unstable; urgency=medium
+
+  * First stable release: 0.8.0's federation paths plus the audit backlog
+  * (SASL refusal flush, CHOPER/INVITE resolution, channel-verb hardening),
+  * IRCv3 compliance sweep, binary release artifacts (linux-x64 + macos-arm64
+  * x TLS on/off), and a fixed fed-staging deploy pipeline. No wire change
+  * since 0.8.0.
+
+ -- TheFirstIstari <euphonium.ashe.f@gmail.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
 irc-serve (0.8.0-1) unstable; urgency=medium
 
   * Federation-integration release: actor echo on forwarded state changes

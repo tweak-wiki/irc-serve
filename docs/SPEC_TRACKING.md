@@ -163,9 +163,9 @@ All rows verified in `src/core/commands.c` (566 lines), `src/core/reply.c`
 
 ```
 :irc.test 001 good :Welcome to the irc-serve network good!u@127.0.0.1
-:irc.test 002 good :Your host is irc.test, running version irc-serve-0.8.0
+:irc.test 002 good :Your host is irc.test, running version irc-serve-1.0.0
 :irc.test 003 good :This server was created Mon Sep 28 19:29:13 2026 (UTC)
-:irc.test 004 good irc.test irc-serve-0.8.0 i b,k,l,imnpst :are supported by this server
+:irc.test 004 good irc.test irc-serve-1.0.0 i b,k,l,imnpst :are supported by this server
 :irc.test 005 good NETWORK=irc-serve CHANTYPES=#& PREFIX=(ov)@+ CASEMAPPING=ascii NICKLEN=63 :are supported by this server
 :irc.test 372 good :- irc-serve: a federation-native IRC node.
 :irc.test 372 good :- this build answers PASS, NICK, USER, MOTD, PING, PONG and QUIT.
