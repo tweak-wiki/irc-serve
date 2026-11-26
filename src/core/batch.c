@@ -455,31 +455,40 @@ void handle_batch(server_t *s, conn_t *c, const message_t *m)
                    c->fd, tlen, CONN_MAX_BATCH_TYPE);
             return;
         }
-        /* `UNKNOWN_TYPE` IS NOT SENT, and this is where the argument belongs.
+        /* `UNKNOWN_TYPE` IS SENT FOR ONE TYPE, and this is where the argument belongs.
          *
-         * `client-batch` defines the code as "the batch type is not recognized by the
-         * server, all past and future messages in this batch will be ignored", and its
-         * remedy is IGNORING the batch. This node does not ignore it: the framing is
-         * TYPE-AGNOSTIC -- a batch here means "tag the lines this connection sends",
-         * and that is true whatever the type is called -- so there is no type it
-         * handles differently and therefore nothing to ignore.
+         * Every OTHER type is still accepted type-agnostically: the framing here means
+         * "tag the lines this connection sends", which is true whatever the type is
+         * called, and `client-batch` is "designed as a framework for other
+         * specifications" -- a framework with no types is exactly what this node has.
          *
-         * THE SAME DOCUMENT SAYS WHY THAT IS THE RIGHT SHAPE: it "does not introduce
-         * any client-to-server batch type, but is designed as a framework for other
-         * specifications". A framework with no types is exactly what this node has.
+         * `draft/multiline` is the exception because accepting it is a LIE about
+         * delivery, not framing. Its contract is concatenation: the parts inside the
+         * batch are ONE logical message, delivered once with
+         * `draft/multiline-concat`. This node has no concatenation and no
+         * `max-bytes`/`max-lines` accounting, so an accepted multiline batch would
+         * deliver the parts as ordinary separate PRIVMSGs while the sender believes
+         * one message went out -- the exact symptom of #726. A refused client knows
+         * its type is unsupported and can fall back; an accepted one cannot.
          *
-         * THE COST, stated rather than discovered: a client that opens a
-         * `draft/multiline` batch and is refused `UNKNOWN_TYPE` learns its type is
-         * unsupported; a client that is ACCEPTED gets its lines delivered as ordinary
-         * commands inside a batch, with no concatenation and no `max-bytes`/`max-lines`
-         * accounting. For `draft/multiline` specifically those are the same
-         * observable result -- the lines arrive, separately -- so the difference is
-         * that the client is not told. It is told in the `batch_open:` observable line,
-         * and `draft/multiline` is a phase this node has not reached.
+         * So the rule is: a type this node would have to INTERPRET to deliver
+         * honestly, and cannot, is refused; a type that needs no interpretation is
+         * framing. Today that is exactly the `draft/multiline` family, matched by
+         * prefix so `draft/multiline-...` variants go the same way. Concat itself
+         * is a future feature, not a second branch here.
          *
-         * THE TYPE IS STORED ANYWAY, so the log can say which one was declared and so a
-         * future type has somewhere to be read from. Nothing branches on it, and
-         * CONN_MAX_BATCH_TYPE says so at the constant. */
+         * THE REFUSAL SHAPE: `reply_refused()` with `UNKNOWN_TYPE` -- a
+         * `standard-replies` client reads `FAIL BATCH UNKNOWN_TYPE`, a legacy client
+         * reads `417`, byte-identically to the unacceptable-type refusal above.
+         * Nothing is stored and no batch opens, so the parts that follow are
+         * ordinary commands outside any batch and `BATCH -ref` finds nothing open. */
+        if (strncmp(m->params[1], "draft/multiline", (size_t)15) == 0) {
+            (void)reply_refused(s, c, "BATCH", "UNKNOWN_TYPE", "417", NULL, 0,
+                                "Batch type is not supported");
+            printf("[observable] batch_refused: fd=%d reason=UNKNOWN_TYPE type=%s\n",
+                   c->fd, m->params[1]);
+            return;
+        }
         /* ONE AT A TIME, and the cost is named rather than treated as free: the
          * specification's own client-side model is a flat one -- open, send, close --
          * and `draft/multiline`, the reason this exists, opens ONE batch per message
