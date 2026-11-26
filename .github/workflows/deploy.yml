@@ -172,9 +172,14 @@ jobs:
           # not in the sudoers allowlist, and the hand-install already
           # enabled both units.
           RESTART_TS=$(date +%s)
+          # `restart` returns once the process forks, not once it listens
+          # (Type=simple): poll for the port before the protocol check, or
+          # the health check races the bind and fails the deploy.
           sudo systemctl restart irc-serve-fed-b
+          for i in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/6669) 2>/dev/null && break || sleep 1; done
           ./scripts/irc-health-check.sh 127.0.0.1 6669
           sudo systemctl restart irc-serve-fed-a
+          for i in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/6668) 2>/dev/null && break || sleep 1; done
           # Protocol-level per node, not bare connects (#531).
           for port in 6668 6669; do
             ./scripts/irc-health-check.sh 127.0.0.1 "$port"
