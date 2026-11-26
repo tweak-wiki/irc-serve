@@ -44,8 +44,14 @@ jobs:
         if: matrix.tls == 'ON' && matrix.runner == 'linux-x64'
         run: |
           set -euo pipefail
-          sudo -n apt-get update -qq
-          sudo -n apt-get install -y --no-install-recommends libssl-dev
+          # Same guard as ci.yml: the self-hosted fleet is Arch (headers
+          # preinstalled); only apt images need the install, and sudo -n
+          # fails where no NOPASSWD rule exists.
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo -n apt-get update -qq
+            sudo -n apt-get install -y --no-install-recommends libssl-dev
+          fi
+          openssl version
       - name: Install OpenSSL (TLS=ON, macOS only)
         if: matrix.tls == 'ON' && matrix.runner == 'macos-arm64'
         run: |
@@ -86,7 +92,7 @@ jobs:
           mkdir -p "dist/$name"
           cp build/src/irc-serve "dist/$name/"
           cp LICENSE NOTICE "dist/$name/" 2>/dev/null || cp LICENSE "dist/$name/"
-          (cd dist && tar czf "$name.tar.gz" "$name" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          (cd dist && tar czf "$name.tar.gz" "$name" && (sha256sum "$name.tar.gz" 2>/dev/null || shasum -a 256 "$name.tar.gz") > "$name.tar.gz.sha256")
           ls -la dist/
           echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
           echo "CHECKSUM=$name.tar.gz.sha256" >> "$GITHUB_ENV"
