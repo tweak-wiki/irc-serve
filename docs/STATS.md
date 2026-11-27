@@ -2,7 +2,7 @@
 
 # Project status
 
-Generated `2026-11-26T13:19:59Z` from commit `12b7ce4` by
+Generated `2026-11-27T12:23:14Z` from commit `0a4ff98` by
 [stats.yml](../../blob/main/.github/workflows/stats.yml).
 
 ## Test suite
